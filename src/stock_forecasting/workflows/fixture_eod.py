@@ -369,6 +369,7 @@ class FixtureEodWorkflow:
         serving_assignment_id = version_id("serving-assignment", serving_assignment_payload)
 
         predictions = self._forecaster.predict(feature_snapshot)
+        selected_session_ids = set(selection.session_ids)
         calendar_projection = {
             "exchange": market_batch.market,
             "timezone": market_batch.timezone,
@@ -378,8 +379,10 @@ class FixtureEodWorkflow:
             "closure_dates": list(market_batch.closure_dates) if calendar_available else [],
             "half_day_session_ids": [
                 session.session_id
-                for session in selection.sessions
-                if calendar_available and session.session_kind == "half_day"
+                for session in market_batch.calendar.sessions
+                if calendar_available
+                and session.session_id in selected_session_ids
+                and session.session_kind == "half_day"
             ],
             "revision_ids": list(market_batch.calendar_revision_ids) if calendar_available else [],
             "session_time_examples": (

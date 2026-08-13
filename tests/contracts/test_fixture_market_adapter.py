@@ -211,3 +211,15 @@ def test_company_action_payload_and_adjustment_share_one_typed_spec() -> None:
         {"session_id": "XNAS:2026-01-30", "adjusted_close": "100.00"},
         {"session_id": "XNAS:2026-02-02", "adjusted_close": "100.00"},
     ]
+
+
+def test_provider_batch_rejects_selection_calendar_fact_mismatch() -> None:
+    batch = XnasFixtureMarketAdapter().load(datetime(2026, 8, 12, 22, tzinfo=UTC))
+    first, *remaining = batch.selection.sessions
+    mismatched_selection = replace(
+        batch.selection,
+        sessions=(replace(first, session_kind="half_day"), *remaining),
+    )
+
+    with pytest.raises(ValueError, match="fixture_selection_calendar_fact_mismatch"):
+        replace(batch, selection=mismatched_selection)

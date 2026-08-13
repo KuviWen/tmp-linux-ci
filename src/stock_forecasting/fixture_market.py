@@ -214,9 +214,18 @@ class FixtureMarketBatch:
     def __post_init__(self) -> None:
         if self.calendar.exchange != self.market:
             raise ValueError("fixture_calendar_market_mismatch")
-        calendar_session_ids = {session.session_id for session in self.calendar.sessions}
+        calendar_sessions = {session.session_id: session for session in self.calendar.sessions}
+        calendar_session_ids = set(calendar_sessions)
         if not set(self.selection.session_ids).issubset(calendar_session_ids):
             raise ValueError("fixture_selection_outside_calendar")
+        for selected in self.selection.sessions:
+            calendar = calendar_sessions[selected.session_id]
+            if (
+                selected.session_kind != calendar.session_kind
+                or selected.open_at != calendar.open_at
+                or selected.close_at != calendar.close_at
+            ):
+                raise ValueError("fixture_selection_calendar_fact_mismatch")
         if self.company_action.effective_session_id not in calendar_session_ids:
             raise ValueError("fixture_company_action_outside_calendar")
 
