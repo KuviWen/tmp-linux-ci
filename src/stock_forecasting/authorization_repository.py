@@ -15,7 +15,10 @@ from stock_forecasting.authorization import (
     SecurityContext,
     SourceEntitlement,
     SourcePolicyVersion,
+    action_grant_version_payload,
     build_fixture_authorization_policy,
+    source_entitlement_version_payload,
+    source_policy_version_payload,
 )
 from stock_forecasting.platform.state_store import StateStore
 
@@ -26,10 +29,6 @@ FIXTURE_REVOKED_POLICY_SET = "fixture-revoked-v1"
 FIXTURE_PURPOSE_REMOVED_POLICY_SET = "fixture-purpose-removed-v1"
 FIXTURE_GRANT_MISSING_POLICY_SET = "fixture-grant-missing-v1"
 FIXTURE_POLICY_UNKNOWN_SET = "fixture-policy-unknown-v1"
-
-
-def _instant(value: datetime) -> str:
-    return value.isoformat().replace("+00:00", "Z")
 
 
 def _parse_instant(value: object) -> datetime:
@@ -43,43 +42,12 @@ def _parse_instant(value: object) -> datetime:
 
 def _policy_payload(policy: AuthorizationPolicy) -> dict[str, Any]:
     return {
-        "action_grants": [
-            {
-                "version_id": grant.version_id,
-                "principal_id": grant.principal_id,
-                "actions": sorted(grant.actions),
-                "environment": grant.environment,
-                "valid_from": _instant(grant.valid_from),
-                "valid_to": _instant(grant.valid_to),
-            }
-            for grant in policy.action_grants
-        ],
+        "action_grants": [action_grant_version_payload(grant) for grant in policy.action_grants],
         "source_policies": [
-            {
-                "version_id": source_policy.version_id,
-                "dataset_id": source_policy.dataset_id,
-                "allowed_actions": sorted(source_policy.allowed_actions),
-                "purposes": sorted(source_policy.purposes),
-                "environments": sorted(source_policy.environments),
-                "data_protection_class": source_policy.data_protection_class,
-                "resource_states": sorted(source_policy.resource_states),
-                "valid_from": _instant(source_policy.valid_from),
-                "valid_to": _instant(source_policy.valid_to),
-            }
-            for source_policy in policy.source_policies
+            source_policy_version_payload(source_policy) for source_policy in policy.source_policies
         ],
         "source_entitlements": [
-            {
-                "version_id": entitlement.version_id,
-                "principal_id": entitlement.principal_id,
-                "dataset_id": entitlement.dataset_id,
-                "status": entitlement.status,
-                "allowed_actions": sorted(entitlement.allowed_actions),
-                "purposes": sorted(entitlement.purposes),
-                "environments": sorted(entitlement.environments),
-                "valid_from": _instant(entitlement.valid_from),
-                "valid_to": _instant(entitlement.valid_to),
-            }
+            source_entitlement_version_payload(entitlement)
             for entitlement in policy.source_entitlements
         ],
     }

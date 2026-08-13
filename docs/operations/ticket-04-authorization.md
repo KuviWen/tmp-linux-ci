@@ -6,6 +6,10 @@ synthetic fixture evidence and are not formal predictions or licensed production
 ## Runtime contract
 
 The Compose project publishes PostgreSQL, REST/UI, and Dagster only on host loopback addresses.
+Uvicorn itself binds only to container loopback. A pinned Nginx ingress shares the API network
+namespace, publishes the host-loopback port, and forwards to Uvicorn over `127.0.0.1`; therefore
+the verifier receives the real direct peer at its trust boundary instead of a configurable host
+value. The revoked acceptance API uses the same arrangement on its private port.
 `local-key-init` creates one ephemeral API-key file in the `local-api-key` named volume before
 the API, Dagster code location, relay, or acceptance runner starts. The key is owned by
 `local-researcher`, limited to the fixture pipeline and research-read scopes, valid only in the
@@ -34,7 +38,7 @@ and 8000. From the repository root:
 
 ```console
 docker compose config --quiet
-docker compose --profile acceptance up --build --wait postgres api denied-api dagster-code denied-dagster-code dagster-webserver dagster-daemon
+docker compose --profile acceptance up --build --wait postgres api api-ingress denied-api denied-api-ingress dagster-code denied-dagster-code dagster-webserver dagster-daemon
 docker compose --profile acceptance run --rm acceptance
 ```
 

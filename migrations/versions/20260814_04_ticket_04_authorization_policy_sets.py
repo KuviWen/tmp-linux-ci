@@ -14,6 +14,10 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.add_column(
+        "serving_research_records",
+        sa.Column("authorization_dataset_id", sa.String(length=128), nullable=True),
+    )
     op.create_table(
         "authorization_policy_sets",
         sa.Column("policy_set_id", sa.String(length=128), nullable=False),
@@ -26,3 +30,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("authorization_policy_sets")
+    op.drop_column("serving_research_records", "authorization_dataset_id")

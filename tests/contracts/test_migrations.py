@@ -135,5 +135,8 @@ def test_ticket_04_upgrade_adds_structured_authorization_audit_evidence(
     }
     assert columns["authorization"]["nullable"] is True
     assert {
+        column["name"] for column in inspect(engine).get_columns("serving_research_records")
+    } >= {"authorization_dataset_id"}
+    assert {
         column["name"] for column in inspect(engine).get_columns("authorization_policy_sets")
     } == {"policy_set_id", "principal_id", "content_digest", "payload"}

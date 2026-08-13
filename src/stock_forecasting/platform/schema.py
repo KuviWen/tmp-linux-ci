@@ -9,6 +9,7 @@ research_records = Table(
     metadata,
     Column("record_id", String(36), primary_key=True),
     Column("listing_id", String(36), nullable=False),
+    Column("authorization_dataset_id", String(128), nullable=True),
     Column("information_cutoff", String(32), nullable=False),
     Column("execution_purpose", String(32), nullable=False),
     Column("fixture_scenario", String(32), nullable=False),

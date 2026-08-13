@@ -40,6 +40,10 @@ def test_active_entitlements_allow_both_fixture_sources_through_the_public_workf
             information_cutoff=cutoff,
         )
         authorization = research["source_evidence"]["authorization"]
+        source_policy = research["source_evidence"]["source_policy"]
+        assert source_policy["version_id"] == outcome.source_policy_version_id
+        assert source_policy["valid_from"] == "2026-08-12T21:59:00Z"
+        assert source_policy["valid_to"] == "2026-08-13T22:00:00Z"
         assert authorization["decision"] == "allow"
         assert authorization["reason_code"] == "authorized"
         assert authorization["grant_version_id"]
@@ -266,6 +270,45 @@ def test_repeated_authorization_evaluations_are_append_only_not_deduplicated() -
     assert {event["decision_id"] for event in events} == {first.decision_id}
 
 
+def test_missing_listing_is_denied_before_protected_state_lookup() -> None:
+    cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
+    application = build_test_application(
+        observed_at=cutoff,
+        entitlement_states={"XTAI": "revoked"},
+    )
+    trace_id = "trace-ticket-04-missing-listing-denied"
+
+    outcome = application.research_query.get_listing_research(
+        listing_id="missing-listing",
+        information_cutoff=cutoff,
+        trace_id=trace_id,
+    )
+
+    assert isinstance(outcome, PolicyDeniedOutcome)
+    assert application.security_audit.list_events(trace_id=trace_id)[0]["reason_code"] == (
+        "source_entitlement_revoked"
+    )
+
+
+def test_empty_prediction_collection_is_denied_before_protected_state_lookup() -> None:
+    cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
+    application = build_test_application(
+        observed_at=cutoff,
+        entitlement_states={"XTAI": "revoked"},
+    )
+    trace_id = "trace-ticket-04-empty-predictions-denied"
+
+    outcome = application.research_query.list_predictions(
+        execution_purpose="production",
+        trace_id=trace_id,
+    )
+
+    assert isinstance(outcome, PolicyDeniedOutcome)
+    assert application.security_audit.list_events(trace_id=trace_id)[0]["reason_code"] == (
+        "source_entitlement_revoked"
+    )
+
+
 def test_rest_and_ui_return_only_stable_denial_problem_while_audit_keeps_reason(
     tmp_path: Path,
 ) -> None:
@@ -307,6 +350,25 @@ def test_rest_and_ui_return_only_stable_denial_problem_while_audit_keeps_reason(
     assert (
         denied_application.security_audit.list_events(trace_id="trace-ticket-04-rest-missing-key")
         == []
+    )
+
+    non_loopback_trace = "trace-ticket-04-rest-non-loopback"
+    non_loopback = client.get(
+        "/api/v1/research/listings/" + outcome.listing_id,
+        params={"information_cutoff": cutoff_text},
+        headers={
+            "Authorization": active_application.local_identity.credential.authorization_header(),
+            "X-Trace-Id": non_loopback_trace,
+        },
+    )
+    assert non_loopback.status_code == 401
+    assert non_loopback.json()["code"] == "authentication_required"
+    assert denied_application.security_audit.list_events(trace_id=non_loopback_trace) == []
+    client.close()
+
+    client = TestClient(
+        create_web_app(denied_application),
+        client=("127.0.0.1", 50000),
     )
 
     trace_id = "trace-ticket-04-rest-denied"

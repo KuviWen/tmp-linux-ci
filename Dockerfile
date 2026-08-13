@@ -20,4 +20,4 @@ RUN mkdir -p /var/lib/stock-forecasting/objects /var/lib/dagster /run/stock-fore
 
 USER app
 
-CMD ["uvicorn", "stock_forecasting.asgi:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "stock_forecasting.asgi:app", "--host", "127.0.0.1", "--port", "8000"]

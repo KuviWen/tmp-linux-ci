@@ -159,6 +159,8 @@ def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> No
         "environments": ["development"],
         "data_protection_class": "internal",
         "resource_states": ["active"],
+        "valid_from": "2026-08-12T07:02:00Z",
+        "valid_to": "2026-08-13T07:03:00Z",
     }
     assert evidence["coverage"] == {
         "status": "completed",

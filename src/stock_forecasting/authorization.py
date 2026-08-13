@@ -413,6 +413,47 @@ def _instant(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def action_grant_version_payload(grant: ActionGrant) -> dict[str, object]:
+    return {
+        "version_id": grant.version_id,
+        "principal_id": grant.principal_id,
+        "actions": sorted(grant.actions),
+        "environment": grant.environment,
+        "valid_from": _instant(grant.valid_from),
+        "valid_to": _instant(grant.valid_to),
+    }
+
+
+def source_policy_version_payload(policy: SourcePolicyVersion) -> dict[str, object]:
+    return {
+        "version_id": policy.version_id,
+        "dataset_id": policy.dataset_id,
+        "allowed_actions": sorted(policy.allowed_actions),
+        "purposes": sorted(policy.purposes),
+        "environments": sorted(policy.environments),
+        "data_protection_class": policy.data_protection_class,
+        "resource_states": sorted(policy.resource_states),
+        "valid_from": _instant(policy.valid_from),
+        "valid_to": _instant(policy.valid_to),
+    }
+
+
+def source_entitlement_version_payload(
+    entitlement: SourceEntitlement,
+) -> dict[str, object]:
+    return {
+        "version_id": entitlement.version_id,
+        "principal_id": entitlement.principal_id,
+        "dataset_id": entitlement.dataset_id,
+        "status": entitlement.status,
+        "allowed_actions": sorted(entitlement.allowed_actions),
+        "purposes": sorted(entitlement.purposes),
+        "environments": sorted(entitlement.environments),
+        "valid_from": _instant(entitlement.valid_from),
+        "valid_to": _instant(entitlement.valid_to),
+    }
+
+
 def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, str | None]:
     return {
         "evaluation_id": decision.evaluation_id,
@@ -440,6 +481,38 @@ class AuthorizationPolicy:
     action_grants: tuple[ActionGrant, ...]
     source_policies: tuple[SourcePolicyVersion, ...]
     source_entitlements: tuple[SourceEntitlement, ...]
+
+    def publication_version_evidence(
+        self,
+        decision: AuthorizationDecision,
+    ) -> dict[str, dict[str, object]]:
+        if (
+            not decision.allowed
+            or decision.grant_version_id is None
+            or decision.source_policy_version_id is None
+            or decision.source_entitlement_version_id is None
+        ):
+            raise ValueError("allowed_authorization_versions_required")
+        grants = tuple(
+            grant for grant in self.action_grants if grant.version_id == decision.grant_version_id
+        )
+        policies = tuple(
+            policy
+            for policy in self.source_policies
+            if policy.version_id == decision.source_policy_version_id
+        )
+        entitlements = tuple(
+            entitlement
+            for entitlement in self.source_entitlements
+            if entitlement.version_id == decision.source_entitlement_version_id
+        )
+        if len(grants) != 1 or len(policies) != 1 or len(entitlements) != 1:
+            raise ValueError("authorization_version_evidence_inconsistent")
+        return {
+            "action_grant": action_grant_version_payload(grants[0]),
+            "source_policy": source_policy_version_payload(policies[0]),
+            "source_entitlement": source_entitlement_version_payload(entitlements[0]),
+        }
 
     def evaluate(
         self,

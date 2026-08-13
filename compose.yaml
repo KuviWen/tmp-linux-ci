@@ -116,7 +116,7 @@ services:
     environment:
       <<: *application-environment
       AUTHORIZATION_POLICY_SET_ID: fixture-revoked-v1
-    command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "0.0.0.0", "--port", "8001"]
+    command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "127.0.0.1", "--port", "8001"]
     depends_on:
       migration:
         condition: service_completed_successfully
@@ -136,13 +136,28 @@ services:
       timeout: 3s
       retries: 30
 
+  denied-api-ingress:
+    image: nginx:1.29.1-alpine
+    profiles: ["acceptance"]
+    network_mode: service:denied-api
+    volumes:
+      - ./docker/nginx/denied-api-loopback.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      denied-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/livez"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   api:
     <<: *application
     build:
       context: .
-    command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "127.0.0.1", "--port", "8000"]
     ports:
-      - '127.0.0.1:8000:8000'
+      - '127.0.0.1:8000:8080'
     depends_on:
       migration:
         condition: service_completed_successfully
@@ -158,6 +173,20 @@ services:
         - python
         - -c
         - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api-ingress:
+    image: nginx:1.29.1-alpine
+    network_mode: service:api
+    volumes:
+      - ./docker/nginx/api-loopback.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/livez"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -313,13 +342,15 @@ services:
       - --observed-at
       - *fixture-collection-observed-at
       - --base-url
-      - http://api:8000
+      - http://api:8080
       - --dagster-url
       - http://dagster-webserver:3000/graphql
       - --denied-base-url
-      - http://denied-api:8001
+      - http://denied-api:8081
     depends_on:
       api:
+        condition: service_healthy
+      api-ingress:
         condition: service_healthy
       dagster-code:
         condition: service_healthy
@@ -336,6 +367,8 @@ services:
       database-grants:
         condition: service_completed_successfully
       denied-api:
+        condition: service_healthy
+      denied-api-ingress:
         condition: service_healthy
 
 volumes:

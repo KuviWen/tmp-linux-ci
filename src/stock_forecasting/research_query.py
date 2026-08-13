@@ -29,9 +29,9 @@ class ResearchQuery:
         self._authorization_policy = authorization_policy
         self._authorization_time = authorization_time
 
-    def _authorize_record(
+    def _authorize_dataset(
         self,
-        record: dict[str, Any],
+        dataset_id: str,
         *,
         trace_id: str,
         security_context: SecurityContext,
@@ -40,7 +40,7 @@ class ResearchQuery:
             security_context,
             OperationIntent(
                 action="research_prediction.read",
-                dataset_id=fixture_dataset_id(str(record["calendar"]["exchange"])),
+                dataset_id=dataset_id,
                 purpose="fixture_research",
                 environment=security_context.environment,
                 resource_state="active",
@@ -68,6 +68,26 @@ class ResearchQuery:
         security_context: SecurityContext | None = None,
     ) -> dict[str, Any] | PolicyDeniedOutcome:
         expected_cutoff = information_cutoff.isoformat().replace("+00:00", "Z")
+        resolved_trace_id = trace_id or f"trace-research-{uuid4()}"
+        resolved_security_context = security_context or self._security_context
+        authorization_dataset_id = self._state_store.get_listing_authorization_dataset(
+            listing_id=listing_id,
+            information_cutoff=expected_cutoff,
+            fixture_scenario=fixture_scenario,
+        )
+        datasets = (
+            (authorization_dataset_id,)
+            if authorization_dataset_id is not None
+            else tuple(fixture_dataset_id(market) for market in ("XTAI", "XNAS"))
+        )
+        for dataset_id in datasets:
+            denial = self._authorize_dataset(
+                dataset_id,
+                trace_id=resolved_trace_id,
+                security_context=resolved_security_context,
+            )
+            if denial is not None:
+                return denial
         record = self._state_store.get_listing_research(
             listing_id=listing_id,
             information_cutoff=expected_cutoff,
@@ -75,13 +95,6 @@ class ResearchQuery:
         )
         if record is None:
             raise KeyError(listing_id)
-        denial = self._authorize_record(
-            record,
-            trace_id=trace_id or f"trace-research-{uuid4()}",
-            security_context=security_context or self._security_context,
-        )
-        if denial is not None:
-            return denial
         return record
 
     def list_predictions(
@@ -91,14 +104,13 @@ class ResearchQuery:
         trace_id: str | None = None,
         security_context: SecurityContext | None = None,
     ) -> list[dict[str, Any]] | PolicyDeniedOutcome:
-        records = self._state_store.list_research_records(execution_purpose=execution_purpose)
         resolved_trace_id = trace_id or f"trace-research-{uuid4()}"
-        for record in records:
-            denial = self._authorize_record(
-                record,
+        for market in ("XTAI", "XNAS"):
+            denial = self._authorize_dataset(
+                fixture_dataset_id(market),
                 trace_id=resolved_trace_id,
                 security_context=security_context or self._security_context,
             )
             if denial is not None:
                 return denial
-        return records
+        return self._state_store.list_research_records(execution_purpose=execution_purpose)

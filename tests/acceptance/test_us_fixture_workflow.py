@@ -136,6 +136,8 @@ def test_xnas_fixture_uses_the_shared_eod_research_contract() -> None:
         "environments": ["development"],
         "data_protection_class": "internal",
         "resource_states": ["active"],
+        "valid_from": "2026-08-12T21:54:00Z",
+        "valid_to": "2026-08-13T21:55:00Z",
     }
     assert research["source_evidence"]["coverage"]["last_session_id"] == "XNAS:2026-08-12"
     assert research["source_evidence"]["committed_checkpoint"] == "xnas-fixture-page:1"

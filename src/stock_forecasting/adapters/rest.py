@@ -185,12 +185,17 @@ def create_web_app(application: Application) -> FastAPI:
         )
 
     def authenticate_research_request(
+        request: Request,
         authorization: str | None = Header(default=None, alias="Authorization"),
     ) -> SecurityContext:
         if authorization is None:
             raise HTTPException(status_code=401, detail="authentication_required")
         try:
-            return application.authenticate_local_request(authorization)
+            client_host = request.client.host if request.client is not None else ""
+            return application.authenticate_local_request(
+                authorization,
+                client_host=client_host,
+            )
         except IdentityVerificationError as error:
             raise HTTPException(
                 status_code=401,

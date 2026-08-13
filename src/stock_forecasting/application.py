@@ -103,10 +103,12 @@ class Application:
     def authenticate_local_request(
         self,
         authorization_header: str,
+        *,
+        client_host: str,
     ) -> SecurityContext:
         return self.local_identity.verifier.authenticate(
             authorization_header,
-            client_host=self.public_bind_host,
+            client_host=client_host,
             environment=self.security_context.environment,
             authenticated_at=self._fixed_security_time or datetime.now(UTC),
         )

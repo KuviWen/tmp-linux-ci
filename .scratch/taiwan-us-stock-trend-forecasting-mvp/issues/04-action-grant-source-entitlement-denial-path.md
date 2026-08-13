@@ -31,10 +31,13 @@ Status: ready-for-agent
   逐次 append，不因重試去重。
 - 授權 policy set 由 PostgreSQL 中的 immutable repository 提供，runtime 僅選擇明確版本；
   allow audit 與研究／預測／outbox publication 在同一資料庫交易提交，deny audit 則獨立保存。
+- 研究 projection 先由不含 payload 的 authorization dataset metadata 取得授權目標，授權通過後
+  才讀取受保護 record；缺失 listing 與空集合也會先產生 fail-closed decision。REST 使用實際
+  request peer 驗證 local key；Compose 由同 network namespace 的 loopback ingress 對外映射。
 - Compose 將 migration 與 policy bootstrap 留給 `postgres` 管理角色；執行中服務使用
   non-superuser `stock`，且對 `authorization_policy_sets` 僅有讀取權。部署 acceptance 會查詢
   PostgreSQL 的實際 role privilege。
-- 驗證：`python -m pytest -q`（108 passed、1 個需外部 PostgreSQL 的 integration test
+- 驗證：`python -m pytest -q`（110 passed、1 個需外部 PostgreSQL 的 integration test
   skipped）、`python -m mypy src tests`、`python -m ruff check .`、
   `python -m ruff format --check .`、ticket-04 acceptance runner，以及 Alembic upgrade 均通過。
 - 本機沒有 Docker executable，因此本次未執行 Compose clean-container／PostgreSQL acceptance；

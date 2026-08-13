@@ -138,20 +138,8 @@ class FixtureEodWorkflow:
                 trace_id=command.trace_id,
             )
             return PolicyDeniedOutcome.from_decision(authorization_decision)
-        source_policy = next(
-            policy
-            for policy in self._authorization_policy.source_policies
-            if policy.version_id == authorization_decision.source_policy_version_id
-        )
-        source_entitlement = next(
-            entitlement
-            for entitlement in self._authorization_policy.source_entitlements
-            if entitlement.version_id == authorization_decision.source_entitlement_version_id
-        )
-        action_grant = next(
-            grant
-            for grant in self._authorization_policy.action_grants
-            if grant.version_id == authorization_decision.grant_version_id
+        version_evidence = self._authorization_policy.publication_version_evidence(
+            authorization_decision
         )
         policy = scenario_policy(command.fixture_scenario)
         market_batch = self._market_adapters[command.market].load(command.information_cutoff)
@@ -183,34 +171,14 @@ class FixtureEodWorkflow:
         )
         display_ticker = identity_timeline.ticker_at(market_batch.market_date)
         source_policy_payload: dict[str, object] = {
-            "dataset_id": source_policy.dataset_id,
+            **version_evidence["source_policy"],
             "execution_purpose": "fixture",
             "content_origin": "synthetic",
             "formal_source_qualified": False,
-            "allowed_actions": sorted(source_policy.allowed_actions),
-            "purposes": sorted(source_policy.purposes),
-            "environments": sorted(source_policy.environments),
-            "data_protection_class": source_policy.data_protection_class,
-            "resource_states": sorted(source_policy.resource_states),
         }
-        source_policy_version_id = source_policy.version_id
-        source_entitlement_payload = {
-            "dataset_id": source_entitlement.dataset_id,
-            "principal_id": source_entitlement.principal_id,
-            "status": source_entitlement.status,
-            "allowed_actions": sorted(source_entitlement.allowed_actions),
-            "purposes": sorted(source_entitlement.purposes),
-            "environments": sorted(source_entitlement.environments),
-            "valid_from": _instant(source_entitlement.valid_from),
-            "valid_to": _instant(source_entitlement.valid_to),
-        }
-        action_grant_payload = {
-            "principal_id": action_grant.principal_id,
-            "actions": sorted(action_grant.actions),
-            "environment": action_grant.environment,
-            "valid_from": _instant(action_grant.valid_from),
-            "valid_to": _instant(action_grant.valid_to),
-        }
+        source_policy_version_id = str(source_policy_payload["version_id"])
+        source_entitlement_payload = version_evidence["source_entitlement"]
+        action_grant_payload = version_evidence["action_grant"]
         authorization_evidence = {
             "decision_id": authorization_decision.decision_id,
             "decision": "allow",
@@ -507,7 +475,6 @@ class FixtureEodWorkflow:
                 "coverage_report_id": coverage_report_id,
                 "first_observed_at": _instant(observed_at),
                 "source_policy": {
-                    "version_id": source_policy_version_id,
                     **source_policy_payload,
                 },
                 "authorization": authorization_evidence,
@@ -603,12 +570,12 @@ class FixtureEodWorkflow:
                 "payload": source_policy_payload,
             },
             {
-                "artifact_id": source_entitlement.version_id,
+                "artifact_id": str(source_entitlement_payload["version_id"]),
                 "artifact_kind": "source_entitlement",
                 "payload": source_entitlement_payload,
             },
             {
-                "artifact_id": action_grant.version_id,
+                "artifact_id": str(action_grant_payload["version_id"]),
                 "artifact_kind": "action_grant",
                 "payload": action_grant_payload,
             },

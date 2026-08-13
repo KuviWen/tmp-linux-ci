@@ -17,7 +17,9 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "authorization-init",
         "database-grants",
         "denied-api",
+        "denied-api-ingress",
         "api",
+        "api-ingress",
         "dagster-init",
         "dagster-code",
         "denied-dagster-code",
@@ -104,8 +106,38 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "fixture-revoked-v1"
     )
     assert services["denied-api"]["profiles"] == ["acceptance"]
+    assert services["api"]["command"][-4:] == [
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+    ]
+    assert services["denied-api"]["command"][-4:] == [
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8001",
+    ]
+    assert services["api"]["ports"] == ["127.0.0.1:8000:8080"]
+    assert services["api-ingress"]["image"] == "nginx:1.29.1-alpine"
+    assert services["api-ingress"]["network_mode"] == "service:api"
+    assert services["denied-api-ingress"]["network_mode"] == "service:denied-api"
+    assert (
+        services["acceptance"]["command"][services["acceptance"]["command"].index("--base-url") + 1]
+        == "http://api:8080"
+    )
+    assert (
+        services["acceptance"]["command"][
+            services["acceptance"]["command"].index("--denied-base-url") + 1
+        ]
+        == "http://denied-api:8081"
+    )
     assert "--denied-base-url" in services["acceptance"]["command"]
     assert services["acceptance"]["depends_on"]["denied-api"]["condition"] == ("service_healthy")
+    assert services["acceptance"]["depends_on"]["api-ingress"]["condition"] == ("service_healthy")
+    assert services["acceptance"]["depends_on"]["denied-api-ingress"]["condition"] == (
+        "service_healthy"
+    )
     for name in (
         "api",
         "dagster-code",
@@ -203,6 +235,12 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
     assert "REVOKE INSERT, UPDATE, DELETE ON authorization_policy_sets FROM stock" in (
         role_grant_sql
     )
+    assert "proxy_pass http://127.0.0.1:8000" in (
+        REPOSITORY_ROOT / "docker" / "nginx" / "api-loopback.conf"
+    ).read_text(encoding="utf-8")
+    assert "proxy_pass http://127.0.0.1:8001" in (
+        REPOSITORY_ROOT / "docker" / "nginx" / "denied-api-loopback.conf"
+    ).read_text(encoding="utf-8")
 
     for name in ("postgres", "api", "dagster-webserver"):
         assert all(str(port).startswith("127.0.0.1:") for port in services[name]["ports"])
@@ -219,6 +257,7 @@ def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
     assert "COPY requirements.lock pyproject.toml ./" in dockerfile
     assert "/run/stock-forecasting" in dockerfile
     assert "USER app" in dockerfile
+    assert '"--host", "127.0.0.1"' in dockerfile
     assert (REPOSITORY_ROOT / "requirements.lock").is_file()
 
 

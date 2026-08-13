@@ -242,6 +242,7 @@ class StateStore:
             record_values = {
                 "record_id": record_id,
                 "listing_id": identity["listing_id"],
+                "authorization_dataset_id": authorization_decision["dataset_id"],
                 "information_cutoff": payload["information_cutoff"],
                 "execution_purpose": payload["execution_purpose"],
                 "fixture_scenario": payload["source_evidence"]["fixture_scenario"],
@@ -356,6 +357,23 @@ class StateStore:
             "event_id": outbox_event_id,
             "aggregate_version": aggregate_version,
         }
+
+    def get_listing_authorization_dataset(
+        self,
+        *,
+        listing_id: str,
+        information_cutoff: str,
+        fixture_scenario: str,
+    ) -> str | None:
+        with self.engine.connect() as connection:
+            dataset_id = connection.execute(
+                select(research_records.c.authorization_dataset_id).where(
+                    research_records.c.listing_id == listing_id,
+                    research_records.c.information_cutoff == information_cutoff,
+                    research_records.c.fixture_scenario == fixture_scenario,
+                )
+            ).scalar_one_or_none()
+        return cast(str | None, dataset_id)
 
     def record_fixture_use_denial(
         self,
