@@ -3,6 +3,8 @@ from typing import Literal, TypedDict
 
 UnavailableCode = Literal[
     "missing_anchor_price",
+    "missing_company_action",
+    "calendar_unresolved",
     "post_cutoff_evidence",
     "source_withdrawn",
 ]

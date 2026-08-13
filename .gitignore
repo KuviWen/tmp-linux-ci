@@ -9,3 +9,5 @@ __pycache__/
 htmlcov/
 .ticket-01-objects/
 .ticket-01.db
+.ticket-02-objects/
+.ticket-02.db

@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from io import BytesIO
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from stock_forecasting.fixture_dataset import (
-    CALENDAR_CLOSURES,
-    CALENDAR_REVISION_ID,
-    XtaiFixtureDataset,
+from stock_forecasting.fixture_market import (
+    FixtureMarket,
+    FixtureMarketAdapter,
+    default_fixture_market_adapters,
 )
 from stock_forecasting.fixture_scenarios import FixtureScenario, scenario_policy
 from stock_forecasting.forecasting import FeatureSnapshot, FixtureTrendForecaster, TrendForecaster
@@ -21,8 +22,8 @@ from stock_forecasting.platform.object_repository import FilesystemObjectReposit
 from stock_forecasting.platform.state_store import StateStore
 
 
-def _fixture_id(kind: str) -> str:
-    return str(uuid5(NAMESPACE_URL, f"stock-forecasting/fixture/xtai/{kind}"))
+def _fixture_id(namespace: str, kind: str) -> str:
+    return str(uuid5(NAMESPACE_URL, f"stock-forecasting/fixture/{namespace}/{kind}"))
 
 
 def _canonical_bytes(payload: object) -> bytes:
@@ -34,9 +35,9 @@ def _canonical_bytes(payload: object) -> bytes:
     ).encode("utf-8")
 
 
-def _version_id(kind: str, payload: object) -> str:
+def _version_id(namespace: str, kind: str, payload: object) -> str:
     digest = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
-    return _fixture_id(f"{kind}/{digest}")
+    return _fixture_id(namespace, f"{kind}/{digest}")
 
 
 def _instant(value: datetime) -> str:
@@ -48,6 +49,7 @@ class FixtureEodCommand:
     information_cutoff: datetime
     trace_id: str
     idempotency_key: str
+    market: FixtureMarket = "XTAI"
     fixture_scenario: FixtureScenario = "normal"
 
 
@@ -55,6 +57,7 @@ class FixtureEodCommand:
 class FixtureEodOutcome:
     status: str
     execution_purpose: str
+    market: FixtureMarket
     issuer_id: str
     security_id: str
     listing_id: str
@@ -79,44 +82,49 @@ class FixtureEodWorkflow:
         observed_at: datetime | None,
         object_repository: FilesystemObjectRepository,
         forecaster: TrendForecaster | None = None,
+        market_adapters: Mapping[FixtureMarket, FixtureMarketAdapter] | None = None,
     ) -> None:
         self._state_store = state_store
         self._observed_at = observed_at
         self._object_repository = object_repository
-        self._fixture_dataset = XtaiFixtureDataset.load()
+        self._market_adapters = dict(market_adapters or default_fixture_market_adapters())
         self._forecaster = forecaster or FixtureTrendForecaster()
 
     def execute(self, command: FixtureEodCommand) -> FixtureEodOutcome:
         observed_at = self._observed_at or datetime.now(UTC)
         policy = scenario_policy(command.fixture_scenario)
-        issuer_id = _fixture_id("issuer")
-        security_id = _fixture_id("security")
-        listing_id = _fixture_id("listing")
+        market_batch = self._market_adapters[command.market].load(command.information_cutoff)
+        namespace = market_batch.namespace
+
+        def fixture_id(kind: str) -> str:
+            return _fixture_id(namespace, kind)
+
+        def version_id(kind: str, payload: object) -> str:
+            return _version_id(namespace, kind, payload)
+
+        issuer_id = fixture_id("issuer")
+        security_id = fixture_id("security")
+        listing_id = fixture_id("listing")
         cutoff_text = _instant(command.information_cutoff)
         identity_timeline = ListingIdentity(
             listing_id=listing_id,
-            ticker_assertions=(
+            ticker_assertions=tuple(
                 TickerAssertion(
                     listing_id=listing_id,
-                    ticker="1234",
-                    valid_from=date(2024, 1, 1),
-                    valid_to=date(2025, 8, 12),
-                ),
-                TickerAssertion(
-                    listing_id=listing_id,
-                    ticker="2330",
-                    valid_from=date(2025, 8, 13),
-                    valid_to=None,
-                ),
+                    ticker=assertion.ticker,
+                    valid_from=assertion.valid_from,
+                    valid_to=assertion.valid_to,
+                )
+                for assertion in market_batch.ticker_assertions
             ),
         )
         display_ticker = identity_timeline.ticker_at(command.information_cutoff.date())
 
-        selection = self._fixture_dataset.select(command.information_cutoff)
+        selection = market_batch.selection
         base_records: list[dict[str, object]] = [dict(record) for record in selection.records]
         raw_records = policy.mutate_records(base_records)
         raw_payload = {
-            "exchange": "XTAI",
+            "exchange": market_batch.market,
             "listing_id": listing_id,
             "session_count": len(selection.sessions),
             "records": raw_records,
@@ -129,7 +137,7 @@ class FixtureEodWorkflow:
             expected_checksum=raw_checksum,
             metadata={
                 "media_type": "application/json",
-                "source": "xtai-fixture",
+                "source": market_batch.source_name,
             },
         )
 
@@ -138,8 +146,16 @@ class FixtureEodWorkflow:
             "security_id": security_id,
             "listing_id": listing_id,
             "display_ticker": display_ticker,
-            "ticker_valid_from": "2025-08-13",
-            "ticker_valid_to": None,
+            "ticker_valid_from": next(
+                assertion.valid_from.isoformat()
+                for assertion in market_batch.ticker_assertions
+                if assertion.ticker == display_ticker
+            ),
+            "ticker_valid_to": next(
+                assertion.valid_to.isoformat() if assertion.valid_to else None
+                for assertion in market_batch.ticker_assertions
+                if assertion.ticker == display_ticker
+            ),
             "ticker_assertions": identity_timeline.assertions_payload(),
         }
         source_policy_payload = {
@@ -147,15 +163,15 @@ class FixtureEodWorkflow:
             "content_origin": "synthetic",
             "formal_source_qualified": False,
         }
-        source_policy_version_id = _version_id("source-policy-version", source_policy_payload)
+        source_policy_version_id = version_id("source-policy-version", source_policy_payload)
         raw_artifact_payload = {
             "checksum": raw_object_ref.checksum,
             "object_id": raw_object_ref.object_id,
             "price_kind": "unadjusted",
         }
-        raw_artifact_id = _version_id("raw-artifact", raw_artifact_payload)
+        raw_artifact_id = version_id("raw-artifact", raw_artifact_payload)
         base_raw_payload = {
-            "exchange": "XTAI",
+            "exchange": market_batch.market,
             "listing_id": listing_id,
             "session_count": len(selection.sessions),
             "records": base_records,
@@ -169,7 +185,7 @@ class FixtureEodWorkflow:
                 expected_checksum=base_raw_checksum,
                 metadata={
                     "media_type": "application/json",
-                    "source": "xtai-fixture",
+                    "source": market_batch.source_name,
                 },
             )
         base_raw_artifact_payload = {
@@ -177,7 +193,7 @@ class FixtureEodWorkflow:
             "object_id": f"sha256:{base_raw_checksum}",
             "price_kind": "unadjusted",
         }
-        base_raw_artifact_id = _version_id(
+        base_raw_artifact_id = version_id(
             "raw-artifact",
             base_raw_artifact_payload,
         )
@@ -186,7 +202,7 @@ class FixtureEodWorkflow:
             "source_policy_version_id": source_policy_version_id,
             "record_count": len(selection.sessions),
         }
-        base_source_record_version_id = _version_id(
+        base_source_record_version_id = version_id(
             "source-record-version", base_source_record_payload
         )
         current_source_record_payload = {
@@ -199,13 +215,13 @@ class FixtureEodWorkflow:
             base_payload=base_source_record_payload,
             base_version_id=base_source_record_version_id,
         )
-        source_record_version_id = _version_id("source-record-version", source_record_payload)
+        source_record_version_id = version_id("source-record-version", source_record_payload)
         normalized_record_payload = {
             "source_record_version_id": source_record_version_id,
-            "schema_version": "xtai-eod-normalized-v1",
+            "schema_version": market_batch.normalized_schema_version,
             "record_count": len(selection.sessions),
         }
-        normalized_record_version_id = _version_id(
+        normalized_record_version_id = version_id(
             "normalized-record-version", normalized_record_payload
         )
         retrieval_receipt_payload = {
@@ -214,7 +230,7 @@ class FixtureEodWorkflow:
             "idempotency_key": command.idempotency_key,
             "fixture_scenario": command.fixture_scenario,
         }
-        retrieval_receipt_id = _version_id("retrieval-receipt", retrieval_receipt_payload)
+        retrieval_receipt_id = version_id("retrieval-receipt", retrieval_receipt_payload)
         coverage_payload = {
             "status": policy.coverage_status,
             "expected_partitions": 1,
@@ -224,34 +240,20 @@ class FixtureEodWorkflow:
             "first_session_id": selection.session_ids[0],
             "last_session_id": selection.session_ids[-1],
         }
-        coverage_report_id = _version_id("coverage-report", coverage_payload)
+        coverage_report_id = version_id("coverage-report", coverage_payload)
 
-        calendar_payload = self._fixture_dataset.calendar_payload()
-        calendar_version_id = _version_id("calendar-version", calendar_payload)
-        company_action_payload = {
-            "kind": "cash_dividend",
-            "effective_session_id": "XTAI:2026-06-15",
-            "cash_amount": "5.00",
-            "currency": "TWD",
-        }
-        company_action_version_id = _version_id("company-action-version", company_action_payload)
-        adjusted_records = [
-            {
-                "session_id": record["session_id"],
-                "adjusted_close": (
-                    str(
-                        (
-                            Decimal(str(record["close"])) - Decimal("5.00")
-                            if str(record["session_id"])
-                            < str(company_action_payload["effective_session_id"])
-                            else Decimal(str(record["close"]))
-                        ).quantize(Decimal("0.01"))
-                    )
-                ),
-            }
-            for record in raw_records
-            if "close" in record
-        ]
+        calendar_payload = market_batch.calendar_payload
+        calendar_version_id = version_id("calendar-version", calendar_payload)
+        company_action_payload = market_batch.company_action_payload
+        company_action_available = command.fixture_scenario != "missing_company_action"
+        company_action_version_id = (
+            version_id("company-action-version", company_action_payload)
+            if company_action_available
+            else None
+        )
+        adjusted_records = (
+            market_batch.adjustment_rule.apply(raw_records) if company_action_available else []
+        )
         unavailable_reason = policy.unavailable_reason(
             observed_at=observed_at,
             information_cutoff=command.information_cutoff,
@@ -259,13 +261,13 @@ class FixtureEodWorkflow:
         adjustment_payload = {
             "input_raw_artifact_id": raw_artifact_id,
             "company_action_version_id": company_action_version_id,
-            "method": "fixture_cash_dividend_back_adjustment_v1",
+            "method": market_batch.adjustment_rule.method,
             "input_price_kind": "unadjusted",
             "output_price_kind": "adjusted",
             "adjusted_records": adjusted_records,
             "status": "unavailable" if unavailable_reason else "completed",
         }
-        adjustment_version_id = _version_id("adjustment-version", adjustment_payload)
+        adjustment_version_id = version_id("adjustment-version", adjustment_payload)
 
         dataset_payload = {
             "normalized_record_version_id": normalized_record_version_id,
@@ -273,7 +275,7 @@ class FixtureEodWorkflow:
             "calendar_version_id": calendar_version_id,
             "adjustment_version_id": adjustment_version_id,
         }
-        dataset_version_id = _version_id("dataset-version", dataset_payload)
+        dataset_version_id = version_id("dataset-version", dataset_payload)
         data_selection_payload = {
             "dataset_version_id": dataset_version_id,
             "information_cutoff": cutoff_text,
@@ -284,7 +286,7 @@ class FixtureEodWorkflow:
             "exclusion_reason": unavailable_reason,
             "fixture_scenario": command.fixture_scenario,
         }
-        data_selection_id = _version_id("data-selection", data_selection_payload)
+        data_selection_id = version_id("data-selection", data_selection_payload)
 
         if unavailable_reason is None:
             adjusted_closes = [
@@ -315,7 +317,7 @@ class FixtureEodWorkflow:
                 "status": "unavailable",
                 "unavailable_reason": unavailable_reason,
             }
-        feature_snapshot_id = _version_id("feature-snapshot", feature_snapshot_payload)
+        feature_snapshot_id = version_id("feature-snapshot", feature_snapshot_payload)
         feature_snapshot = FeatureSnapshot(
             feature_snapshot_id=feature_snapshot_id,
             data_selection_id=data_selection_id,
@@ -328,40 +330,44 @@ class FixtureEodWorkflow:
             "artifact_version": "fixture-trend-forecaster-v1",
             "promotable": False,
         }
-        model_artifact_id = _version_id("model-artifact", model_artifact_payload)
+        model_artifact_id = version_id("model-artifact", model_artifact_payload)
         serving_assignment_payload = {
             "model_artifact_id": model_artifact_id,
             "execution_purpose": "fixture",
             "assignment_version": "fixture-serving-assignment-v1",
         }
-        serving_assignment_id = _version_id("serving-assignment", serving_assignment_payload)
+        serving_assignment_id = version_id("serving-assignment", serving_assignment_payload)
 
         predictions = self._forecaster.predict(feature_snapshot)
         calendar_projection = {
-            "exchange": "XTAI",
-            "timezone": "Asia/Taipei",
+            "exchange": market_batch.market,
+            "timezone": market_batch.timezone,
             "version_id": calendar_version_id,
             "session_count": len(selection.sessions),
-            "session_fact_count": self._fixture_dataset.session_fact_count,
-            "closure_dates": list(CALENDAR_CLOSURES),
+            "session_fact_count": market_batch.session_fact_count,
+            "closure_dates": list(market_batch.closure_dates),
             "half_day_session_ids": [
                 session.session_id
                 for session in selection.sessions
                 if session.session_kind == "half_day"
             ],
-            "revision_ids": [CALENDAR_REVISION_ID],
+            "revision_ids": list(market_batch.calendar_revision_ids),
+            "session_time_examples": list(market_batch.session_time_examples),
+            "resolution_status": (
+                "unavailable" if unavailable_reason == "calendar_unresolved" else "available"
+            ),
         }
         adjustment_projection = {
             "version_id": adjustment_version_id,
             "input_price_kind": "unadjusted",
             "output_price_kind": "adjusted",
             "session_count": len(adjusted_records),
-            "company_action_count": 1,
+            "company_action_count": 1 if company_action_available else 0,
         }
         research_record = {
             "identity": identity_payload,
             "calendar": calendar_projection,
-            "company_actions": [company_action_payload],
+            "company_actions": [company_action_payload] if company_action_available else [],
             "adjustment_version_id": adjustment_version_id,
             "adjustment": adjustment_projection,
             "execution_purpose": "fixture",
@@ -381,7 +387,7 @@ class FixtureEodWorkflow:
                     **source_policy_payload,
                 },
                 "coverage": coverage_payload,
-                "committed_checkpoint": "xtai-fixture-page:1",
+                "committed_checkpoint": market_batch.committed_checkpoint,
                 **policy.source_evidence(base_source_record_version_id),
             },
             "lineage": {
@@ -412,7 +418,21 @@ class FixtureEodWorkflow:
                     "payload": base_source_record_payload,
                 }
             )
-        disposition = policy.publication_disposition(unavailable_reason)
+        disposition = policy.publication_disposition(
+            unavailable_reason,
+            health_scope=market_batch.health_scope,
+        )
+        company_action_artifacts: list[dict[str, Any]] = (
+            [
+                {
+                    "artifact_id": company_action_version_id,
+                    "artifact_kind": "company_action_version",
+                    "payload": company_action_payload,
+                }
+            ]
+            if company_action_version_id is not None
+            else []
+        )
         artifacts: list[dict[str, Any]] = [
             {"artifact_id": issuer_id, "artifact_kind": "issuer", "payload": {}},
             {
@@ -423,11 +443,11 @@ class FixtureEodWorkflow:
             {
                 "artifact_id": listing_id,
                 "artifact_kind": "listing",
-                "payload": {"security_id": security_id, "exchange": "XTAI"},
+                "payload": {"security_id": security_id, "exchange": market_batch.market},
             },
             *[
                 {
-                    "artifact_id": _version_id("identity-assertion", assertion),
+                    "artifact_id": version_id("identity-assertion", assertion),
                     "artifact_kind": "identity_assertion",
                     "payload": assertion,
                 }
@@ -469,11 +489,7 @@ class FixtureEodWorkflow:
                 "artifact_kind": "calendar_version",
                 "payload": calendar_payload,
             },
-            {
-                "artifact_id": company_action_version_id,
-                "artifact_kind": "company_action_version",
-                "payload": company_action_payload,
-            },
+            *company_action_artifacts,
             {
                 "artifact_id": adjustment_version_id,
                 "artifact_kind": "adjustment_version",
@@ -505,20 +521,20 @@ class FixtureEodWorkflow:
                 "payload": serving_assignment_payload,
             },
         ]
-        work_id = _fixture_id(f"work/{command.idempotency_key}")
+        work_id = fixture_id(f"work/{command.idempotency_key}")
         self._state_store.publish_fixture_trace(
-            record_id=_fixture_id(f"research-record/{command.idempotency_key}"),
+            record_id=fixture_id(f"research-record/{command.idempotency_key}"),
             payload=research_record,
             work_id=work_id,
             trace_id=command.trace_id,
             idempotency_key=command.idempotency_key,
-            health_assessment_id=_fixture_id(f"source-health/{command.idempotency_key}"),
-            audit_event_id=_fixture_id(f"audit/{command.idempotency_key}"),
+            health_assessment_id=fixture_id(f"source-health/{command.idempotency_key}"),
+            audit_event_id=fixture_id(f"audit/{command.idempotency_key}"),
             operations=disposition,
             artifacts=artifacts,
             fixture_predictions=[
                 {
-                    "prediction_id": _version_id(
+                    "prediction_id": version_id(
                         "fixture-prediction",
                         {
                             "idempotency_key": command.idempotency_key,
@@ -535,6 +551,7 @@ class FixtureEodWorkflow:
         return FixtureEodOutcome(
             status=disposition.work_status,
             execution_purpose="fixture",
+            market=market_batch.market,
             issuer_id=issuer_id,
             security_id=security_id,
             listing_id=listing_id,

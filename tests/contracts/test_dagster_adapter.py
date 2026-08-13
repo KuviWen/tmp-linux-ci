@@ -5,7 +5,11 @@ from pathlib import Path
 
 from dagster import ResourceDefinition, materialize
 
-from stock_forecasting.adapters.dagster import FixtureRunner, xtai_fixture_eod_asset
+from stock_forecasting.adapters.dagster import (
+    FixtureRunner,
+    xnas_fixture_eod_asset,
+    xtai_fixture_eod_asset,
+)
 from stock_forecasting.application import build_test_application
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
 
@@ -43,6 +47,7 @@ def test_dagster_and_direct_workflow_publish_the_same_outcome(tmp_path: Path) ->
     assert dagster_outcome == {
         "status": direct_outcome.status,
         "execution_purpose": direct_outcome.execution_purpose,
+        "market": "XTAI",
         "listing_id": direct_outcome.listing_id,
         "dataset_version_id": direct_outcome.dataset_version_id,
         "feature_snapshot_id": direct_outcome.feature_snapshot_id,
@@ -59,3 +64,45 @@ def test_dagster_and_direct_workflow_publish_the_same_outcome(tmp_path: Path) ->
             information_cutoff=cutoff,
         )["predictions"]
     )
+
+
+def test_xnas_dagster_asset_calls_the_same_public_workflow(tmp_path: Path) -> None:
+    cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
+    command = FixtureEodCommand(
+        information_cutoff=cutoff,
+        trace_id="trace-ticket-02-xnas-dagster",
+        idempotency_key="ticket-02-xnas-dagster",
+        market="XNAS",
+    )
+    direct_application = build_test_application(
+        observed_at=cutoff,
+        object_root=tmp_path / "xnas-direct-objects",
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'xnas-direct.db'}",
+    )
+    dagster_application = build_test_application(
+        observed_at=cutoff,
+        object_root=tmp_path / "xnas-dagster-objects",
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'xnas-dagster.db'}",
+    )
+
+    direct_outcome = direct_application.run_fixture_eod(command)
+    materialization = materialize(
+        [xnas_fixture_eod_asset],
+        resources={
+            "xnas_fixture_runner": ResourceDefinition.hardcoded_resource(
+                FixtureRunner(dagster_application, command)
+            )
+        },
+    )
+
+    assert materialization.success
+    assert materialization.output_for_node("xnas_fixture_eod") == {
+        "status": direct_outcome.status,
+        "execution_purpose": direct_outcome.execution_purpose,
+        "market": "XNAS",
+        "listing_id": direct_outcome.listing_id,
+        "dataset_version_id": direct_outcome.dataset_version_id,
+        "feature_snapshot_id": direct_outcome.feature_snapshot_id,
+        "model_artifact_id": direct_outcome.model_artifact_id,
+        "serving_assignment_id": direct_outcome.serving_assignment_id,
+    }

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import build_test_application
+from stock_forecasting.fixture_market import FixtureMarket
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
 
 
@@ -58,6 +59,79 @@ def test_rest_matrix_and_listing_detail_expose_fixture_lineage() -> None:
         "serving_assignment_id",
         "raw_artifact_id",
     }
+
+
+def test_rest_and_traditional_chinese_matrix_show_both_markets_at_one_cutoff() -> None:
+    cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
+    cutoff_text = "2026-08-12T22:00:00Z"
+    application = build_test_application(observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC))
+    market_cases: tuple[tuple[FixtureMarket, str], ...] = (("XTAI", "tw"), ("XNAS", "us"))
+    for market, trace_suffix in market_cases:
+        application.run_fixture_eod(
+            FixtureEodCommand(
+                information_cutoff=cutoff,
+                trace_id=f"trace-ticket-02-matrix-{trace_suffix}",
+                idempotency_key=f"ticket-02-matrix-{trace_suffix}",
+                market=market,
+            )
+        )
+    client = TestClient(create_web_app(application))
+
+    matrix_response = client.get(
+        "/api/v1/research/predictions",
+        params={"information_cutoff": cutoff_text},
+    )
+    assert matrix_response.status_code == 200
+    matrix = matrix_response.json()
+    assert matrix["information_cutoff"] == cutoff_text
+    assert matrix["execution_purpose"] == "fixture"
+    assert {item["market"] for item in matrix["items"]} == {"XTAI", "XNAS"}
+    assert len(matrix["items"]) == 2
+    assert {tuple(sorted(item)) for item in matrix["items"]} == {
+        (
+            "display_ticker",
+            "fixture_badge",
+            "lineage",
+            "listing_id",
+            "market",
+            "predictions",
+        )
+    }
+    assert all(
+        [prediction["horizon_sessions"] for prediction in item["predictions"]] == [1, 5, 20]
+        for item in matrix["items"]
+    )
+
+    matrix_html = client.get(
+        "/research",
+        params={
+            "information_cutoff": cutoff_text,
+            "horizon": 5,
+            "market": "all",
+            "support": "full",
+            "sort": "confidence_desc",
+        },
+    )
+    assert matrix_html.status_code == 200
+    assert "2330 · XTAI" in matrix_html.text
+    assert "USF2 · XNAS" in matrix_html.text
+    assert matrix_html.text.count("Fixture／非正式預測") == 2
+    xnas_listing_id = next(
+        item["listing_id"] for item in matrix["items"] if item["market"] == "XNAS"
+    )
+    detail_page = client.get(
+        f"/research/listings/{xnas_listing_id}",
+        params={
+            "information_cutoff": cutoff_text,
+            "horizon": 5,
+            "market": "all",
+            "support": "full",
+            "sort": "confidence_desc",
+            "tab": "forecast",
+        },
+    )
+    assert detail_page.status_code == 200
+    assert "USF2 · XNAS" in detail_page.text
 
 
 def test_traditional_chinese_matrix_and_detail_preserve_url_state_on_reload() -> None:

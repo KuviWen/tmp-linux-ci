@@ -8,10 +8,23 @@
 
 Status: ready-for-agent
 
-- [ ] 美國 fixture 使用同一組發行人、證券、掛牌、外部識別碼主張及 PredictionRecord 語意，不新增美國專用的平行領域模型。
-- [ ] Fixture 包含美國交易場所時區、版本化交易日曆、至少 253 個未調整 sessions、ticker 有效期、公司行動、late／revision／missing 情境與明確來源政策。
-- [ ] 同一 workflow 從擷取證據、資料集發布、FeatureSnapshot、fixture 推論到權威預測發布完成美國日終路徑，且日曆／時區不經 XTAI 或其他市場時區轉換。
-- [ ] REST 與繁中介面能在同一比較矩陣同時顯示台灣與美國掛牌，兩者使用相同三期間機率、信心、支援、cutoff 與譜系欄位。
-- [ ] 美國掛牌必要資料不足、公司行動缺件或日曆無法解析時，只影響該結果並提供穩定不可用原因，不拖垮已成功的台股結果。
-- [ ] Provider／module contract tests 證明兩個市場經相同外部 interface 產生相同形狀的 outcomes、manifests、REST resources 與 audit evidence。
-- [ ] 端到端驗收能具體展示美國 adapter 差異，但不存在模組間 HTTP、美國專用 prediction schema 或以 ticker 作權威路由。
+- [x] 美國 fixture 使用同一組發行人、證券、掛牌、外部識別碼主張及 PredictionRecord 語意，不新增美國專用的平行領域模型。
+- [x] Fixture 包含美國交易場所時區、版本化交易日曆、至少 253 個未調整 sessions、ticker 有效期、公司行動、late／revision／missing 情境與明確來源政策。
+- [x] 同一 workflow 從擷取證據、資料集發布、FeatureSnapshot、fixture 推論到權威預測發布完成美國日終路徑，且日曆／時區不經 XTAI 或其他市場時區轉換。
+- [x] REST 與繁中介面能在同一比較矩陣同時顯示台灣與美國掛牌，兩者使用相同三期間機率、信心、支援、cutoff 與譜系欄位。
+- [x] 美國掛牌必要資料不足、公司行動缺件或日曆無法解析時，只影響該結果並提供穩定不可用原因，不拖垮已成功的台股結果。
+- [x] Provider／module contract tests 證明兩個市場經相同外部 interface 產生相同形狀的 outcomes、manifests、REST resources 與 audit evidence。
+- [x] 端到端驗收能具體展示美國 adapter 差異，但不存在模組間 HTTP、美國專用 prediction schema 或以 ticker 作權威路由。
+
+## Implementation notes
+
+- 公共 seam：`Application.run_fixture_eod(FixtureEodCommand(market=...))`、共用
+  `FixtureMarketAdapter.load(cutoff)`、既有 REST/OpenAPI，以及
+  `stock-forecasting acceptance ticket-02` 的 Compose 外部驗收入口。
+- XNAS fixture 使用 `America/New_York`、版本化 XNAS session facts、split 調整與
+  synthetic／非正式來源政策；兩市場仍發布同一 normalized schema 與研究資源形狀。
+- 驗證：`pytest` 45 passed；`mypy src tests`、`ruff check .`、
+  `ruff format --check .`、Alembic upgrade 與離線 wheel build 均通過。
+- Compose：`docker compose config --quiet`、全服務 `up --build --wait` 與
+  `docker compose --profile acceptance run --build --rm acceptance` 均通過；外部報告的
+  13 個 checks 全為 true，完成後以 `docker compose down` 停止服務並保留 named volumes。

@@ -210,7 +210,7 @@ def create_web_app(application: Application) -> FastAPI:
     def research_matrix(
         information_cutoff: str = Query(...),
         horizon: int = Query(5),
-        market: str = Query("XTAI"),
+        market: str = Query("all"),
         support: str = Query("full"),
         sort: str = Query("confidence_desc"),
     ) -> str:
@@ -218,7 +218,7 @@ def create_web_app(application: Application) -> FastAPI:
             record
             for record in application.research_query.list_predictions(execution_purpose="fixture")
             if record["information_cutoff"] == information_cutoff
-            and record["calendar"]["exchange"] == market
+            and (market == "all" or record["calendar"]["exchange"] == market)
         ]
         records = [
             record
@@ -258,7 +258,8 @@ def create_web_app(application: Application) -> FastAPI:
             rows.append(
                 '<article class="panel">'
                 f'<p class="badge">{escape(str(record["fixture_badge"]))}</p>'
-                f"<h2>{escape(str(record['identity']['display_ticker']))} · XTAI</h2>"
+                f"<h2>{escape(str(record['identity']['display_ticker']))} · "
+                f"{escape(str(record['calendar']['exchange']))}</h2>"
                 f"<p>資訊截止點 {escape(information_cutoff)}</p>"
                 f'<div class="horizons">'
                 f"{_horizon_cards(record['predictions'], focused_horizon=horizon)}</div>"
@@ -336,7 +337,8 @@ def create_web_app(application: Application) -> FastAPI:
             + '">返回比較矩陣</a></p><header>'
             f'<p class="badge">{escape(str(record["fixture_badge"]))}</p>'
             "<h1>標的研究頁</h1>"
-            f"<p>{escape(str(record['identity']['display_ticker']))} · {escape(market)}</p>"
+            f"<p>{escape(str(record['identity']['display_ticker']))} · "
+            f"{escape(str(record['calendar']['exchange']))}</p>"
             f"<p>資訊截止點 {escape(information_cutoff)}</p></header>"
             f'<nav aria-label="研究細節">{"".join(tab_links)}</nav>'
             f'<section class="panel"><div class="horizons">{horizon_cards}</div></section>'

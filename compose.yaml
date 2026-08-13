@@ -1,7 +1,7 @@
-name: stock-forecasting-ticket-01
+name: stock-forecasting-ticket-02
 
-x-fixture-information-cutoff: &fixture-information-cutoff '2026-08-12T07:00:00Z'
-x-fixture-collection-observed-at: &fixture-collection-observed-at '2026-08-12T06:55:00Z'
+x-fixture-information-cutoff: &fixture-information-cutoff '2026-08-12T22:00:00Z'
+x-fixture-collection-observed-at: &fixture-collection-observed-at '2026-08-12T21:55:00Z'
 
 x-application-environment: &application-environment
   DATABASE_URL: postgresql+psycopg://stock@postgres:5432/stock_forecasting
@@ -11,7 +11,7 @@ x-application-environment: &application-environment
   DAGSTER_HOME: /var/lib/dagster
 
 x-application: &application
-  image: stock-forecasting-ticket-01-app:0.1.0
+  image: stock-forecasting-ticket-02-app:0.1.0
   environment: *application-environment
   volumes:
     - fixture-objects:/var/lib/stock-forecasting/objects
@@ -145,7 +145,7 @@ services:
       - -m
       - stock_forecasting.cli
       - acceptance
-      - ticket-01
+      - ticket-02
       - --database-url
       - postgresql+psycopg://stock@postgres:5432/stock_forecasting
       - --object-root

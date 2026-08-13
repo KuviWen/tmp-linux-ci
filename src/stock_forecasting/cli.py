@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from stock_forecasting.acceptance import run_ticket_01
+from stock_forecasting.acceptance import run_ticket_01, run_ticket_02
 
 
 def _instant(value: str) -> datetime:
@@ -20,7 +20,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stock-forecasting")
     commands = parser.add_subparsers(dest="command", required=True)
     acceptance = commands.add_parser("acceptance")
-    acceptance.add_argument("ticket", choices=["ticket-01"])
+    acceptance.add_argument("ticket", choices=["ticket-01", "ticket-02"])
     acceptance.add_argument("--database-url", required=True)
     acceptance.add_argument("--object-root", type=Path, required=True)
     acceptance.add_argument("--information-cutoff", type=_instant, required=True)
@@ -33,10 +33,11 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
-    if arguments.command == "acceptance" and arguments.ticket == "ticket-01":
+    if arguments.command == "acceptance" and arguments.ticket in {"ticket-01", "ticket-02"}:
         if (arguments.base_url is None) != (arguments.dagster_url is None):
             parser.error("--base-url and --dagster-url must be provided together")
-        report = run_ticket_01(
+        runner = run_ticket_01 if arguments.ticket == "ticket-01" else run_ticket_02
+        report = runner(
             database_url=arguments.database_url,
             object_root=arguments.object_root,
             information_cutoff=arguments.information_cutoff,

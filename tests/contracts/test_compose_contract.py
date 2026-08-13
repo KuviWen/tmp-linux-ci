@@ -5,11 +5,11 @@ import yaml
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
-def test_compose_declares_the_deployable_ticket_01_runtime() -> None:
+def test_compose_declares_the_deployable_ticket_02_runtime() -> None:
     compose = yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8"))
     services = compose["services"]
 
-    assert compose["name"] == "stock-forecasting-ticket-01"
+    assert compose["name"] == "stock-forecasting-ticket-02"
     assert set(services) == {
         "postgres",
         "migration",
@@ -28,6 +28,7 @@ def test_compose_declares_the_deployable_ticket_01_runtime() -> None:
     }
     assert services["migration"]["command"][-2:] == ["upgrade", "head"]
     assert services["acceptance"]["profiles"] == ["acceptance"]
+    assert "ticket-02" in services["acceptance"]["command"]
     assert "--base-url" in services["acceptance"]["command"]
     assert "--observed-at" in services["acceptance"]["command"]
     application_services = {
@@ -40,7 +41,7 @@ def test_compose_declares_the_deployable_ticket_01_runtime() -> None:
         "acceptance",
     }
     assert {services[name]["image"] for name in application_services} == {
-        "stock-forecasting-ticket-01-app:0.1.0"
+        "stock-forecasting-ticket-02-app:0.1.0"
     }
     assert services["api"]["build"] == {"context": "."}
     assert all("build" not in services[name] for name in application_services if name != "api")
@@ -75,10 +76,10 @@ def test_compose_declares_the_deployable_ticket_01_runtime() -> None:
     for name in ("dagster-code", "dagster-webserver", "dagster-daemon"):
         assert services["acceptance"]["depends_on"][name]["condition"] == "service_healthy"
     assert compose["x-application-environment"]["FIXTURE_COLLECTION_OBSERVED_AT"] == (
-        "2026-08-12T06:55:00Z"
+        "2026-08-12T21:55:00Z"
     )
     assert compose["x-application-environment"]["FIXTURE_INFORMATION_CUTOFF"] == (
-        "2026-08-12T07:00:00Z"
+        "2026-08-12T22:00:00Z"
     )
 
     for name in ("postgres", "api", "dagster-webserver"):

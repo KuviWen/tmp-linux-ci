@@ -16,13 +16,13 @@ class FixtureRunner:
         return self.application.run_fixture_eod(self.command)
 
 
-@asset(name="xtai_fixture_eod", required_resource_keys={"fixture_runner"})
-def xtai_fixture_eod_asset(context: AssetExecutionContext) -> dict[str, str]:
-    runner = cast(FixtureRunner, context.resources.fixture_runner)
+def _run_fixture(context: AssetExecutionContext, resource_key: str) -> dict[str, str]:
+    runner = cast(FixtureRunner, getattr(context.resources, resource_key))
     outcome = runner.run()
     result = {
         "status": outcome.status,
         "execution_purpose": outcome.execution_purpose,
+        "market": outcome.market,
         "listing_id": outcome.listing_id,
         "dataset_version_id": outcome.dataset_version_id,
         "feature_snapshot_id": outcome.feature_snapshot_id,
@@ -31,3 +31,13 @@ def xtai_fixture_eod_asset(context: AssetExecutionContext) -> dict[str, str]:
     }
     context.add_output_metadata(result)
     return result
+
+
+@asset(name="xtai_fixture_eod", required_resource_keys={"fixture_runner"})
+def xtai_fixture_eod_asset(context: AssetExecutionContext) -> dict[str, str]:
+    return _run_fixture(context, "fixture_runner")
+
+
+@asset(name="xnas_fixture_eod", required_resource_keys={"xnas_fixture_runner"})
+def xnas_fixture_eod_asset(context: AssetExecutionContext) -> dict[str, str]:
+    return _run_fixture(context, "xnas_fixture_runner")

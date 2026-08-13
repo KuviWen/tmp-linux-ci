@@ -8,7 +8,7 @@ from typing import Any, Literal
 from httpx import Client, HTTPError
 
 DAGSTER_DEPLOYMENT_QUERY = """
-query Ticket01DeploymentHealth {
+query Ticket02DeploymentHealth {
   workspaceOrError {
     __typename
     ... on Workspace {
@@ -71,7 +71,8 @@ def _workspace_ready(data: dict[str, Any]) -> bool:
             for repository in location.get("repositories", [])
             for asset in repository.get("assetNodes", [])
         }
-        return ("xtai_fixture_eod",) in asset_paths
+        required_assets = {("xtai_fixture_eod",), ("xnas_fixture_eod",)}
+        return required_assets.issubset(asset_paths)
     return False
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from stock_forecasting.contracts import PublicationDisposition, UnavailableCode
@@ -12,6 +13,8 @@ FixtureScenario = Literal[
     "duplicate",
     "correction",
     "missing",
+    "missing_company_action",
+    "missing_calendar",
     "withdrawal",
 ]
 RawMutation = Literal["unchanged", "correct_anchor", "remove_anchor"]
@@ -38,7 +41,8 @@ class FixtureScenarioPolicy:
     ) -> list[dict[str, object]]:
         mutated = [dict(record) for record in records]
         if self.raw_mutation == "correct_anchor":
-            mutated[-1]["close"] = "607.50"
+            anchor_close = Decimal(str(mutated[-1]["close"]))
+            mutated[-1]["close"] = str((anchor_close - Decimal("0.50")).quantize(Decimal("0.01")))
         elif self.raw_mutation == "remove_anchor":
             mutated[-1].pop("close")
         return mutated
@@ -81,10 +85,10 @@ class FixtureScenarioPolicy:
     def publication_disposition(
         self,
         unavailable_reason: UnavailableCode | None,
+        *,
+        health_scope: str = "xtai_fixture_source",
     ) -> PublicationDisposition:
-        scope = (
-            "xtai_fixture_source" if self.name == "normal" else f"xtai_fixture_source/{self.name}"
-        )
+        scope = health_scope if self.name == "normal" else f"{health_scope}/{self.name}"
         if unavailable_reason is None:
             return PublicationDisposition(
                 work_status="succeeded",
@@ -138,6 +142,24 @@ POLICIES: dict[FixtureScenario, FixtureScenarioPolicy] = {
         ("anchor_close",),
         "missing_anchor_price",
         "coverage_incomplete",
+    ),
+    "missing_company_action": FixtureScenarioPolicy(
+        "missing_company_action",
+        "unchanged",
+        "independent",
+        "incomplete",
+        ("company_action",),
+        "missing_company_action",
+        "missing_company_action",
+    ),
+    "missing_calendar": FixtureScenarioPolicy(
+        "missing_calendar",
+        "unchanged",
+        "independent",
+        "incomplete",
+        ("trading_calendar",),
+        "calendar_unresolved",
+        "calendar_unresolved",
     ),
     "withdrawal": FixtureScenarioPolicy(
         "withdrawal",

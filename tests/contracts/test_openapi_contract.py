@@ -22,6 +22,18 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     unavailable = contract["components"]["schemas"]["UnavailablePrediction"]
     assert "probabilities" not in unavailable["properties"]
     assert "confidence_score" not in unavailable["properties"]
+    assert unavailable["properties"]["unavailable_reason"]["properties"]["code"]["enum"] == [
+        "missing_anchor_price",
+        "post_cutoff_evidence",
+        "source_withdrawn",
+        "missing_company_action",
+        "calendar_unresolved",
+    ]
+    matrix_item = contract["components"]["schemas"]["MatrixItem"]
+    assert matrix_item["properties"]["market"] == {
+        "type": "string",
+        "enum": ["XTAI", "XNAS"],
+    }
     problem = contract["components"]["schemas"]["ProblemDetails"]
     assert set(problem["required"]) == {
         "type",
