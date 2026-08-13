@@ -20,5 +20,7 @@ Status: ready-for-agent
 
 - 採用 `Application.run_fixture_eod`／`Application.relay_outbox`、OperationsControl、REST／繁中 UI 與 deployed Compose acceptance runner 作為公共 seams。
 - PredictionRecord、核心研究投影與 immutable outbox envelope 在同一 PostgreSQL transaction 發布；consumer marker、effect 與 aggregate cursor 在各自 transaction 內提交。
+- Relay 以 worker identity、lease expiry 與 fencing token 原子 claim；不相容 event type／schema 在 consumer effect 前留下 blocked／audit／incident isolation evidence。
+- 升級 migration 會為 ticket 01／02 的既有研究紀錄補上已同步的 `0／0` projection 狀態，避免 in-place upgrade 後從查詢消失。
 - 驗證命令：`python -m pytest -q`、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、`python -m alembic -c alembic.ini upgrade head`、真實 PostgreSQL integration，以及 `docker compose --profile acceptance run --build --rm acceptance`。
 - Compose acceptance 從乾淨 PostgreSQL volume 執行，`P1-TRACE-OUTBOX-01` 的 11 項 externally observable checks 全數通過；fixture 證據不代表正式資料或正式預測。

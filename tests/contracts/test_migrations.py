@@ -3,17 +3,19 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, select
 
-from stock_forecasting.platform.state_store import metadata
+from stock_forecasting.application import build_application
+from stock_forecasting.platform.database_schema import metadata, research_records
+
+REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
-def test_alembic_upgrade_builds_the_canonical_schema(tmp_path: Path) -> None:
-    database_url = f"sqlite+pysqlite:///{tmp_path / 'migration.db'}"
-
-    completed = subprocess.run(
+def _upgrade(database_url: str, revision: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             sys.executable,
             "-m",
@@ -23,8 +25,9 @@ def test_alembic_upgrade_builds_the_canonical_schema(tmp_path: Path) -> None:
             "-x",
             f"database_url={database_url}",
             "upgrade",
-            "head",
+            revision,
         ],
+        cwd=REPOSITORY_ROOT,
         check=False,
         capture_output=True,
         text=True,
@@ -32,8 +35,57 @@ def test_alembic_upgrade_builds_the_canonical_schema(tmp_path: Path) -> None:
         env={**os.environ, "PYTHONUTF8": "1"},
     )
 
+
+def test_alembic_upgrade_builds_the_canonical_schema(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'migration.db'}"
+
+    completed = _upgrade(database_url, "head")
+
     assert completed.returncode == 0, completed.stderr
     migrated_tables = set(inspect(create_engine(database_url)).get_table_names())
     assert migrated_tables == {table.name for table in metadata.tables.values()} | {
         "alembic_version"
+    }
+
+
+def test_ticket_03_upgrade_backfills_existing_research_projection_status(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'upgrade.db'}"
+    first_upgrade = _upgrade(database_url, "20260813_01")
+    assert first_upgrade.returncode == 0, first_upgrade.stderr
+
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            research_records.insert().values(
+                record_id="record-before-ticket-03",
+                listing_id="listing-before-ticket-03",
+                information_cutoff="2026-08-11T07:00:00Z",
+                execution_purpose="fixture",
+                fixture_scenario="normal",
+                payload={"identity": {"listing_id": "listing-before-ticket-03"}},
+            )
+        )
+
+    final_upgrade = _upgrade(database_url, "head")
+    assert final_upgrade.returncode == 0, final_upgrade.stderr
+
+    projection_status = metadata.tables["research_projection_status"]
+    with engine.connect() as connection:
+        row = connection.execute(select(projection_status)).mappings().one()
+    assert dict(row) == {
+        "record_id": "record-before-ticket-03",
+        "core_projection_version": 0,
+        "evidence_projection_version": 0,
+        "stale": False,
+    }
+    application = build_application(
+        database_url=database_url,
+        object_root=tmp_path / "objects",
+        observed_at=datetime(2026, 8, 13, tzinfo=UTC),
+    )
+    records = application.research_query.list_predictions(execution_purpose="fixture")
+    assert records[0]["projection"] == {
+        "core_projection_version": 0,
+        "evidence_projection_version": 0,
+        "stale": False,
     }

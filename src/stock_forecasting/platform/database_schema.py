@@ -1,0 +1,43 @@
+"""Complete SQLAlchemy metadata for migrations and provider-contract inspection."""
+
+from stock_forecasting.platform.outbox_relay import (
+    operations_prediction_projections,
+    outbox_delivery_attempts,
+    outbox_dispatch,
+    outbox_events,
+    outbox_incidents,
+    processed_outbox_events,
+    projection_cursors,
+    research_projection_status,
+)
+from stock_forecasting.platform.schema import (
+    canonical_artifacts,
+    fixture_prediction_results,
+    health_assessments,
+    metadata,
+    production_prediction_records,
+    research_records,
+    security_audit_events,
+    trace_artifact_refs,
+    work_attempts,
+)
+
+__all__ = [
+    "canonical_artifacts",
+    "fixture_prediction_results",
+    "health_assessments",
+    "metadata",
+    "operations_prediction_projections",
+    "outbox_delivery_attempts",
+    "outbox_dispatch",
+    "outbox_events",
+    "outbox_incidents",
+    "processed_outbox_events",
+    "production_prediction_records",
+    "projection_cursors",
+    "research_projection_status",
+    "research_records",
+    "security_audit_events",
+    "trace_artifact_refs",
+    "work_attempts",
+]

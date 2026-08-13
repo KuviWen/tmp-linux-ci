@@ -65,7 +65,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("relay currently requires --once")
         outcome = RuntimeSettings.from_environment().build_application().relay_outbox()
         print(json.dumps(asdict(outcome), ensure_ascii=False, sort_keys=True))
-        return 1 if outcome.status in {"failed", "deferred"} else 0
+        return 1 if outcome.status in {"failed", "deferred", "isolated"} else 0
     return 2
 
 

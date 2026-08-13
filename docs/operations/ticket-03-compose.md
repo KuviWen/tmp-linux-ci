@@ -43,9 +43,12 @@ Success is exit code zero with one JSON document whose `status` is `passed`. The
 the authoritative prediction, core research projection, and pending outbox event in one
 PostgreSQL transaction. It then kills a separate relay process before consumer work, restarts
 the application from PostgreSQL truth, and verifies one-time research and operations effects.
+The relay uses an atomic PostgreSQL claim with worker identity, lease expiry, and a monotonically
+increasing fencing token; a live worker cannot be mislabeled as crashed by a competitor.
 It also exercises a consumer-transaction crash, duplicate delivery, repeated out-of-order
 delivery, version catch-up, REST/UI stale-to-fresh status, audit evidence, work attempts, and
-incident correlation.
+incident correlation. Consumers accept only documented event type/schema pairs; incompatible
+events are isolated with blocked work, audit, and incident evidence before any consumer effect.
 
 The acceptance process intentionally uses a hard process termination only for its disposable
 relay child. The parent runner remains alive to validate the durable evidence.

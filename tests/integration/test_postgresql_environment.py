@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.engine import make_url
 
-from stock_forecasting.platform.state_store import metadata, work_attempts
+from stock_forecasting.platform.database_schema import metadata, work_attempts
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 

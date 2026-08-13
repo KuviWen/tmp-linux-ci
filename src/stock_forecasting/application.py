@@ -3,9 +3,17 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from tempfile import mkdtemp
+from uuid import uuid4
 
 from stock_forecasting.operations_control import OperationsControl
-from stock_forecasting.outbox import NoRelayFault, RelayFault, RelayOutcome
+from stock_forecasting.outbox import (
+    EventCompatibility,
+    NoRelayFault,
+    RelayClock,
+    RelayFault,
+    RelayOutcome,
+    SystemRelayClock,
+)
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.research_query import ResearchQuery
@@ -27,6 +35,9 @@ class Application:
         database_url: str,
         create_schema: bool,
         relay_fault: RelayFault | None = None,
+        event_compatibility: EventCompatibility | None = None,
+        relay_clock: RelayClock | None = None,
+        relay_worker_id: str | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
         self.research_query = ResearchQuery(self.state_store)
@@ -34,6 +45,9 @@ class Application:
         self.operations_control = OperationsControl(self.state_store)
         self.object_repository = FilesystemObjectRepository(object_root)
         self._relay_fault = relay_fault or NoRelayFault()
+        self._event_compatibility = event_compatibility or EventCompatibility.current()
+        self._relay_clock = relay_clock or SystemRelayClock()
+        self._relay_worker_id = relay_worker_id or str(uuid4())
         self._fixture_eod = FixtureEodWorkflow(
             self.state_store,
             observed_at=observed_at,
@@ -47,7 +61,13 @@ class Application:
         return self._fixture_eod.execute(command)
 
     def relay_outbox(self, *, event_id: str | None = None) -> RelayOutcome:
-        return self.state_store.relay_outbox(event_id=event_id, fault=self._relay_fault)
+        return self.state_store.relay_outbox(
+            event_id=event_id,
+            fault=self._relay_fault,
+            compatibility=self._event_compatibility,
+            clock=self._relay_clock,
+            worker_id=self._relay_worker_id,
+        )
 
     def attempt_fixture_use(self, command: FixtureUseCommand) -> dict[str, str]:
         return self._fixture_use.execute(command)
@@ -59,6 +79,9 @@ def build_test_application(
     object_root: Path | None = None,
     database_url: str | None = None,
     relay_fault: RelayFault | None = None,
+    event_compatibility: EventCompatibility | None = None,
+    relay_clock: RelayClock | None = None,
+    relay_worker_id: str | None = None,
 ) -> Application:
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
     resolved_database_url = database_url or "sqlite+pysqlite:///:memory:"
@@ -68,6 +91,9 @@ def build_test_application(
         database_url=resolved_database_url,
         create_schema=True,
         relay_fault=relay_fault,
+        event_compatibility=event_compatibility,
+        relay_clock=relay_clock,
+        relay_worker_id=relay_worker_id,
     )
 
 
@@ -77,6 +103,9 @@ def build_application(
     object_root: Path,
     observed_at: datetime,
     relay_fault: RelayFault | None = None,
+    event_compatibility: EventCompatibility | None = None,
+    relay_clock: RelayClock | None = None,
+    relay_worker_id: str | None = None,
 ) -> Application:
     return Application(
         observed_at=observed_at,
@@ -84,4 +113,7 @@ def build_application(
         database_url=database_url,
         create_schema=False,
         relay_fault=relay_fault,
+        event_compatibility=event_compatibility,
+        relay_clock=relay_clock,
+        relay_worker_id=relay_worker_id,
     )

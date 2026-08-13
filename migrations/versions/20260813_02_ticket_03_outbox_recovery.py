@@ -35,6 +35,9 @@ def upgrade() -> None:
         "ops_outbox_dispatch",
         sa.Column("event_id", sa.String(length=36), primary_key=True),
         sa.Column("status", sa.String(length=32), nullable=False),
+        sa.Column("claimed_by", sa.String(length=64), nullable=True),
+        sa.Column("lease_expires_at", sa.String(length=32), nullable=True),
+        sa.Column("fencing_token", sa.Integer(), nullable=False),
     )
     op.create_table(
         "research_projection_status",
@@ -42,6 +45,33 @@ def upgrade() -> None:
         sa.Column("core_projection_version", sa.Integer(), nullable=False),
         sa.Column("evidence_projection_version", sa.Integer(), nullable=False),
         sa.Column("stale", sa.Boolean(), nullable=False),
+    )
+    prior_research_records = sa.table(
+        "serving_research_records",
+        sa.column("record_id", sa.String(length=36)),
+    )
+    projection_status = sa.table(
+        "research_projection_status",
+        sa.column("record_id", sa.String(length=36)),
+        sa.column("core_projection_version", sa.Integer()),
+        sa.column("evidence_projection_version", sa.Integer()),
+        sa.column("stale", sa.Boolean()),
+    )
+    op.execute(
+        projection_status.insert().from_select(
+            [
+                "record_id",
+                "core_projection_version",
+                "evidence_projection_version",
+                "stale",
+            ],
+            sa.select(
+                prior_research_records.c.record_id,
+                sa.literal(0),
+                sa.literal(0),
+                sa.literal(False),
+            ),
+        )
     )
     op.create_table(
         "ops_outbox_delivery_attempts",
@@ -53,6 +83,9 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("reason_code", sa.String(length=96), nullable=False),
         sa.Column("trace_id", sa.String(length=128), nullable=False),
+        sa.Column("worker_id", sa.String(length=64), nullable=False),
+        sa.Column("fencing_token", sa.Integer(), nullable=False),
+        sa.Column("lease_expires_at", sa.String(length=32), nullable=False),
         sa.UniqueConstraint(
             "event_id",
             "attempt_number",
@@ -95,6 +128,9 @@ def upgrade() -> None:
         sa.Column("incident_id", sa.String(length=36), primary_key=True),
         sa.Column("fingerprint", sa.String(length=128), nullable=False, unique=True),
         sa.Column("aggregate_id", sa.String(length=36), nullable=False),
+        sa.Column("impact_scope", sa.String(length=160), nullable=False),
+        sa.Column("severity", sa.String(length=16), nullable=False),
+        sa.Column("owner", sa.String(length=64), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("reason_code", sa.String(length=96), nullable=False),
         sa.Column("occurrence_count", sa.Integer(), nullable=False),

@@ -24,7 +24,7 @@ from stock_forecasting.application import Application, build_application, build_
 from stock_forecasting.dagster_deployment import inspect_dagster_deployment
 from stock_forecasting.fixture_market import FixtureMarket, default_fixture_market_adapters
 from stock_forecasting.fixture_scenarios import FixtureScenario
-from stock_forecasting.outbox import RelayFault
+from stock_forecasting.outbox import RelayFault, RelayOutcome
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodOutcome
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand, FixtureUseTarget
 
@@ -565,7 +565,8 @@ def _terminate_relay_before_consumers(
     information_cutoff: datetime,
     observed_at: datetime,
     event_id: str,
-) -> int:
+    competing_application: Application,
+) -> tuple[int, str]:
     with TemporaryDirectory(prefix="stock-forecasting-relay-") as directory:
         ready_file = Path(directory) / "before-consumers.ready"
         process = subprocess.Popen(
@@ -600,13 +601,23 @@ def _terminate_relay_before_consumers(
             if not ready_file.exists():
                 _, error = process.communicate(timeout=5)
                 raise RuntimeError(f"relay_process_did_not_reach_failpoint: {error}")
+            competing = competing_application.relay_outbox(event_id=event_id)
             process.terminate()
             process.communicate(timeout=5)
-            return int(process.returncode or 0)
+            return int(process.returncode or 0), competing.status
         finally:
             if process.poll() is None:
                 process.kill()
                 process.communicate(timeout=5)
+
+
+def _relay_after_lease_expiry(application: Application, *, event_id: str) -> RelayOutcome:
+    deadline = time.monotonic() + 5
+    outcome = application.relay_outbox(event_id=event_id)
+    while outcome.status == "busy" and time.monotonic() < deadline:
+        time.sleep(0.05)
+        outcome = application.relay_outbox(event_id=event_id)
+    return outcome
 
 
 def run_ticket_03(
@@ -640,12 +651,13 @@ def run_ticket_03(
     lineage_before = application.operations_control.get_trace_evidence(first_command.trace_id)
     audit_before = application.security_audit.list_events(trace_id=first_command.trace_id)
 
-    relay_returncode = _terminate_relay_before_consumers(
+    relay_returncode, competing_status = _terminate_relay_before_consumers(
         database_url=database_url,
         object_root=object_root,
         information_cutoff=information_cutoff,
         observed_at=observed_at,
         event_id=first.outbox_event_id,
+        competing_application=application,
     )
     crashed = application.operations_control.get_outbox_recovery(first.outbox_event_id)
 
@@ -670,7 +682,7 @@ def run_ticket_03(
         database_url=database_url,
         deployed=deployed,
     )
-    recovered = restarted.relay_outbox(event_id=first.outbox_event_id)
+    recovered = _relay_after_lease_expiry(restarted, event_id=first.outbox_event_id)
     duplicate = restarted.relay_outbox(event_id=first.outbox_event_id)
     event_after = restarted.operations_control.get_outbox_event(first.outbox_event_id)
     predictions_after = restarted.operations_control.list_prediction_records(
@@ -760,6 +772,7 @@ def run_ticket_03(
     )
     checks = {
         "canonical_commit_before_consumers": relay_returncode != 0
+        and competing_status == "busy"
         and event_before["delivery_status"] == "pending"
         and crashed["consumer_effect_counts"]
         == {"research_projection": 0, "operations_projection": 0}
@@ -785,16 +798,32 @@ def run_ticket_03(
         "ui_projection_stale_then_fresh": "投影狀態：等待恢復" in pending_ui.text
         and "投影狀態：已同步" in recovered_ui.text,
         "canonical_state_immutable": predictions_after == predictions_before
-        and lineage_after == lineage_before
+        and lineage_after["lineage_ids"] == lineage_before["lineage_ids"]
+        and lineage_after["artifact_content_digests"] == lineage_before["artifact_content_digests"]
+        and all(
+            lineage_after["lineage_ids"][field] == lineage_before["lineage_ids"][field]
+            for field in ("feature_snapshot_id", "serving_assignment_id")
+        )
+        and lineage_after["audit_events"][0] == lineage_before["audit_events"][0]
+        and bool(lineage_before["audit_events"][0]["event_id"])
         and audit_after[0] == audit_before[0],
         "operations_recovery_evidence": [
             attempt["status"] for attempt in first_recovery["delivery_attempts"]
         ]
         == ["crashed", "delivered"]
         and [event["action"] for event in audit_after]
-        == ["fixture_eod_publication", "outbox_recovery", "outbox_delivery"],
+        == ["fixture_eod_publication", "outbox_recovery", "outbox_delivery"]
+        and [attempt["fencing_token"] for attempt in first_recovery["delivery_attempts"]] == [1, 2]
+        and all(attempt["worker_id"] for attempt in first_recovery["delivery_attempts"]),
         "single_correlated_incident": len(incidents) == 3
         and all(incident["status"] == "monitoring" for incident in incidents)
+        and all(incident["severity"] == "SEV3" for incident in incidents)
+        and all(incident["owner"] == "operations_control" for incident in incidents)
+        and all(
+            incident["impact_scope"]
+            == f"listing:{first.listing_id}:research_and_operations_projection"
+            for incident in incidents
+        )
         and len(
             [
                 incident

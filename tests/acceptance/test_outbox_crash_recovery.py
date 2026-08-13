@@ -4,13 +4,14 @@ import os
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import build_test_application
+from stock_forecasting.outbox import EventCompatibility
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
 
 
@@ -24,6 +25,113 @@ class CrashOperationsConsumer:
 
     def before_ack(self, event_id: str) -> None:
         pass
+
+
+class MutableRelayClock:
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
+
+
+class ExpireResearchConsumerLease:
+    def __init__(self, clock: MutableRelayClock) -> None:
+        self._clock = clock
+
+    def before_consumers(self, event_id: str) -> None:
+        pass
+
+    def before_consumer_commit(self, consumer_name: str, event_id: str) -> None:
+        if consumer_name == "research_projection":
+            self._clock.advance(timedelta(seconds=3))
+
+    def before_ack(self, event_id: str) -> None:
+        pass
+
+
+def test_expired_fencing_token_cannot_commit_consumer_effects(tmp_path: Path) -> None:
+    cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'expired-fence.db'}"
+    object_root = tmp_path / "objects"
+    clock = MutableRelayClock(cutoff)
+    expired_worker = build_test_application(
+        observed_at=cutoff,
+        database_url=database_url,
+        object_root=object_root,
+        relay_clock=clock,
+        relay_worker_id="expired-worker",
+        relay_fault=ExpireResearchConsumerLease(clock),
+    )
+    outcome = expired_worker.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=cutoff,
+            trace_id="trace-ticket-03-expired-fence",
+            idempotency_key="ticket-03-expired-fence",
+        )
+    )
+
+    lease_lost = expired_worker.relay_outbox(event_id=outcome.outbox_event_id)
+    after_expiry = expired_worker.operations_control.get_outbox_recovery(outcome.outbox_event_id)
+    replacement = build_test_application(
+        observed_at=cutoff,
+        database_url=database_url,
+        object_root=object_root,
+        relay_clock=clock,
+        relay_worker_id="replacement-worker",
+    )
+    recovered = replacement.relay_outbox(event_id=outcome.outbox_event_id)
+    after_recovery = replacement.operations_control.get_outbox_recovery(outcome.outbox_event_id)
+
+    assert lease_lost.status == "busy"
+    assert after_expiry["consumer_effect_counts"] == {
+        "research_projection": 0,
+        "operations_projection": 0,
+    }
+    assert recovered.status == "delivered"
+    assert [attempt["fencing_token"] for attempt in after_recovery["delivery_attempts"]] == [1, 2]
+    assert after_recovery["consumer_effect_counts"] == {
+        "research_projection": 1,
+        "operations_projection": 1,
+    }
+
+
+def test_incompatible_event_version_is_isolated_before_consumer_effects() -> None:
+    cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+    application = build_test_application(
+        observed_at=cutoff,
+        event_compatibility=EventCompatibility(
+            accepted_versions={
+                "forecast_publication.completed": frozenset({"2.0.0"}),
+            }
+        ),
+    )
+    outcome = application.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=cutoff,
+            trace_id="trace-ticket-03-incompatible-event",
+            idempotency_key="ticket-03-incompatible-event",
+        )
+    )
+
+    isolated = application.relay_outbox(event_id=outcome.outbox_event_id)
+    event = application.operations_control.get_outbox_event(outcome.outbox_event_id)
+    recovery = application.operations_control.get_outbox_recovery(outcome.outbox_event_id)
+    incidents = application.operations_control.list_outbox_incidents(
+        aggregate_id=outcome.listing_id
+    )
+
+    assert isolated.status == "isolated"
+    assert event["delivery_status"] == "isolated"
+    assert recovery["consumer_effect_counts"] == {
+        "research_projection": 0,
+        "operations_projection": 0,
+    }
+    assert [attempt["status"] for attempt in recovery["delivery_attempts"]] == ["blocked"]
+    assert incidents[0]["reason_code"] == "incompatible_event_contract"
 
 
 def test_prediction_publication_is_stale_until_its_outbox_event_is_relayed() -> None:
@@ -212,6 +320,11 @@ def test_out_of_order_versions_defer_and_share_one_incident(tmp_path: Path) -> N
     assert len(incidents) == 1
     assert incidents[0]["occurrence_count"] == 2
     assert incidents[0]["status"] == "monitoring"
+    assert incidents[0]["impact_scope"] == (
+        f"listing:{second.listing_id}:research_and_operations_projection"
+    )
+    assert incidents[0]["severity"] == "SEV3"
+    assert incidents[0]["owner"] == "operations_control"
     assert second_recovery["consumer_effect_counts"] == {
         "research_projection": 1,
         "operations_projection": 1,
@@ -245,6 +358,9 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
     )
     event_before = application.operations_control.get_outbox_event(outcome.outbox_event_id)
     audit_before = application.security_audit.list_events(trace_id="trace-ticket-03-process-crash")
+    lineage_before = application.operations_control.get_trace_evidence(
+        "trace-ticket-03-process-crash"
+    )
 
     process = subprocess.Popen(
         [
@@ -275,6 +391,8 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
         while not ready_file.exists() and process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.05)
         assert ready_file.exists(), process.stderr.read() if process.stderr else ""
+        competing = application.relay_outbox(event_id=outcome.outbox_event_id)
+        assert competing.status == "busy"
         process.terminate()
         process.communicate(timeout=5)
     finally:
@@ -295,10 +413,15 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
         object_root=object_root,
         database_url=database_url,
     )
+    deadline = time.monotonic() + 5
     recovered = restarted.relay_outbox(event_id=outcome.outbox_event_id)
+    while recovered.status == "busy" and time.monotonic() < deadline:
+        time.sleep(0.05)
+        recovered = restarted.relay_outbox(event_id=outcome.outbox_event_id)
     evidence = restarted.operations_control.get_outbox_recovery(outcome.outbox_event_id)
     event_after = restarted.operations_control.get_outbox_event(outcome.outbox_event_id)
     audit_after = restarted.security_audit.list_events(trace_id="trace-ticket-03-process-crash")
+    lineage_after = restarted.operations_control.get_trace_evidence("trace-ticket-03-process-crash")
 
     assert recovered.status == "delivered"
     assert event_after == {**event_before, "delivery_status": "delivered"}
@@ -310,11 +433,22 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
         "failed",
         "succeeded",
     ]
+    assert [attempt["fencing_token"] for attempt in evidence["delivery_attempts"]] == [1, 2]
+    assert all(attempt["worker_id"] for attempt in evidence["delivery_attempts"])
     assert evidence["consumer_effect_counts"] == {
         "research_projection": 1,
         "operations_projection": 1,
     }
     assert audit_after[0] == audit_before[0]
+    for lineage_field in ("feature_snapshot_id", "serving_assignment_id"):
+        artifact_id = evidence_id = lineage_after["lineage_ids"][lineage_field]
+        assert evidence_id == lineage_before["lineage_ids"][lineage_field]
+        assert (
+            lineage_after["artifact_content_digests"][artifact_id]
+            == lineage_before["artifact_content_digests"][artifact_id]
+        )
+    assert lineage_after["audit_events"][0] == lineage_before["audit_events"][0]
+    assert lineage_before["audit_events"][0]["event_id"]
     assert [event["action"] for event in audit_after] == [
         "fixture_eod_publication",
         "outbox_recovery",
@@ -372,6 +506,8 @@ def test_relay_process_crash_after_consumer_commits_redelivers_without_duplicate
         while not ready_file.exists() and process.poll() is None and time.monotonic() < deadline:
             time.sleep(0.05)
         assert ready_file.exists(), process.stderr.read() if process.stderr else ""
+        competing = application.relay_outbox(event_id=outcome.outbox_event_id)
+        assert competing.status == "busy"
         process.terminate()
         process.communicate(timeout=5)
     finally:
@@ -396,7 +532,11 @@ def test_relay_process_crash_after_consumer_commits_redelivers_without_duplicate
         object_root=object_root,
         database_url=database_url,
     )
+    deadline = time.monotonic() + 5
     recovered = restarted.relay_outbox(event_id=outcome.outbox_event_id)
+    while recovered.status == "busy" and time.monotonic() < deadline:
+        time.sleep(0.05)
+        recovered = restarted.relay_outbox(event_id=outcome.outbox_event_id)
     evidence = restarted.operations_control.get_outbox_recovery(outcome.outbox_event_id)
 
     assert recovered.status == "delivered"

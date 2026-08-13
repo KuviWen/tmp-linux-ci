@@ -1,18 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from copy import deepcopy
 from typing import Any, cast
-from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import (
-    JSON,
-    Boolean,
-    Column,
-    Integer,
-    MetaData,
-    String,
-    Table,
-    UniqueConstraint,
     create_engine,
     func,
     select,
@@ -21,200 +14,28 @@ from sqlalchemy import (
 from sqlalchemy.pool import StaticPool
 
 from stock_forecasting.contracts import PublicationDisposition
-from stock_forecasting.outbox import OutOfOrderEvent, RelayFault, RelayOutcome
-
-metadata = MetaData()
-
-research_records = Table(
-    "serving_research_records",
-    metadata,
-    Column("record_id", String(36), primary_key=True),
-    Column("listing_id", String(36), nullable=False),
-    Column("information_cutoff", String(32), nullable=False),
-    Column("execution_purpose", String(32), nullable=False),
-    Column("fixture_scenario", String(32), nullable=False),
-    Column("payload", JSON, nullable=False),
-    UniqueConstraint(
-        "listing_id",
-        "information_cutoff",
-        "execution_purpose",
-        "fixture_scenario",
-        name="uq_research_record_listing_cutoff_purpose_scenario",
-    ),
+from stock_forecasting.outbox import (
+    EventCompatibility,
+    RelayClock,
+    RelayFault,
+    RelayOutcome,
 )
-
-work_attempts = Table(
-    "ops_work_attempts",
-    metadata,
-    Column("work_id", String(36), primary_key=True),
-    Column("operation", String(64), nullable=False),
-    Column("status", String(32), nullable=False),
-    Column("execution_purpose", String(32), nullable=False),
-    Column("trace_id", String(128), nullable=False),
-    Column("idempotency_key", String(128), nullable=False, unique=True),
-    Column("attempt_count", Integer, nullable=False),
+from stock_forecasting.platform.outbox_relay import (
+    OutboxRelay,
+    outbox_dispatch,
+    outbox_events,
+    research_projection_status,
 )
-
-health_assessments = Table(
-    "ops_health_assessments",
+from stock_forecasting.platform.schema import (
+    canonical_artifacts,
+    fixture_prediction_results,
+    health_assessments,
     metadata,
-    Column("sequence", Integer, primary_key=True, autoincrement=True),
-    Column("assessment_id", String(36), nullable=False, unique=True),
-    Column("scope", String(128), nullable=False),
-    Column("status", String(32), nullable=False),
-    Column("reason_code", String(128), nullable=False),
-    Column("trace_id", String(128), nullable=False),
-)
-
-security_audit_events = Table(
-    "security_audit_events",
-    metadata,
-    Column("sequence", Integer, primary_key=True, autoincrement=True),
-    Column("event_id", String(36), nullable=False, unique=True),
-    Column("action", String(128), nullable=False),
-    Column("outcome", String(32), nullable=False),
-    Column("reason_code", String(128), nullable=False),
-    Column("trace_id", String(128), nullable=False),
-)
-
-canonical_artifacts = Table(
-    "lineage_canonical_artifacts",
-    metadata,
-    Column("artifact_id", String(72), primary_key=True),
-    Column("artifact_kind", String(64), nullable=False),
-    Column("execution_purpose", String(32), nullable=False),
-    Column("payload", JSON, nullable=False),
-)
-
-trace_artifact_refs = Table(
-    "lineage_trace_artifact_refs",
-    metadata,
-    Column("sequence", Integer, primary_key=True, autoincrement=True),
-    Column("trace_id", String(128), nullable=False),
-    Column("artifact_id", String(72), nullable=False),
-    UniqueConstraint("trace_id", "artifact_id", name="uq_trace_artifact_ref"),
-)
-
-fixture_prediction_results = Table(
-    "serving_fixture_prediction_results",
-    metadata,
-    Column("prediction_id", String(36), primary_key=True),
-    Column("trace_id", String(128), nullable=False),
-    Column("listing_id", String(36), nullable=False),
-    Column("horizon_sessions", Integer, nullable=False),
-    Column("payload", JSON, nullable=False),
-)
-
-production_prediction_records = Table(
-    "serving_production_prediction_records",
-    metadata,
-    Column("prediction_id", String(36), primary_key=True),
-    Column("trace_id", String(128), nullable=False),
-    Column("listing_id", String(36), nullable=False),
-    Column("horizon_sessions", Integer, nullable=False),
-    Column("payload", JSON, nullable=False),
-)
-
-outbox_events = Table(
-    "ops_outbox_events",
-    metadata,
-    Column("event_id", String(36), primary_key=True),
-    Column("event_type", String(96), nullable=False),
-    Column("schema_version", String(16), nullable=False),
-    Column("aggregate_id", String(36), nullable=False),
-    Column("aggregate_version", Integer, nullable=False),
-    Column("occurred_at", String(32), nullable=False),
-    Column("producer", String(64), nullable=False),
-    Column("trace_id", String(128), nullable=False),
-    Column("payload", JSON, nullable=False),
-    UniqueConstraint(
-        "aggregate_id",
-        "aggregate_version",
-        name="uq_outbox_event_aggregate_version",
-    ),
-)
-
-outbox_dispatch = Table(
-    "ops_outbox_dispatch",
-    metadata,
-    Column("event_id", String(36), primary_key=True),
-    Column("status", String(32), nullable=False),
-)
-
-research_projection_status = Table(
-    "research_projection_status",
-    metadata,
-    Column("record_id", String(36), primary_key=True),
-    Column("core_projection_version", Integer, nullable=False),
-    Column("evidence_projection_version", Integer, nullable=False),
-    Column("stale", Boolean, nullable=False),
-)
-
-outbox_delivery_attempts = Table(
-    "ops_outbox_delivery_attempts",
-    metadata,
-    Column("sequence", Integer, primary_key=True, autoincrement=True),
-    Column("attempt_id", String(36), nullable=False, unique=True),
-    Column("event_id", String(36), nullable=False),
-    Column("attempt_number", Integer, nullable=False),
-    Column("work_id", String(36), nullable=False),
-    Column("status", String(32), nullable=False),
-    Column("reason_code", String(96), nullable=False),
-    Column("trace_id", String(128), nullable=False),
-    UniqueConstraint(
-        "event_id",
-        "attempt_number",
-        name="uq_outbox_delivery_event_attempt",
-    ),
-)
-
-processed_outbox_events = Table(
-    "ops_processed_outbox_events",
-    metadata,
-    Column("consumer_name", String(64), nullable=False),
-    Column("event_id", String(36), nullable=False),
-    Column("aggregate_id", String(36), nullable=False),
-    Column("aggregate_version", Integer, nullable=False),
-    UniqueConstraint(
-        "consumer_name",
-        "event_id",
-        name="uq_processed_outbox_consumer_event",
-    ),
-)
-
-projection_cursors = Table(
-    "ops_projection_cursors",
-    metadata,
-    Column("consumer_name", String(64), nullable=False),
-    Column("aggregate_id", String(36), nullable=False),
-    Column("aggregate_version", Integer, nullable=False),
-    UniqueConstraint(
-        "consumer_name",
-        "aggregate_id",
-        name="uq_projection_cursor_consumer_aggregate",
-    ),
-)
-
-operations_prediction_projections = Table(
-    "ops_prediction_projection_events",
-    metadata,
-    Column("event_id", String(36), primary_key=True),
-    Column("aggregate_id", String(36), nullable=False),
-    Column("aggregate_version", Integer, nullable=False),
-    Column("trace_id", String(128), nullable=False),
-    Column("payload", JSON, nullable=False),
-)
-
-outbox_incidents = Table(
-    "ops_outbox_incidents",
-    metadata,
-    Column("incident_id", String(36), primary_key=True),
-    Column("fingerprint", String(128), nullable=False, unique=True),
-    Column("aggregate_id", String(36), nullable=False),
-    Column("status", String(32), nullable=False),
-    Column("reason_code", String(96), nullable=False),
-    Column("occurrence_count", Integer, nullable=False),
-    Column("trace_id", String(128), nullable=False),
+    production_prediction_records,
+    research_records,
+    security_audit_events,
+    trace_artifact_refs,
+    work_attempts,
 )
 
 
@@ -232,117 +53,13 @@ class StateStore:
             )
         else:
             self.engine = create_engine(database_url)
+        self._outbox = OutboxRelay(self.engine)
         if create_schema:
             metadata.create_all(self.engine)
 
     def ping(self) -> bool:
         with self.engine.connect() as connection:
             return bool(connection.execute(text("SELECT 1")).scalar_one() == 1)
-
-    @staticmethod
-    def _relay_id(event_id: str, kind: str, attempt_number: int) -> str:
-        return str(
-            uuid5(
-                NAMESPACE_URL,
-                f"stock-forecasting/outbox/{event_id}/{kind}/{attempt_number}",
-            )
-        )
-
-    @staticmethod
-    def _incident_id(aggregate_id: str, reason_code: str) -> str:
-        return str(
-            uuid5(
-                NAMESPACE_URL,
-                f"stock-forecasting/incident/outbox-projection-delay/{reason_code}/{aggregate_id}",
-            )
-        )
-
-    def _record_outbox_incident(
-        self,
-        connection: Any,
-        *,
-        event: Any,
-        reason_code: str,
-    ) -> None:
-        aggregate_id = str(event["aggregate_id"])
-        fingerprint = f"outbox_projection_delay:{reason_code}:{aggregate_id}"
-        existing = (
-            connection.execute(
-                select(
-                    outbox_incidents.c.incident_id,
-                    outbox_incidents.c.occurrence_count,
-                ).where(outbox_incidents.c.fingerprint == fingerprint)
-            )
-            .mappings()
-            .one_or_none()
-        )
-        if existing is None:
-            connection.execute(
-                outbox_incidents.insert().values(
-                    incident_id=self._incident_id(aggregate_id, reason_code),
-                    fingerprint=fingerprint,
-                    aggregate_id=aggregate_id,
-                    status="open",
-                    reason_code=reason_code,
-                    occurrence_count=1,
-                    trace_id=event["trace_id"],
-                )
-            )
-            return
-        connection.execute(
-            outbox_incidents.update()
-            .where(outbox_incidents.c.incident_id == existing["incident_id"])
-            .values(
-                status="open",
-                reason_code=reason_code,
-                occurrence_count=int(existing["occurrence_count"]) + 1,
-            )
-        )
-
-    def _recover_abandoned_deliveries(self, *, event: Any) -> None:
-        event_id = str(event["event_id"])
-        with self.engine.begin() as connection:
-            abandoned = list(
-                connection.execute(
-                    select(
-                        outbox_delivery_attempts.c.attempt_id,
-                        outbox_delivery_attempts.c.attempt_number,
-                        outbox_delivery_attempts.c.work_id,
-                    ).where(
-                        outbox_delivery_attempts.c.event_id == event_id,
-                        outbox_delivery_attempts.c.status == "running",
-                    )
-                ).mappings()
-            )
-            for attempt in abandoned:
-                connection.execute(
-                    outbox_delivery_attempts.update()
-                    .where(outbox_delivery_attempts.c.attempt_id == attempt["attempt_id"])
-                    .values(status="crashed", reason_code="relay_process_terminated")
-                )
-                connection.execute(
-                    work_attempts.update()
-                    .where(work_attempts.c.work_id == attempt["work_id"])
-                    .values(status="failed")
-                )
-                self._record_outbox_incident(
-                    connection,
-                    event=event,
-                    reason_code="relay_process_terminated",
-                )
-                connection.execute(
-                    security_audit_events.insert().values(
-                        event_id=self._relay_id(
-                            event_id,
-                            "audit-recovery",
-                            int(attempt["attempt_number"]),
-                        ),
-                        action="outbox_recovery",
-                        outcome="allowed",
-                        reason_code="relay_process_terminated",
-                        trace_id=event["trace_id"],
-                    )
-                )
 
     def publish_fixture_trace(
         self,
@@ -404,6 +121,7 @@ class StateStore:
                     outbox_dispatch.insert().values(
                         event_id=outbox_event_id,
                         status="pending",
+                        fencing_token=0,
                     )
                 )
             else:
@@ -654,33 +372,7 @@ class StateStore:
             return records
 
     def get_outbox_event(self, event_id: str) -> dict[str, Any]:
-        with self.engine.connect() as connection:
-            row = (
-                connection.execute(
-                    select(
-                        outbox_events.c.event_id,
-                        outbox_events.c.event_type,
-                        outbox_events.c.schema_version,
-                        outbox_events.c.aggregate_id,
-                        outbox_events.c.aggregate_version,
-                        outbox_events.c.producer,
-                        outbox_events.c.trace_id,
-                        outbox_dispatch.c.status.label("delivery_status"),
-                    )
-                    .select_from(
-                        outbox_events.join(
-                            outbox_dispatch,
-                            outbox_events.c.event_id == outbox_dispatch.c.event_id,
-                        )
-                    )
-                    .where(outbox_events.c.event_id == event_id)
-                )
-                .mappings()
-                .one_or_none()
-            )
-        if row is None:
-            raise KeyError(event_id)
-        return dict(row)
+        return self._outbox.get_event(event_id)
 
     def list_prediction_records(self, *, trace_id: str) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:
@@ -696,334 +388,23 @@ class StateStore:
         *,
         event_id: str | None = None,
         fault: RelayFault,
+        compatibility: EventCompatibility,
+        clock: RelayClock,
+        worker_id: str,
     ) -> RelayOutcome:
-        with self.engine.connect() as connection:
-            event_query = (
-                select(
-                    outbox_events.c.event_id,
-                    outbox_events.c.aggregate_id,
-                    outbox_events.c.aggregate_version,
-                    outbox_events.c.trace_id,
-                    outbox_events.c.payload,
-                    outbox_dispatch.c.status.label("delivery_status"),
-                )
-                .select_from(
-                    outbox_events.join(
-                        outbox_dispatch,
-                        outbox_events.c.event_id == outbox_dispatch.c.event_id,
-                    )
-                )
-                .order_by(outbox_events.c.aggregate_id, outbox_events.c.aggregate_version)
-            )
-            if event_id is None:
-                event_query = event_query.where(outbox_dispatch.c.status == "pending")
-            else:
-                event_query = event_query.where(outbox_events.c.event_id == event_id)
-            event = connection.execute(event_query.limit(1)).mappings().one_or_none()
-
-        if event is None:
-            if event_id is not None:
-                raise KeyError(event_id)
-            return RelayOutcome(status="empty", event_id=None, aggregate_version=None)
-        resolved_event_id = str(event["event_id"])
-        aggregate_version = int(event["aggregate_version"])
-        if event["delivery_status"] == "delivered":
-            return RelayOutcome(
-                status="already_delivered",
-                event_id=resolved_event_id,
-                aggregate_version=aggregate_version,
-            )
-
-        self._recover_abandoned_deliveries(event=event)
-
-        with self.engine.begin() as connection:
-            attempt_number = (
-                int(
-                    connection.execute(
-                        select(func.count(outbox_delivery_attempts.c.sequence)).where(
-                            outbox_delivery_attempts.c.event_id == resolved_event_id
-                        )
-                    ).scalar_one()
-                )
-                + 1
-            )
-            attempt_id = self._relay_id(resolved_event_id, "attempt", attempt_number)
-            work_id = self._relay_id(resolved_event_id, "work", attempt_number)
-            connection.execute(
-                outbox_delivery_attempts.insert().values(
-                    attempt_id=attempt_id,
-                    event_id=resolved_event_id,
-                    attempt_number=attempt_number,
-                    work_id=work_id,
-                    status="running",
-                    reason_code="delivery_started",
-                    trace_id=event["trace_id"],
-                )
-            )
-            connection.execute(
-                work_attempts.insert().values(
-                    work_id=work_id,
-                    operation="outbox_relay",
-                    status="running",
-                    execution_purpose="fixture",
-                    trace_id=event["trace_id"],
-                    idempotency_key=f"outbox:{resolved_event_id}:{attempt_number}",
-                    attempt_count=attempt_number,
-                )
-            )
-
-        try:
-            fault.before_consumers(resolved_event_id)
-            for consumer_name in ("research_projection", "operations_projection"):
-                self._consume_outbox_event(
-                    event=event,
-                    consumer_name=consumer_name,
-                    fault=fault,
-                )
-            fault.before_ack(resolved_event_id)
-        except OutOfOrderEvent:
-            with self.engine.begin() as connection:
-                connection.execute(
-                    outbox_delivery_attempts.update()
-                    .where(outbox_delivery_attempts.c.attempt_id == attempt_id)
-                    .values(status="deferred", reason_code="out_of_order_aggregate_version")
-                )
-                connection.execute(
-                    work_attempts.update()
-                    .where(work_attempts.c.work_id == work_id)
-                    .values(status="blocked")
-                )
-                self._record_outbox_incident(
-                    connection,
-                    event=event,
-                    reason_code="out_of_order_aggregate_version",
-                )
-                connection.execute(
-                    security_audit_events.insert().values(
-                        event_id=self._relay_id(
-                            resolved_event_id,
-                            "audit-deferred",
-                            attempt_number,
-                        ),
-                        action="outbox_delivery",
-                        outcome="denied",
-                        reason_code="out_of_order_aggregate_version",
-                        trace_id=event["trace_id"],
-                    )
-                )
-            return RelayOutcome(
-                status="deferred",
-                event_id=resolved_event_id,
-                aggregate_version=aggregate_version,
-            )
-        except RuntimeError:
-            with self.engine.begin() as connection:
-                connection.execute(
-                    outbox_delivery_attempts.update()
-                    .where(outbox_delivery_attempts.c.attempt_id == attempt_id)
-                    .values(status="failed", reason_code="consumer_transaction_crash")
-                )
-                connection.execute(
-                    work_attempts.update()
-                    .where(work_attempts.c.work_id == work_id)
-                    .values(status="failed")
-                )
-                self._record_outbox_incident(
-                    connection,
-                    event=event,
-                    reason_code="consumer_transaction_crash",
-                )
-                connection.execute(
-                    security_audit_events.insert().values(
-                        event_id=self._relay_id(
-                            resolved_event_id,
-                            "audit-consumer-failed",
-                            attempt_number,
-                        ),
-                        action="outbox_delivery",
-                        outcome="denied",
-                        reason_code="consumer_transaction_crash",
-                        trace_id=event["trace_id"],
-                    )
-                )
-            return RelayOutcome(
-                status="failed",
-                event_id=resolved_event_id,
-                aggregate_version=aggregate_version,
-            )
-
-        with self.engine.begin() as connection:
-            connection.execute(
-                outbox_dispatch.update()
-                .where(outbox_dispatch.c.event_id == resolved_event_id)
-                .values(status="delivered")
-            )
-            connection.execute(
-                outbox_delivery_attempts.update()
-                .where(outbox_delivery_attempts.c.attempt_id == attempt_id)
-                .values(status="delivered", reason_code="consumer_effects_committed")
-            )
-            connection.execute(
-                work_attempts.update()
-                .where(work_attempts.c.work_id == work_id)
-                .values(status="succeeded")
-            )
-            connection.execute(
-                security_audit_events.insert().values(
-                    event_id=self._relay_id(resolved_event_id, "audit-delivered", attempt_number),
-                    action="outbox_delivery",
-                    outcome="allowed",
-                    reason_code="consumer_effects_committed",
-                    trace_id=event["trace_id"],
-                )
-            )
-            connection.execute(
-                outbox_incidents.update()
-                .where(outbox_incidents.c.aggregate_id == event["aggregate_id"])
-                .values(status="monitoring")
-            )
-        return RelayOutcome(
-            status="delivered",
-            event_id=resolved_event_id,
-            aggregate_version=aggregate_version,
+        return self._outbox.relay(
+            event_id=event_id,
+            fault=fault,
+            compatibility=compatibility,
+            clock=clock,
+            worker_id=worker_id,
         )
 
-    def _consume_outbox_event(
-        self,
-        *,
-        event: Any,
-        consumer_name: str,
-        fault: RelayFault,
-    ) -> None:
-        event_id = str(event["event_id"])
-        aggregate_id = str(event["aggregate_id"])
-        aggregate_version = int(event["aggregate_version"])
-        payload = cast(dict[str, Any], event["payload"])
-        with self.engine.begin() as connection:
-            processed = connection.execute(
-                select(processed_outbox_events.c.event_id).where(
-                    processed_outbox_events.c.consumer_name == consumer_name,
-                    processed_outbox_events.c.event_id == event_id,
-                )
-            ).scalar_one_or_none()
-            if processed is not None:
-                return
-
-            current_version = connection.execute(
-                select(projection_cursors.c.aggregate_version).where(
-                    projection_cursors.c.consumer_name == consumer_name,
-                    projection_cursors.c.aggregate_id == aggregate_id,
-                )
-            ).scalar_one_or_none()
-            expected_version = 1 if current_version is None else int(current_version) + 1
-            if aggregate_version != expected_version:
-                raise OutOfOrderEvent("out_of_order_aggregate_version")
-
-            if consumer_name == "research_projection":
-                connection.execute(
-                    research_projection_status.update()
-                    .where(research_projection_status.c.record_id == payload["record_id"])
-                    .values(
-                        evidence_projection_version=aggregate_version,
-                        stale=False,
-                    )
-                )
-            else:
-                connection.execute(
-                    operations_prediction_projections.insert().values(
-                        event_id=event_id,
-                        aggregate_id=aggregate_id,
-                        aggregate_version=aggregate_version,
-                        trace_id=event["trace_id"],
-                        payload=payload,
-                    )
-                )
-            fault.before_consumer_commit(consumer_name, event_id)
-            connection.execute(
-                processed_outbox_events.insert().values(
-                    consumer_name=consumer_name,
-                    event_id=event_id,
-                    aggregate_id=aggregate_id,
-                    aggregate_version=aggregate_version,
-                )
-            )
-            cursor = connection.execute(
-                select(projection_cursors.c.aggregate_version).where(
-                    projection_cursors.c.consumer_name == consumer_name,
-                    projection_cursors.c.aggregate_id == aggregate_id,
-                )
-            ).scalar_one_or_none()
-            if cursor is None:
-                connection.execute(
-                    projection_cursors.insert().values(
-                        consumer_name=consumer_name,
-                        aggregate_id=aggregate_id,
-                        aggregate_version=aggregate_version,
-                    )
-                )
-            else:
-                connection.execute(
-                    projection_cursors.update()
-                    .where(
-                        projection_cursors.c.consumer_name == consumer_name,
-                        projection_cursors.c.aggregate_id == aggregate_id,
-                    )
-                    .values(aggregate_version=aggregate_version)
-                )
-
     def get_outbox_recovery(self, event_id: str) -> dict[str, Any]:
-        with self.engine.connect() as connection:
-            attempts = list(
-                connection.execute(
-                    select(
-                        outbox_delivery_attempts.c.attempt_number,
-                        outbox_delivery_attempts.c.status,
-                        outbox_delivery_attempts.c.reason_code,
-                        outbox_delivery_attempts.c.work_id,
-                        work_attempts.c.status.label("work_status"),
-                    )
-                    .select_from(
-                        outbox_delivery_attempts.join(
-                            work_attempts,
-                            outbox_delivery_attempts.c.work_id == work_attempts.c.work_id,
-                        )
-                    )
-                    .where(outbox_delivery_attempts.c.event_id == event_id)
-                    .order_by(outbox_delivery_attempts.c.attempt_number)
-                ).mappings()
-            )
-            counts = {
-                consumer_name: int(
-                    connection.execute(
-                        select(func.count())
-                        .select_from(processed_outbox_events)
-                        .where(
-                            processed_outbox_events.c.consumer_name == consumer_name,
-                            processed_outbox_events.c.event_id == event_id,
-                        )
-                    ).scalar_one()
-                )
-                for consumer_name in ("research_projection", "operations_projection")
-            }
-            return {
-                "delivery_attempts": [dict(attempt) for attempt in attempts],
-                "consumer_effect_counts": counts,
-            }
+        return self._outbox.get_recovery(event_id)
 
     def list_outbox_incidents(self, *, aggregate_id: str) -> list[dict[str, Any]]:
-        with self.engine.connect() as connection:
-            rows = connection.execute(
-                select(
-                    outbox_incidents.c.incident_id,
-                    outbox_incidents.c.fingerprint,
-                    outbox_incidents.c.aggregate_id,
-                    outbox_incidents.c.status,
-                    outbox_incidents.c.reason_code,
-                    outbox_incidents.c.occurrence_count,
-                    outbox_incidents.c.trace_id,
-                ).where(outbox_incidents.c.aggregate_id == aggregate_id)
-            ).mappings()
-            return [dict(row) for row in rows]
+        return self._outbox.list_incidents(aggregate_id=aggregate_id)
 
     def get_work(self, work_id: str) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
@@ -1088,6 +469,7 @@ class StateStore:
                         canonical_artifacts.c.artifact_kind,
                         canonical_artifacts.c.artifact_id,
                         canonical_artifacts.c.execution_purpose,
+                        canonical_artifacts.c.payload,
                     )
                     .select_from(
                         trace_artifact_refs.join(
@@ -1109,6 +491,18 @@ class StateStore:
                     production_prediction_records.c.trace_id == trace_id
                 )
             ).all()
+            audit_events = list(
+                connection.execute(
+                    select(
+                        security_audit_events.c.event_id,
+                        security_audit_events.c.action,
+                        security_audit_events.c.outcome,
+                        security_audit_events.c.reason_code,
+                    )
+                    .where(security_audit_events.c.trace_id == trace_id)
+                    .order_by(security_audit_events.c.sequence)
+                ).mappings()
+            )
         if not artifacts:
             raise KeyError(trace_id)
         lineage_kinds = {
@@ -1122,6 +516,17 @@ class StateStore:
             "execution_purpose": artifacts[0]["execution_purpose"],
             "artifact_kinds": [artifact["artifact_kind"] for artifact in artifacts],
             "artifact_ids": [artifact["artifact_id"] for artifact in artifacts],
+            "artifact_content_digests": {
+                artifact["artifact_id"]: hashlib.sha256(
+                    json.dumps(
+                        artifact["payload"],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                for artifact in artifacts
+            },
             "lineage_ids": {
                 lineage_kinds[artifact["artifact_kind"]]: artifact["artifact_id"]
                 for artifact in artifacts
@@ -1129,4 +534,5 @@ class StateStore:
             },
             "fixture_prediction_result_count": len(fixture_count),
             "production_prediction_record_count": len(production_count),
+            "audit_events": [dict(event) for event in audit_events],
         }
