@@ -62,7 +62,7 @@ class FixtureEodOutcome:
     security_id: str
     listing_id: str
     display_ticker: str
-    calendar_version_id: str
+    calendar_version_id: str | None
     adjustment_version_id: str
     source_policy_version_id: str
     data_selection_id: str
@@ -87,13 +87,17 @@ class FixtureEodWorkflow:
         self._state_store = state_store
         self._observed_at = observed_at
         self._object_repository = object_repository
-        self._market_adapters = dict(market_adapters or default_fixture_market_adapters())
+        self._market_adapters = dict(
+            default_fixture_market_adapters() if market_adapters is None else market_adapters
+        )
         self._forecaster = forecaster or FixtureTrendForecaster()
 
     def execute(self, command: FixtureEodCommand) -> FixtureEodOutcome:
         observed_at = self._observed_at or datetime.now(UTC)
         policy = scenario_policy(command.fixture_scenario)
         market_batch = self._market_adapters[command.market].load(command.information_cutoff)
+        if market_batch.market != command.market:
+            raise ValueError("fixture_adapter_market_mismatch")
         namespace = market_batch.namespace
 
         def fixture_id(kind: str) -> str:
@@ -118,7 +122,33 @@ class FixtureEodWorkflow:
                 for assertion in market_batch.ticker_assertions
             ),
         )
-        display_ticker = identity_timeline.ticker_at(command.information_cutoff.date())
+        display_ticker = identity_timeline.ticker_at(market_batch.market_date)
+        source_policy_payload = {
+            "execution_purpose": "fixture",
+            "content_origin": "synthetic",
+            "formal_source_qualified": False,
+        }
+        source_policy_version_id = version_id("source-policy-version", source_policy_payload)
+        subject_ids = {
+            "issuer": issuer_id,
+            "security": security_id,
+            "listing": listing_id,
+        }
+        external_identifier_assertions = [
+            {
+                "subject_kind": assertion.subject_kind,
+                "subject_id": subject_ids[assertion.subject_kind],
+                "identifier_type": assertion.identifier_type,
+                "identifier_value": assertion.identifier_value,
+                "source": assertion.source,
+                "evidence": assertion.evidence,
+                "trust_level": assertion.trust_level,
+                "valid_from": assertion.valid_from.isoformat(),
+                "valid_to": assertion.valid_to.isoformat() if assertion.valid_to else None,
+                "source_policy_version_id": source_policy_version_id,
+            }
+            for assertion in market_batch.external_identifier_assertions
+        ]
 
         selection = market_batch.selection
         base_records: list[dict[str, object]] = [dict(record) for record in selection.records]
@@ -157,13 +187,8 @@ class FixtureEodWorkflow:
                 if assertion.ticker == display_ticker
             ),
             "ticker_assertions": identity_timeline.assertions_payload(),
+            "external_identifier_assertions": external_identifier_assertions,
         }
-        source_policy_payload = {
-            "execution_purpose": "fixture",
-            "content_origin": "synthetic",
-            "formal_source_qualified": False,
-        }
-        source_policy_version_id = version_id("source-policy-version", source_policy_payload)
         raw_artifact_payload = {
             "checksum": raw_object_ref.checksum,
             "object_id": raw_object_ref.object_id,
@@ -242,8 +267,13 @@ class FixtureEodWorkflow:
         }
         coverage_report_id = version_id("coverage-report", coverage_payload)
 
-        calendar_payload = market_batch.calendar_payload
-        calendar_version_id = version_id("calendar-version", calendar_payload)
+        calendar_available = command.fixture_scenario != "missing_calendar"
+        calendar_payload = market_batch.calendar_payload if calendar_available else None
+        calendar_version_id = (
+            version_id("calendar-version", calendar_payload)
+            if calendar_payload is not None
+            else None
+        )
         company_action_payload = market_batch.company_action_payload
         company_action_available = command.fixture_scenario != "missing_company_action"
         company_action_version_id = (
@@ -343,19 +373,19 @@ class FixtureEodWorkflow:
             "exchange": market_batch.market,
             "timezone": market_batch.timezone,
             "version_id": calendar_version_id,
-            "session_count": len(selection.sessions),
-            "session_fact_count": market_batch.session_fact_count,
-            "closure_dates": list(market_batch.closure_dates),
+            "session_count": len(selection.sessions) if calendar_available else 0,
+            "session_fact_count": market_batch.session_fact_count if calendar_available else 0,
+            "closure_dates": list(market_batch.closure_dates) if calendar_available else [],
             "half_day_session_ids": [
                 session.session_id
                 for session in selection.sessions
-                if session.session_kind == "half_day"
+                if calendar_available and session.session_kind == "half_day"
             ],
-            "revision_ids": list(market_batch.calendar_revision_ids),
-            "session_time_examples": list(market_batch.session_time_examples),
-            "resolution_status": (
-                "unavailable" if unavailable_reason == "calendar_unresolved" else "available"
+            "revision_ids": list(market_batch.calendar_revision_ids) if calendar_available else [],
+            "session_time_examples": (
+                list(market_batch.session_time_examples) if calendar_available else []
             ),
+            "resolution_status": "available" if calendar_available else "unavailable",
         }
         adjustment_projection = {
             "version_id": adjustment_version_id,
@@ -433,6 +463,17 @@ class FixtureEodWorkflow:
             if company_action_version_id is not None
             else []
         )
+        calendar_artifacts: list[dict[str, Any]] = (
+            [
+                {
+                    "artifact_id": calendar_version_id,
+                    "artifact_kind": "calendar_version",
+                    "payload": calendar_payload,
+                }
+            ]
+            if calendar_version_id is not None and calendar_payload is not None
+            else []
+        )
         artifacts: list[dict[str, Any]] = [
             {"artifact_id": issuer_id, "artifact_kind": "issuer", "payload": {}},
             {
@@ -452,6 +493,14 @@ class FixtureEodWorkflow:
                     "payload": assertion,
                 }
                 for assertion in identity_timeline.assertions_payload()
+            ],
+            *[
+                {
+                    "artifact_id": version_id("identity-assertion", assertion),
+                    "artifact_kind": "identity_assertion",
+                    "payload": assertion,
+                }
+                for assertion in external_identifier_assertions
             ],
             {
                 "artifact_id": source_policy_version_id,
@@ -484,11 +533,7 @@ class FixtureEodWorkflow:
                 "artifact_kind": "coverage_report",
                 "payload": coverage_payload,
             },
-            {
-                "artifact_id": calendar_version_id,
-                "artifact_kind": "calendar_version",
-                "payload": calendar_payload,
-            },
+            *calendar_artifacts,
             *company_action_artifacts,
             {
                 "artifact_id": adjustment_version_id,

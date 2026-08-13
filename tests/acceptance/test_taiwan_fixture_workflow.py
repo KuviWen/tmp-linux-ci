@@ -58,6 +58,20 @@ def test_xtai_fixture_identity_calendar_and_adjustment_are_visible_after_eod() -
                 "valid_to": None,
             },
         ],
+        "external_identifier_assertions": [
+            {
+                "subject_kind": "security",
+                "subject_id": outcome.security_id,
+                "identifier_type": "fixture_source_security_id",
+                "identifier_value": "XTAI-FIXTURE-SECURITY-001",
+                "source": "synthetic_fixture_registry",
+                "evidence": "xtai-fixture-identity-manifest-v1",
+                "trust_level": "fixture_only",
+                "valid_from": "2024-01-01",
+                "valid_to": None,
+                "source_policy_version_id": outcome.source_policy_version_id,
+            }
+        ],
     }
     identity = ListingIdentity.from_payload(research["identity"])
     assert identity.ticker_at(datetime(2025, 8, 12, tzinfo=UTC).date()) == "1234"

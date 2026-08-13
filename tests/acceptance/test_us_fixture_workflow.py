@@ -55,6 +55,20 @@ def test_xnas_fixture_uses_the_shared_eod_research_contract() -> None:
                 "valid_to": None,
             },
         ],
+        "external_identifier_assertions": [
+            {
+                "subject_kind": "security",
+                "subject_id": outcome.security_id,
+                "identifier_type": "fixture_source_security_id",
+                "identifier_value": "XNAS-FIXTURE-SECURITY-001",
+                "source": "synthetic_fixture_registry",
+                "evidence": "xnas-fixture-identity-manifest-v1",
+                "trust_level": "fixture_only",
+                "valid_from": "2024-01-01",
+                "valid_to": None,
+                "source_policy_version_id": outcome.source_policy_version_id,
+            }
+        ],
     }
     assert research["calendar"] == {
         "exchange": "XNAS",
@@ -244,3 +258,43 @@ def test_xnas_correction_revises_its_own_source_version() -> None:
         == (normal_research["source_evidence"]["source_record_version_id"])
     )
     assert correction.status == "succeeded"
+
+
+def test_xnas_unresolved_calendar_does_not_publish_a_valid_calendar_artifact() -> None:
+    cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
+    trace_id = "trace-p1-trace-us-01-calendar-unresolved"
+    application = build_test_application(observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC))
+
+    outcome = application.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=cutoff,
+            trace_id=trace_id,
+            idempotency_key="p1-trace-us-01-calendar-unresolved",
+            market="XNAS",
+            fixture_scenario="missing_calendar",
+        )
+    )
+    research = application.research_query.get_listing_research(
+        listing_id=outcome.listing_id,
+        information_cutoff=cutoff,
+        fixture_scenario="missing_calendar",
+    )
+    trace_evidence = application.operations_control.get_trace_evidence(trace_id)
+
+    assert outcome.calendar_version_id is None
+    assert research["calendar"] == {
+        "exchange": "XNAS",
+        "timezone": "America/New_York",
+        "version_id": None,
+        "session_count": 0,
+        "session_fact_count": 0,
+        "closure_dates": [],
+        "half_day_session_ids": [],
+        "revision_ids": [],
+        "session_time_examples": [],
+        "resolution_status": "unavailable",
+    }
+    assert "calendar_version" not in trace_evidence["artifact_kinds"]
+    assert {prediction["unavailable_reason"]["code"] for prediction in research["predictions"]} == {
+        "calendar_unresolved"
+    }

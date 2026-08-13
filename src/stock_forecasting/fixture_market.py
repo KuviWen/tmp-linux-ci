@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal, Protocol, cast
+from zoneinfo import ZoneInfo
 
 from stock_forecasting.fixture_dataset import (
     CALENDAR_CLOSURES,
@@ -17,11 +18,24 @@ from stock_forecasting.fixture_dataset import (
 
 FixtureMarket = Literal["XTAI", "XNAS"]
 AdjustmentKind = Literal["cash_dividend", "split"]
+IdentitySubjectKind = Literal["issuer", "security", "listing"]
 
 
 @dataclass(frozen=True)
 class TickerAssertionSpec:
     ticker: str
+    valid_from: date
+    valid_to: date | None
+
+
+@dataclass(frozen=True)
+class ExternalIdentifierAssertionSpec:
+    subject_kind: IdentitySubjectKind
+    identifier_type: str
+    identifier_value: str
+    source: str
+    evidence: str
+    trust_level: Literal["fixture_only"]
     valid_from: date
     valid_to: date | None
 
@@ -53,6 +67,7 @@ class FixtureAdjustmentRule:
 @dataclass(frozen=True)
 class FixtureMarketBatch:
     market: FixtureMarket
+    market_date: date
     namespace: str
     timezone: str
     source_name: str
@@ -60,6 +75,7 @@ class FixtureMarketBatch:
     normalized_schema_version: str
     committed_checkpoint: str
     ticker_assertions: tuple[TickerAssertionSpec, ...]
+    external_identifier_assertions: tuple[ExternalIdentifierAssertionSpec, ...]
     selection: FixtureSelection
     session_fact_count: int
     calendar_payload: dict[str, object]
@@ -98,6 +114,7 @@ class XtaiFixtureMarketAdapter:
         calendar_payload = self._dataset.calendar_payload()
         return FixtureMarketBatch(
             market="XTAI",
+            market_date=information_cutoff.astimezone(ZoneInfo("Asia/Taipei")).date(),
             namespace="xtai",
             timezone="Asia/Taipei",
             source_name="xtai-fixture",
@@ -107,6 +124,18 @@ class XtaiFixtureMarketAdapter:
             ticker_assertions=(
                 TickerAssertionSpec("1234", date(2024, 1, 1), date(2025, 8, 12)),
                 TickerAssertionSpec("2330", date(2025, 8, 13), None),
+            ),
+            external_identifier_assertions=(
+                ExternalIdentifierAssertionSpec(
+                    subject_kind="security",
+                    identifier_type="fixture_source_security_id",
+                    identifier_value="XTAI-FIXTURE-SECURITY-001",
+                    source="synthetic_fixture_registry",
+                    evidence="xtai-fixture-identity-manifest-v1",
+                    trust_level="fixture_only",
+                    valid_from=date(2024, 1, 1),
+                    valid_to=None,
+                ),
             ),
             selection=self._dataset.select(information_cutoff),
             session_fact_count=self._dataset.session_fact_count,
@@ -140,6 +169,7 @@ class XnasFixtureMarketAdapter:
         calendar_payload = self._dataset.calendar_payload()
         return FixtureMarketBatch(
             market="XNAS",
+            market_date=information_cutoff.astimezone(ZoneInfo("America/New_York")).date(),
             namespace="xnas",
             timezone="America/New_York",
             source_name="xnas-fixture",
@@ -149,6 +179,18 @@ class XnasFixtureMarketAdapter:
             ticker_assertions=(
                 TickerAssertionSpec("USF1", date(2024, 1, 1), date(2025, 12, 31)),
                 TickerAssertionSpec("USF2", date(2026, 1, 1), None),
+            ),
+            external_identifier_assertions=(
+                ExternalIdentifierAssertionSpec(
+                    subject_kind="security",
+                    identifier_type="fixture_source_security_id",
+                    identifier_value="XNAS-FIXTURE-SECURITY-001",
+                    source="synthetic_fixture_registry",
+                    evidence="xnas-fixture-identity-manifest-v1",
+                    trust_level="fixture_only",
+                    valid_from=date(2024, 1, 1),
+                    valid_to=None,
+                ),
             ),
             selection=self._dataset.select(information_cutoff),
             session_fact_count=self._dataset.session_fact_count,

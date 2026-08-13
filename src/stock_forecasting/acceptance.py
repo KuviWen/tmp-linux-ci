@@ -4,7 +4,6 @@ import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlencode
 
 from dagster import ResourceDefinition, materialize
 from fastapi.testclient import TestClient
@@ -16,11 +15,11 @@ from stock_forecasting.adapters.dagster import (
     xtai_fixture_eod_asset,
 )
 from stock_forecasting.adapters.rest import create_web_app
-from stock_forecasting.application import build_application, build_test_application
+from stock_forecasting.application import Application, build_application, build_test_application
 from stock_forecasting.dagster_deployment import inspect_dagster_deployment
 from stock_forecasting.fixture_market import FixtureMarket, default_fixture_market_adapters
 from stock_forecasting.fixture_scenarios import FixtureScenario
-from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodOutcome
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand, FixtureUseTarget
 
 
@@ -36,6 +35,129 @@ class HttpClient(Protocol):
     def close(self) -> None: ...
 
 
+def _validate_deployment_endpoints(base_url: str | None, dagster_url: str | None) -> None:
+    if (base_url is None) != (dagster_url is None):
+        raise ValueError("deployment_endpoints_must_be_provided_together")
+
+
+def _build_acceptance_application(
+    *,
+    database_url: str,
+    object_root: Path,
+    observed_at: datetime,
+    deployed: bool,
+) -> Application:
+    if deployed:
+        return build_application(
+            observed_at=observed_at,
+            object_root=object_root,
+            database_url=database_url,
+        )
+    return build_test_application(
+        observed_at=observed_at,
+        object_root=object_root,
+        database_url=database_url,
+    )
+
+
+def _capture_fixture_scenarios(
+    *,
+    database_url: str,
+    object_root: Path,
+    information_cutoff: datetime,
+    deployed: bool,
+    market: FixtureMarket,
+    scenario_times: dict[FixtureScenario, datetime],
+) -> tuple[
+    dict[FixtureScenario, dict[str, Any]],
+    dict[FixtureScenario, dict[str, Any]],
+]:
+    trace_market = "tw" if market == "XTAI" else "us"
+    health_scope = "xtai_fixture_source" if market == "XTAI" else "xnas_fixture_source"
+    trace_prefix = f"trace-p1-trace-{trace_market}-01"
+    idempotency_prefix = f"p1-trace-{trace_market}-01"
+    records: dict[FixtureScenario, dict[str, Any]] = {}
+    operations: dict[FixtureScenario, dict[str, Any]] = {}
+    for scenario, scenario_time in scenario_times.items():
+        application = _build_acceptance_application(
+            observed_at=scenario_time,
+            object_root=object_root,
+            database_url=database_url,
+            deployed=deployed,
+        )
+        trace_id = f"{trace_prefix}-{scenario}"
+        outcome = application.run_fixture_eod(
+            FixtureEodCommand(
+                information_cutoff=information_cutoff,
+                trace_id=trace_id,
+                idempotency_key=f"{idempotency_prefix}-{scenario}",
+                market=market,
+                fixture_scenario=scenario,
+            )
+        )
+        records[scenario] = application.research_query.get_listing_research(
+            listing_id=outcome.listing_id,
+            information_cutoff=information_cutoff,
+            fixture_scenario=scenario,
+        )
+        operations[scenario] = {
+            "work": application.operations_control.get_work(outcome.work_id),
+            "health": application.operations_control.list_health(
+                scope=f"{health_scope}/{scenario}"
+            )[0],
+            "audit": application.security_audit.list_events(trace_id=trace_id)[0],
+        }
+    return records, operations
+
+
+def _probe_research_surfaces(
+    application: Application,
+    *,
+    base_url: str | None,
+    information_cutoff: datetime,
+    outcome: FixtureEodOutcome,
+    market_filter: str,
+) -> dict[str, Any]:
+    client: HttpClient = (
+        TestClient(create_web_app(application))
+        if base_url is None
+        else Client(base_url=base_url, timeout=10.0)
+    )
+    cutoff_text = information_cutoff.isoformat().replace("+00:00", "Z")
+    matrix_response = client.get(
+        "/api/v1/research/predictions",
+        params={"information_cutoff": cutoff_text},
+    )
+    matrix_html = client.get(
+        "/research",
+        params={
+            "information_cutoff": cutoff_text,
+            "horizon": 5,
+            "market": market_filter,
+            "support": "full",
+            "sort": "confidence_desc",
+        },
+    )
+    detail_params = {
+        "information_cutoff": cutoff_text,
+        "horizon": 5,
+        "market": market_filter,
+        "support": "full",
+        "sort": "confidence_desc",
+        "tab": "lineage",
+    }
+    detail_path = f"/research/listings/{outcome.listing_id}"
+    detail_first = client.get(detail_path, params=detail_params)
+    detail_reload = client.get(detail_path, params=detail_params)
+    client.close()
+    return {
+        "matrix_response": matrix_response,
+        "matrix_html": matrix_html,
+        "detail_first": detail_first,
+        "detail_reload": detail_reload,
+    }
+
+
 def run_ticket_01(
     *,
     database_url: str,
@@ -45,20 +167,13 @@ def run_ticket_01(
     base_url: str | None = None,
     dagster_url: str | None = None,
 ) -> dict[str, Any]:
-    if (base_url is None) != (dagster_url is None):
-        raise ValueError("deployment_endpoints_must_be_provided_together")
-    if base_url is None:
-        application = build_test_application(
-            observed_at=observed_at,
-            object_root=object_root,
-            database_url=database_url,
-        )
-    else:
-        application = build_application(
-            object_root=object_root,
-            database_url=database_url,
-            observed_at=observed_at,
-        )
+    _validate_deployment_endpoints(base_url, dagster_url)
+    application = _build_acceptance_application(
+        observed_at=observed_at,
+        object_root=object_root,
+        database_url=database_url,
+        deployed=base_url is not None,
+    )
     command = FixtureEodCommand(
         information_cutoff=information_cutoff,
         trace_id="trace-p1-trace-tw-01",
@@ -81,80 +196,30 @@ def run_ticket_01(
         "missing": observed_at + timedelta(minutes=3),
         "withdrawal": observed_at + timedelta(minutes=4),
     }
-    scenario_records: dict[str, dict[str, Any]] = {}
-    scenario_operations: dict[str, dict[str, Any]] = {}
-    for scenario, scenario_time in scenario_observed_at.items():
-        if base_url is None:
-            scenario_application = build_test_application(
-                observed_at=scenario_time,
-                object_root=object_root,
-                database_url=database_url,
-            )
-        else:
-            scenario_application = build_application(
-                observed_at=scenario_time,
-                object_root=object_root,
-                database_url=database_url,
-            )
-        scenario_outcome = scenario_application.run_fixture_eod(
-            FixtureEodCommand(
-                information_cutoff=information_cutoff,
-                trace_id=f"trace-p1-trace-tw-01-{scenario}",
-                idempotency_key=f"p1-trace-tw-01-{scenario}",
-                fixture_scenario=scenario,
-            )
-        )
-        scenario_records[scenario] = scenario_application.research_query.get_listing_research(
-            listing_id=scenario_outcome.listing_id,
-            information_cutoff=information_cutoff,
-            fixture_scenario=scenario,
-        )
-        scenario_operations[scenario] = {
-            "work": scenario_application.operations_control.get_work(scenario_outcome.work_id),
-            "health": scenario_application.operations_control.list_health(
-                scope=f"xtai_fixture_source/{scenario}"
-            )[0],
-            "audit": scenario_application.security_audit.list_events(
-                trace_id=f"trace-p1-trace-tw-01-{scenario}"
-            )[0],
-        }
+    scenario_records, scenario_operations = _capture_fixture_scenarios(
+        database_url=database_url,
+        object_root=object_root,
+        information_cutoff=information_cutoff,
+        deployed=base_url is not None,
+        market="XTAI",
+        scenario_times=scenario_observed_at,
+    )
     research = application.research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=information_cutoff,
     )
     trace_evidence = application.operations_control.get_trace_evidence(command.trace_id)
-    client: HttpClient
-    if base_url is None:
-        client = TestClient(create_web_app(application))
-    else:
-        client = Client(base_url=base_url, timeout=10.0)
-    cutoff_text = information_cutoff.isoformat().replace("+00:00", "Z")
-    matrix_response = client.get(
-        "/api/v1/research/predictions",
-        params={"information_cutoff": cutoff_text},
+    surfaces = _probe_research_surfaces(
+        application,
+        base_url=base_url,
+        information_cutoff=information_cutoff,
+        outcome=outcome,
+        market_filter="XTAI",
     )
-    matrix_html = client.get(
-        "/research",
-        params={
-            "information_cutoff": cutoff_text,
-            "horizon": 5,
-            "market": "XTAI",
-            "support": "full",
-            "sort": "confidence_desc",
-        },
-    )
-    detail_query = {
-        "information_cutoff": cutoff_text,
-        "horizon": 5,
-        "market": "XTAI",
-        "support": "full",
-        "sort": "confidence_desc",
-        "tab": "lineage",
-    }
-    detail_url = f"/research/listings/{outcome.listing_id}?{urlencode(detail_query)}"
-    detail_first = client.get(detail_url)
-    detail_reload = client.get(detail_url)
-    client.close()
+    matrix_response = surfaces["matrix_response"]
+    matrix_html = surfaces["matrix_html"]
+    detail_first = surfaces["detail_first"]
+    detail_reload = surfaces["detail_reload"]
 
     denial_trace_id = "trace-p1-fixture-isolation"
     targets: tuple[FixtureUseTarget, ...] = (
@@ -264,20 +329,13 @@ def run_ticket_02(
     base_url: str | None = None,
     dagster_url: str | None = None,
 ) -> dict[str, Any]:
-    if (base_url is None) != (dagster_url is None):
-        raise ValueError("deployment_endpoints_must_be_provided_together")
-    if base_url is None:
-        application = build_test_application(
-            observed_at=observed_at,
-            object_root=object_root,
-            database_url=database_url,
-        )
-    else:
-        application = build_application(
-            observed_at=observed_at,
-            object_root=object_root,
-            database_url=database_url,
-        )
+    _validate_deployment_endpoints(base_url, dagster_url)
+    application = _build_acceptance_application(
+        observed_at=observed_at,
+        object_root=object_root,
+        database_url=database_url,
+        deployed=base_url is not None,
+    )
 
     commands: dict[FixtureMarket, FixtureEodCommand] = {
         "XTAI": FixtureEodCommand(
@@ -318,38 +376,16 @@ def run_ticket_02(
         },
     )
 
-    client: HttpClient
-    if base_url is None:
-        client = TestClient(create_web_app(application))
-    else:
-        client = Client(base_url=base_url, timeout=10.0)
-    cutoff_text = information_cutoff.isoformat().replace("+00:00", "Z")
-    matrix_response = client.get(
-        "/api/v1/research/predictions",
-        params={"information_cutoff": cutoff_text},
+    surfaces = _probe_research_surfaces(
+        application,
+        base_url=base_url,
+        information_cutoff=information_cutoff,
+        outcome=outcomes["XNAS"],
+        market_filter="all",
     )
-    matrix_html = client.get(
-        "/research",
-        params={
-            "information_cutoff": cutoff_text,
-            "horizon": 5,
-            "market": "all",
-            "support": "full",
-            "sort": "confidence_desc",
-        },
-    )
-    xnas_detail = client.get(
-        f"/research/listings/{outcomes['XNAS'].listing_id}",
-        params={
-            "information_cutoff": cutoff_text,
-            "horizon": 5,
-            "market": "all",
-            "support": "full",
-            "sort": "confidence_desc",
-            "tab": "lineage",
-        },
-    )
-    client.close()
+    matrix_response = surfaces["matrix_response"]
+    matrix_html = surfaces["matrix_html"]
+    xnas_detail = surfaces["detail_first"]
 
     scenario_times: dict[FixtureScenario, datetime] = {
         "late": information_cutoff + timedelta(minutes=5),
@@ -360,43 +396,14 @@ def run_ticket_02(
         "missing_calendar": observed_at + timedelta(seconds=50),
         "withdrawal": observed_at + timedelta(minutes=1),
     }
-    scenario_records: dict[FixtureScenario, dict[str, Any]] = {}
-    scenario_operations: dict[FixtureScenario, dict[str, Any]] = {}
-    for scenario, scenario_time in scenario_times.items():
-        if base_url is None:
-            scenario_application = build_test_application(
-                observed_at=scenario_time,
-                object_root=object_root,
-                database_url=database_url,
-            )
-        else:
-            scenario_application = build_application(
-                observed_at=scenario_time,
-                object_root=object_root,
-                database_url=database_url,
-            )
-        trace_id = f"trace-p1-trace-us-01-{scenario}"
-        scenario_outcome = scenario_application.run_fixture_eod(
-            FixtureEodCommand(
-                information_cutoff=information_cutoff,
-                trace_id=trace_id,
-                idempotency_key=f"p1-trace-us-01-{scenario}",
-                market="XNAS",
-                fixture_scenario=scenario,
-            )
-        )
-        scenario_records[scenario] = scenario_application.research_query.get_listing_research(
-            listing_id=scenario_outcome.listing_id,
-            information_cutoff=information_cutoff,
-            fixture_scenario=scenario,
-        )
-        scenario_operations[scenario] = {
-            "work": scenario_application.operations_control.get_work(scenario_outcome.work_id),
-            "health": scenario_application.operations_control.list_health(
-                scope=f"xnas_fixture_source/{scenario}"
-            )[0],
-            "audit": scenario_application.security_audit.list_events(trace_id=trace_id)[0],
-        }
+    scenario_records, scenario_operations = _capture_fixture_scenarios(
+        database_url=database_url,
+        object_root=object_root,
+        information_cutoff=information_cutoff,
+        deployed=base_url is not None,
+        market="XNAS",
+        scenario_times=scenario_times,
+    )
 
     adapters = default_fixture_market_adapters()
     batches = {market: adapters[market].load(information_cutoff) for market in adapters}

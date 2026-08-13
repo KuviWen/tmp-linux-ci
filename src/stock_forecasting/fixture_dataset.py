@@ -143,7 +143,7 @@ class XtaiFixtureDataset:
         return cls(tuple(sessions))
 
     def select(self, information_cutoff: datetime, *, count: int = 253) -> FixtureSelection:
-        cutoff_date = information_cutoff.date().isoformat()
+        cutoff_date = information_cutoff.astimezone(ZoneInfo("Asia/Taipei")).date().isoformat()
         eligible = tuple(
             session
             for session in self._sessions

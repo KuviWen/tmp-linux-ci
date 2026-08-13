@@ -1,11 +1,24 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
 
 from stock_forecasting.application import build_test_application
-from stock_forecasting.fixture_market import FixtureMarket, default_fixture_market_adapters
-from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from stock_forecasting.fixture_market import (
+    FixtureMarket,
+    FixtureMarketBatch,
+    TickerAssertionSpec,
+    XnasFixtureMarketAdapter,
+    XtaiFixtureMarketAdapter,
+    default_fixture_market_adapters,
+)
+from stock_forecasting.platform.object_repository import FilesystemObjectRepository
+from stock_forecasting.platform.state_store import StateStore
+from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodWorkflow
 
 
 def test_xtai_and_xnas_adapters_share_the_provider_and_module_contract() -> None:
@@ -90,3 +103,83 @@ def test_xtai_and_xnas_adapters_share_the_provider_and_module_contract() -> None
         )
     }
     assert len(artifact_kind_sets) == 1
+
+
+def test_workflow_uses_the_adapter_market_date_for_identity_and_selection(
+    tmp_path: Path,
+) -> None:
+    cutoff = datetime(2026, 8, 13, 0, 30, tzinfo=UTC)
+    base_batch = XnasFixtureMarketAdapter().load(cutoff)
+    batch = replace(
+        base_batch,
+        market_date=datetime(2026, 8, 12, tzinfo=UTC).date(),
+        ticker_assertions=(
+            TickerAssertionSpec(
+                "USF1",
+                datetime(2024, 1, 1, tzinfo=UTC).date(),
+                datetime(2026, 8, 12, tzinfo=UTC).date(),
+            ),
+            TickerAssertionSpec("USF2", datetime(2026, 8, 13, tzinfo=UTC).date(), None),
+        ),
+    )
+
+    class Adapter:
+        def load(self, information_cutoff: datetime) -> FixtureMarketBatch:
+            assert information_cutoff == cutoff
+            return batch
+
+    workflow = FixtureEodWorkflow(
+        StateStore("sqlite+pysqlite:///:memory:", create_schema=True),
+        observed_at=cutoff,
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        market_adapters={"XNAS": Adapter()},
+    )
+
+    outcome = workflow.execute(
+        FixtureEodCommand(
+            information_cutoff=cutoff,
+            trace_id="trace-market-date",
+            idempotency_key="market-date",
+            market="XNAS",
+        )
+    )
+
+    assert outcome.display_ticker == "USF1"
+
+
+def test_explicit_empty_provider_registry_fails_closed(tmp_path: Path) -> None:
+    workflow = FixtureEodWorkflow(
+        StateStore("sqlite+pysqlite:///:memory:", create_schema=True),
+        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        market_adapters={},
+    )
+
+    with pytest.raises(KeyError, match="XNAS"):
+        workflow.execute(
+            FixtureEodCommand(
+                information_cutoff=datetime(2026, 8, 12, 22, tzinfo=UTC),
+                trace_id="trace-empty-provider-registry",
+                idempotency_key="empty-provider-registry",
+                market="XNAS",
+            )
+        )
+
+
+def test_provider_market_mismatch_fails_closed(tmp_path: Path) -> None:
+    workflow = FixtureEodWorkflow(
+        StateStore("sqlite+pysqlite:///:memory:", create_schema=True),
+        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        market_adapters={"XNAS": XtaiFixtureMarketAdapter()},
+    )
+
+    with pytest.raises(ValueError, match="fixture_adapter_market_mismatch"):
+        workflow.execute(
+            FixtureEodCommand(
+                information_cutoff=datetime(2026, 8, 12, 22, tzinfo=UTC),
+                trace_id="trace-provider-market-mismatch",
+                idempotency_key="provider-market-mismatch",
+                market="XNAS",
+            )
+        )
