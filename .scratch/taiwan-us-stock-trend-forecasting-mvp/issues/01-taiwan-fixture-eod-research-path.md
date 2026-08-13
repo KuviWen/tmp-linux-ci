@@ -19,6 +19,6 @@ Status: ready-for-agent
 
 ## Implementation notes
 
-- Seam：單一 acceptance CLI 編排公開 workflow／Dagster asset、REST／繁中 UI、filesystem object contract 與 PostgreSQL-compatible canonical ledgers；OpenAPI 3.2 YAML 是唯一服務契約來源。
-- 驗證：`python -m pytest -q`（22 passed）、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、fresh Alembic upgrade 與 `python -m stock_forecasting.cli acceptance ticket-01 ...`（`status=passed`）。
+- Seam：單一 acceptance CLI 編排公開 workflow／Dagster asset、REST／繁中 UI、filesystem object contract 與 PostgreSQL-compatible canonical ledgers；OpenAPI 3.2 YAML 是唯一服務契約來源。固定版 XTAI fixture dataset 提供 300 筆交易所 session facts，垂直 workflow 只選取截止點可見的 253 筆未調整 OHLCV。
+- 驗證：`python -m pytest -q`（25 passed）、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、fresh Alembic upgrade 與 `python -m stock_forecasting.cli acceptance ticket-01 ...`（`status=passed`）。
 - 未勾選：目前主機沒有 Docker、Podman 或 Compose binary，故無法把靜態 Compose contract 當成乾淨容器／PostgreSQL 實際啟動證據。

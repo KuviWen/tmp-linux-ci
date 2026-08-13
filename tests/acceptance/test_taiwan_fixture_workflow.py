@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -39,12 +40,27 @@ def test_xtai_fixture_identity_calendar_and_adjustment_are_visible_after_eod() -
         "ticker_valid_from": "2025-08-13",
         "ticker_valid_to": None,
     }
-    assert research["calendar"] == {
-        "exchange": "XTAI",
-        "timezone": "Asia/Taipei",
-        "version_id": outcome.calendar_version_id,
-        "session_count": 253,
-    }
+    calendar = research["calendar"]
+    assert calendar["exchange"] == "XTAI"
+    assert calendar["timezone"] == "Asia/Taipei"
+    assert calendar["version_id"] == outcome.calendar_version_id
+    assert calendar["session_count"] == 253
+    assert calendar["session_fact_count"] == 300
+    assert calendar["closure_dates"] == [
+        "2025-10-06",
+        "2025-10-10",
+        "2026-01-01",
+        "2026-02-16",
+        "2026-02-17",
+        "2026-02-18",
+        "2026-02-19",
+        "2026-02-20",
+        "2026-04-06",
+        "2026-05-01",
+        "2026-06-19",
+    ]
+    assert calendar["half_day_session_ids"] == ["XTAI:2025-12-31"]
+    assert calendar["revision_ids"] == ["xtai-fixture-calendar-revision-1"]
     assert research["company_actions"] == [
         {
             "kind": "cash_dividend",
@@ -54,15 +70,23 @@ def test_xtai_fixture_identity_calendar_and_adjustment_are_visible_after_eod() -
         }
     ]
     assert research["adjustment_version_id"] == outcome.adjustment_version_id
+    assert research["adjustment"] == {
+        "version_id": outcome.adjustment_version_id,
+        "input_price_kind": "unadjusted",
+        "output_price_kind": "adjusted",
+        "session_count": 253,
+        "company_action_count": 1,
+    }
 
 
 def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> None:
-    observed_at = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+    cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+    observed_at = datetime(2026, 8, 12, 7, 3, tzinfo=UTC)
     application = build_test_application(observed_at=observed_at)
 
     outcome = application.run_fixture_eod(
         FixtureEodCommand(
-            information_cutoff=observed_at,
+            information_cutoff=cutoff,
             trace_id="trace-ticket-01-evidence",
             idempotency_key="ticket-01-evidence",
         )
@@ -70,7 +94,7 @@ def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> No
 
     research = application.research_query.get_listing_research(
         listing_id=outcome.listing_id,
-        information_cutoff=observed_at,
+        information_cutoff=cutoff,
     )
     evidence = research["source_evidence"]
 
@@ -83,7 +107,7 @@ def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> No
     ):
         UUID(evidence[field])
 
-    assert evidence["first_observed_at"] == "2026-08-12T07:00:00Z"
+    assert evidence["first_observed_at"] == "2026-08-12T07:03:00Z"
     assert evidence["source_policy"] == {
         "version_id": outcome.source_policy_version_id,
         "execution_purpose": "fixture",
@@ -96,9 +120,12 @@ def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> No
         "received_partitions": 1,
         "missing_partitions": [],
         "session_count": 253,
+        "first_session_id": "XTAI:2025-08-08",
+        "last_session_id": "XTAI:2026-08-12",
     }
     assert evidence["committed_checkpoint"] == "xtai-fixture-page:1"
-    assert evidence["scenario_kinds"] == [
+    scenario_versions = evidence["scenario_versions"]
+    assert [version["scenario"] for version in scenario_versions] == [
         "normal",
         "late",
         "duplicate",
@@ -106,6 +133,42 @@ def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> No
         "missing",
         "withdrawal",
     ]
+    assert len({version["version_id"] for version in scenario_versions}) == 6
+    normal, late, duplicate, correction, missing, withdrawal = scenario_versions
+    assert late["late_relative_to"] == normal["version_id"]
+    assert duplicate["duplicate_of"] == normal["version_id"]
+    assert duplicate["deduplicated"] is True
+    assert correction["supersedes"] == normal["version_id"]
+    assert correction["revision_number"] == 2
+    assert missing["availability"] == "missing"
+    assert missing["source_record_version_id"] is None
+    assert withdrawal["withdraws"] == normal["version_id"]
+    assert withdrawal["availability"] == "withdrawn"
+
+
+def test_default_collection_clock_owns_first_observation_instead_of_copying_cutoff() -> None:
+    cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+    application = build_test_application()
+    before = datetime.now(UTC)
+
+    outcome = application.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=cutoff,
+            trace_id="trace-ticket-01-platform-clock",
+            idempotency_key="ticket-01-platform-clock",
+        )
+    )
+    after = datetime.now(UTC)
+
+    research = application.research_query.get_listing_research(
+        listing_id=outcome.listing_id,
+        information_cutoff=cutoff,
+    )
+    first_observed_at = datetime.fromisoformat(
+        research["source_evidence"]["first_observed_at"].replace("Z", "+00:00")
+    )
+    assert before <= first_observed_at <= after
+    assert first_observed_at != cutoff
 
 
 def test_fixture_eod_pins_lineage_and_publishes_three_horizon_probabilities() -> None:
@@ -259,8 +322,27 @@ def test_collection_persists_raw_evidence_before_exposing_checkpoint(tmp_path: P
     )
 
     raw_content = application.object_repository.open(outcome.raw_object_ref).read()
-    assert b'"exchange":"XTAI"' in raw_content
-    assert b'"session_count":253' in raw_content
+    raw_payload = json.loads(raw_content)
+    assert raw_payload["exchange"] == "XTAI"
+    assert raw_payload["price_kind"] == "unadjusted"
+    assert raw_payload["session_count"] == 253
+    assert len(raw_payload["records"]) == 253
+    assert raw_payload["records"][0] == {
+        "session_id": "XTAI:2025-08-08",
+        "open": "480.00",
+        "high": "482.00",
+        "low": "478.00",
+        "close": "481.00",
+        "volume": 1000000,
+    }
+    assert set(raw_payload["records"][-1]) == {
+        "session_id",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    }
     assert application.object_repository.stat(outcome.raw_object_ref)["size"] == len(raw_content)
     research = application.research_query.get_listing_research(
         listing_id=outcome.listing_id,
@@ -304,6 +386,7 @@ def test_canonical_trace_keeps_fixture_results_separate_from_production_records(
         "feature_snapshot",
         "model_artifact",
         "serving_assignment",
+        *(["collection_scenario_version"] * 6),
     ]
     assert evidence["lineage_ids"] == {
         "dataset_version_id": outcome.dataset_version_id,
@@ -314,3 +397,69 @@ def test_canonical_trace_keeps_fixture_results_separate_from_production_records(
     }
     assert evidence["fixture_prediction_result_count"] == 3
     assert evidence["production_prediction_record_count"] == 0
+
+
+def test_distinct_eod_cutoffs_append_content_bound_versions_without_conflicts() -> None:
+    first_cutoff = datetime(2026, 8, 11, 7, 0, tzinfo=UTC)
+    second_cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+    application = build_test_application(observed_at=second_cutoff)
+
+    first = application.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=first_cutoff,
+            trace_id="trace-ticket-01-first-cutoff",
+            idempotency_key="ticket-01-first-cutoff",
+        )
+    )
+    second = application.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=second_cutoff,
+            trace_id="trace-ticket-01-second-cutoff",
+            idempotency_key="ticket-01-second-cutoff",
+        )
+    )
+
+    first_record = application.research_query.get_listing_research(
+        listing_id=first.listing_id,
+        information_cutoff=first_cutoff,
+    )
+    second_record = application.research_query.get_listing_research(
+        listing_id=second.listing_id,
+        information_cutoff=second_cutoff,
+    )
+    assert first.listing_id == second.listing_id
+    assert (
+        first_record["source_evidence"]["raw_artifact_id"]
+        != second_record["source_evidence"]["raw_artifact_id"]
+    )
+    assert first.dataset_version_id != second.dataset_version_id
+    assert first.data_selection_id != second.data_selection_id
+    assert first.feature_snapshot_id != second.feature_snapshot_id
+    assert first_record["source_evidence"]["coverage"]["last_session_id"] == ("XTAI:2026-08-11")
+    assert second_record["source_evidence"]["coverage"]["last_session_id"] == ("XTAI:2026-08-12")
+
+
+def test_same_eod_command_is_idempotent_at_the_public_workflow_seam() -> None:
+    cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+    trace_id = "trace-ticket-01-retry"
+    application = build_test_application(observed_at=cutoff)
+    command = FixtureEodCommand(
+        information_cutoff=cutoff,
+        trace_id=trace_id,
+        idempotency_key="ticket-01-retry",
+    )
+
+    first = application.run_fixture_eod(command)
+    second = application.run_fixture_eod(command)
+
+    assert first == second
+    evidence = application.operations_control.get_trace_evidence(trace_id)
+    assert evidence["fixture_prediction_result_count"] == 3
+    assert application.security_audit.list_events(trace_id=trace_id) == [
+        {
+            "action": "fixture_eod_publication",
+            "outcome": "allowed",
+            "reason_code": "fixture_policy_active",
+            "trace_id": trace_id,
+        }
+    ]

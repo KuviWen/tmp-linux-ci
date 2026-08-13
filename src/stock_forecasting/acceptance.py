@@ -43,7 +43,6 @@ def run_ticket_01(
         )
     else:
         application = build_application(
-            observed_at=information_cutoff,
             object_root=object_root,
             database_url=database_url,
         )

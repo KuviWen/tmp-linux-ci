@@ -1,7 +1,9 @@
+x-fixture-information-cutoff: &fixture-information-cutoff '2026-08-12T07:00:00Z'
+
 x-application-environment: &application-environment
   DATABASE_URL: postgresql+psycopg://stock@postgres:5432/stock_forecasting
   OBJECT_ROOT: /var/lib/stock-forecasting/objects
-  FIXTURE_INFORMATION_CUTOFF: '2026-08-12T07:00:00Z'
+  FIXTURE_INFORMATION_CUTOFF: *fixture-information-cutoff
   DAGSTER_HOME: /var/lib/dagster
 
 x-application: &application
@@ -100,7 +102,7 @@ services:
       - --object-root
       - /var/lib/stock-forecasting/objects
       - --information-cutoff
-      - '2026-08-12T07:00:00Z'
+      - *fixture-information-cutoff
       - --base-url
       - http://api:8000
     depends_on:

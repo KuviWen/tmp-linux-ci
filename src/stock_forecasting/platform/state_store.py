@@ -129,28 +129,6 @@ class StateStore:
         with self.engine.connect() as connection:
             return bool(connection.execute(text("SELECT 1")).scalar_one() == 1)
 
-    def publish_research_record(self, record_id: str, payload: dict[str, Any]) -> None:
-        identity = payload["identity"]
-        values = {
-            "record_id": record_id,
-            "listing_id": identity["listing_id"],
-            "information_cutoff": payload["information_cutoff"],
-            "execution_purpose": payload["execution_purpose"],
-            "payload": payload,
-        }
-        with self.engine.begin() as connection:
-            existing = connection.execute(
-                select(research_records.c.payload).where(
-                    research_records.c.listing_id == values["listing_id"],
-                    research_records.c.information_cutoff == values["information_cutoff"],
-                    research_records.c.execution_purpose == values["execution_purpose"],
-                )
-            ).scalar_one_or_none()
-            if existing is None:
-                connection.execute(research_records.insert().values(**values))
-            elif existing != payload:
-                raise ImmutableStateConflict("immutable_research_record_conflict")
-
     def publish_fixture_trace(
         self,
         *,
@@ -219,11 +197,17 @@ class StateStore:
                     )
                 )
                 for artifact in artifacts:
-                    existing_artifact = connection.execute(
-                        select(canonical_artifacts.c.payload).where(
-                            canonical_artifacts.c.artifact_id == artifact["artifact_id"]
+                    existing_artifact = (
+                        connection.execute(
+                            select(
+                                canonical_artifacts.c.artifact_kind,
+                                canonical_artifacts.c.execution_purpose,
+                                canonical_artifacts.c.payload,
+                            ).where(canonical_artifacts.c.artifact_id == artifact["artifact_id"])
                         )
-                    ).scalar_one_or_none()
+                        .mappings()
+                        .one_or_none()
+                    )
                     if existing_artifact is None:
                         connection.execute(
                             canonical_artifacts.insert().values(
@@ -233,24 +217,44 @@ class StateStore:
                                 payload=artifact["payload"],
                             )
                         )
-                    elif existing_artifact != artifact["payload"]:
+                    elif (
+                        existing_artifact["artifact_kind"] != artifact["artifact_kind"]
+                        or existing_artifact["execution_purpose"] != "fixture"
+                        or existing_artifact["payload"] != artifact["payload"]
+                    ):
                         raise ImmutableStateConflict("immutable_artifact_conflict")
-                    connection.execute(
-                        trace_artifact_refs.insert().values(
-                            trace_id=trace_id,
-                            artifact_id=artifact["artifact_id"],
+                    existing_reference = connection.execute(
+                        select(trace_artifact_refs.c.sequence).where(
+                            trace_artifact_refs.c.trace_id == trace_id,
+                            trace_artifact_refs.c.artifact_id == artifact["artifact_id"],
                         )
-                    )
+                    ).scalar_one_or_none()
+                    if existing_reference is None:
+                        connection.execute(
+                            trace_artifact_refs.insert().values(
+                                trace_id=trace_id,
+                                artifact_id=artifact["artifact_id"],
+                            )
+                        )
                 for prediction in fixture_predictions:
-                    connection.execute(
-                        fixture_prediction_results.insert().values(
-                            prediction_id=prediction["prediction_id"],
-                            trace_id=trace_id,
-                            listing_id=identity["listing_id"],
-                            horizon_sessions=prediction["horizon_sessions"],
-                            payload=prediction["payload"],
+                    existing_prediction = connection.execute(
+                        select(fixture_prediction_results.c.payload).where(
+                            fixture_prediction_results.c.prediction_id
+                            == prediction["prediction_id"]
                         )
-                    )
+                    ).scalar_one_or_none()
+                    if existing_prediction is None:
+                        connection.execute(
+                            fixture_prediction_results.insert().values(
+                                prediction_id=prediction["prediction_id"],
+                                trace_id=trace_id,
+                                listing_id=identity["listing_id"],
+                                horizon_sessions=prediction["horizon_sessions"],
+                                payload=prediction["payload"],
+                            )
+                        )
+                    elif existing_prediction != prediction["payload"]:
+                        raise ImmutableStateConflict("immutable_fixture_prediction_conflict")
 
     def record_fixture_use_denial(
         self,

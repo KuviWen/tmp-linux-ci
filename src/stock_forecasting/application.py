@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from tempfile import mkdtemp
 
@@ -21,7 +21,7 @@ class Application:
     def __init__(
         self,
         *,
-        observed_at: datetime,
+        observed_at: datetime | None,
         object_root: Path,
         database_url: str,
         create_schema: bool,
@@ -56,7 +56,7 @@ def build_test_application(
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
     resolved_database_url = database_url or "sqlite+pysqlite:///:memory:"
     return Application(
-        observed_at=observed_at or datetime.now(UTC),
+        observed_at=observed_at,
         object_root=root,
         database_url=resolved_database_url,
         create_schema=True,
@@ -70,7 +70,7 @@ def build_application(
     observed_at: datetime | None = None,
 ) -> Application:
     return Application(
-        observed_at=observed_at or datetime.now(UTC),
+        observed_at=observed_at,
         object_root=object_root,
         database_url=database_url,
         create_schema=False,
