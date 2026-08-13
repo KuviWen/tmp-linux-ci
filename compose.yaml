@@ -1,0 +1,117 @@
+x-application-environment: &application-environment
+  DATABASE_URL: postgresql+psycopg://stock@postgres:5432/stock_forecasting
+  OBJECT_ROOT: /var/lib/stock-forecasting/objects
+  FIXTURE_INFORMATION_CUTOFF: '2026-08-12T07:00:00Z'
+  DAGSTER_HOME: /var/lib/dagster
+
+x-application: &application
+  build:
+    context: .
+  environment: *application-environment
+  volumes:
+    - fixture-objects:/var/lib/stock-forecasting/objects
+    - dagster-home:/var/lib/dagster
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: stock_forecasting
+      POSTGRES_USER: stock
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - '127.0.0.1:5432:5432'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stock -d stock_forecasting"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  migration:
+    <<: *application
+    command: ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *application
+    command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - '127.0.0.1:8000:8000'
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  dagster-code:
+    <<: *application
+    command:
+      - dagster
+      - api
+      - grpc
+      - -m
+      - stock_forecasting.dagster_definitions
+      - -h
+      - 0.0.0.0
+      - -p
+      - '4000'
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+
+  dagster-webserver:
+    <<: *application
+    command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "dagster-workspace.yaml"]
+    ports:
+      - '127.0.0.1:3000:3000'
+    depends_on:
+      dagster-code:
+        condition: service_started
+
+  dagster-daemon:
+    <<: *application
+    command: ["dagster-daemon", "run", "-w", "dagster-workspace.yaml"]
+    depends_on:
+      dagster-code:
+        condition: service_started
+
+  acceptance:
+    <<: *application
+    profiles: ["acceptance"]
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - acceptance
+      - ticket-01
+      - --database-url
+      - postgresql+psycopg://stock@postgres:5432/stock_forecasting
+      - --object-root
+      - /var/lib/stock-forecasting/objects
+      - --information-cutoff
+      - '2026-08-12T07:00:00Z'
+      - --base-url
+      - http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+      dagster-webserver:
+        condition: service_started
+      dagster-daemon:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  fixture-objects:
+  dagster-home:

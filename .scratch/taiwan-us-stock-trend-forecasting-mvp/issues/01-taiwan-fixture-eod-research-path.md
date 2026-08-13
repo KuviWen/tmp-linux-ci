@@ -9,10 +9,16 @@
 Status: ready-for-agent
 
 - [ ] 乾淨環境能啟動完成此 tracer 所需的 Compose、PostgreSQL、filesystem ObjectRepository、Dagster workflow、REST 與繁中研究介面。
-- [ ] Fixture 以內部發行人、證券及掛牌身分表示，包含 ticker 有效期、XTAI 交易日曆、至少 253 個未調整 sessions、公司行動與內部調整版本。
-- [ ] Fixture collection 產生原始資料物件、來源紀錄版本、正規化紀錄版本、擷取收據、涵蓋報告、真實平台控制的首次取得時間及 committed checkpoint。
-- [ ] 日終 workflow 固定 `fixture` 執行用途、不可變資料選擇、FeatureSnapshot、FixtureTrendForecaster artifact 與 fixture 服務指派，並交易發布每個 1／5／20 期間的結果或機器可讀不可用原因。
-- [ ] 可用結果含具名 up／flat／down 機率、獨立信心分數與資料支援狀態；必要資料不足時不回傳替代機率。
-- [ ] 比較矩陣與標的研究頁能以不可變 listing ID 顯示 cutoff、三期間結果、fixture 標章、FeatureSnapshot、ModelArtifact、服務指派、資料集及原始證據 ID，且 URL 重載保留狀態。
-- [ ] Fixture 結果無法進入 production route、production PredictionRecord、正式匯出或模型升版，嘗試時回傳穩定拒絕並留下 audit／health 證據。
-- [ ] 端到端測試只由外部可觀察的 workflow、REST、UI、權威紀錄、health 與 audit 驗收，不依賴模組內部呼叫順序或手改資料庫。
+- [x] Fixture 以內部發行人、證券及掛牌身分表示，包含 ticker 有效期、XTAI 交易日曆、至少 253 個未調整 sessions、公司行動與內部調整版本。
+- [x] Fixture collection 產生原始資料物件、來源紀錄版本、正規化紀錄版本、擷取收據、涵蓋報告、真實平台控制的首次取得時間及 committed checkpoint。
+- [x] 日終 workflow 固定 `fixture` 執行用途、不可變資料選擇、FeatureSnapshot、FixtureTrendForecaster artifact 與 fixture 服務指派，並交易發布每個 1／5／20 期間的結果或機器可讀不可用原因。
+- [x] 可用結果含具名 up／flat／down 機率、獨立信心分數與資料支援狀態；必要資料不足時不回傳替代機率。
+- [x] 比較矩陣與標的研究頁能以不可變 listing ID 顯示 cutoff、三期間結果、fixture 標章、FeatureSnapshot、ModelArtifact、服務指派、資料集及原始證據 ID，且 URL 重載保留狀態。
+- [x] Fixture 結果無法進入 production route、production PredictionRecord、正式匯出或模型升版，嘗試時回傳穩定拒絕並留下 audit／health 證據。
+- [x] 端到端測試只由外部可觀察的 workflow、REST、UI、權威紀錄、health 與 audit 驗收，不依賴模組內部呼叫順序或手改資料庫。
+
+## Implementation notes
+
+- Seam：單一 acceptance CLI 編排公開 workflow／Dagster asset、REST／繁中 UI、filesystem object contract 與 PostgreSQL-compatible canonical ledgers；OpenAPI 3.2 YAML 是唯一服務契約來源。
+- 驗證：`python -m pytest -q`（22 passed）、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、fresh Alembic upgrade 與 `python -m stock_forecasting.cli acceptance ticket-01 ...`（`status=passed`）。
+- 未勾選：目前主機沒有 Docker、Podman 或 Compose binary，故無法把靜態 Compose contract 當成乾淨容器／PostgreSQL 實際啟動證據。

@@ -1,0 +1,11 @@
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+htmlcov/
+.ticket-01-objects/
+.ticket-01.db

@@ -1,0 +1,225 @@
+openapi: 3.2.0
+info:
+  title: 台美個股趨勢研究 REST
+  version: 1.0.0
+  description: Fixture results are engineering evidence and are never formal predictions.
+servers:
+  - url: http://127.0.0.1:8000
+paths:
+  /api/v1/research/predictions:
+    get:
+      operationId: listPredictionMatrix
+      parameters:
+        - $ref: '#/components/parameters/InformationCutoff'
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: {type: string}
+      responses:
+        '200':
+          description: Snapshot-bound prediction matrix.
+          headers:
+            ETag:
+              schema: {type: string}
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PredictionMatrix'
+        '304':
+          description: The snapshot representation is unchanged.
+        '503':
+          $ref: '#/components/responses/ProblemResponse'
+  /api/v1/research/listings/{listing_id}:
+    get:
+      operationId: getListingResearch
+      parameters:
+        - $ref: '#/components/parameters/ListingId'
+        - $ref: '#/components/parameters/InformationCutoff'
+      responses:
+        '200':
+          description: Research projection for one immutable listing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListingResearch'
+        '404':
+          $ref: '#/components/responses/ProblemResponse'
+        '503':
+          $ref: '#/components/responses/ProblemResponse'
+  /api/v1/operations/health:
+    get:
+      operationId: listCanonicalHealth
+      parameters:
+        - name: scope
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Canonical source-health assessments.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/HealthAssessment'}
+components:
+  parameters:
+    InformationCutoff:
+      name: information_cutoff
+      in: query
+      required: true
+      schema:
+        type: string
+        format: date-time
+      example: '2026-08-12T07:00:00Z'
+    ListingId:
+      name: listing_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    ProblemResponse:
+      description: RFC 9457 problem details.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+  schemas:
+    NamedProbabilities:
+      type: object
+      additionalProperties: false
+      required: [up, flat, down]
+      properties:
+        up: {type: number, minimum: 0, maximum: 1}
+        flat: {type: number, minimum: 0, maximum: 1}
+        down: {type: number, minimum: 0, maximum: 1}
+    AvailablePrediction:
+      type: object
+      additionalProperties: false
+      required:
+        - horizon_sessions
+        - probabilities
+        - confidence_score
+        - prediction_status
+        - data_support
+      properties:
+        horizon_sessions: {type: integer, enum: [1, 5, 20]}
+        probabilities: {$ref: '#/components/schemas/NamedProbabilities'}
+        confidence_score: {type: number, minimum: 0, maximum: 1}
+        prediction_status: {type: string, enum: [full, degraded]}
+        data_support: {$ref: '#/components/schemas/DataSupport'}
+    UnavailablePrediction:
+      type: object
+      additionalProperties: false
+      required:
+        - horizon_sessions
+        - prediction_status
+        - unavailable_reason
+        - data_support
+      properties:
+        horizon_sessions: {type: integer, enum: [1, 5, 20]}
+        prediction_status: {type: string, const: unavailable}
+        unavailable_reason:
+          type: object
+          additionalProperties: false
+          required: [code]
+          properties:
+            code: {type: string, enum: [missing_anchor_price]}
+        data_support: {$ref: '#/components/schemas/DataSupport'}
+    PredictionResult:
+      oneOf:
+        - $ref: '#/components/schemas/AvailablePrediction'
+        - $ref: '#/components/schemas/UnavailablePrediction'
+    DataSupport:
+      type: object
+      additionalProperties: false
+      required: [price_volume]
+      properties:
+        price_volume: {type: string, enum: [full, degraded, unavailable]}
+    MatrixItem:
+      type: object
+      required: [listing_id, display_ticker, market, fixture_badge, predictions, lineage]
+      properties:
+        listing_id: {type: string, format: uuid}
+        display_ticker: {type: string}
+        market: {type: string, const: XTAI}
+        fixture_badge: {type: string, const: Fixture／非正式預測}
+        predictions:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: {$ref: '#/components/schemas/PredictionResult'}
+        lineage: {$ref: '#/components/schemas/Lineage'}
+    PredictionMatrix:
+      type: object
+      required: [information_cutoff, execution_purpose, items]
+      properties:
+        information_cutoff: {type: string, format: date-time}
+        execution_purpose: {type: string, const: fixture}
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/MatrixItem'}
+    ListingResearch:
+      type: object
+      required:
+        - identity
+        - calendar
+        - information_cutoff
+        - execution_purpose
+        - fixture_badge
+        - predictions
+        - lineage
+        - source_evidence
+      properties:
+        identity: {type: object}
+        calendar: {type: object}
+        information_cutoff: {type: string, format: date-time}
+        execution_purpose: {type: string, const: fixture}
+        fixture_badge: {type: string, const: Fixture／非正式預測}
+        predictions:
+          type: array
+          items: {$ref: '#/components/schemas/PredictionResult'}
+        lineage: {$ref: '#/components/schemas/Lineage'}
+        source_evidence: {type: object}
+    Lineage:
+      type: object
+      required:
+        - data_selection_id
+        - dataset_version_id
+        - feature_snapshot_id
+        - model_artifact_id
+        - serving_assignment_id
+        - raw_artifact_id
+      properties:
+        data_selection_id: {type: string, format: uuid}
+        dataset_version_id: {type: string, format: uuid}
+        feature_snapshot_id: {type: string, format: uuid}
+        model_artifact_id: {type: string, format: uuid}
+        serving_assignment_id: {type: string, format: uuid}
+        raw_artifact_id: {type: string, format: uuid}
+    HealthAssessment:
+      type: object
+      required: [scope, status, reason_code, affected_attempts]
+      properties:
+        scope: {type: string}
+        status: {type: string, enum: [ready, degraded, blocked, unknown]}
+        reason_code: {type: string}
+        affected_attempts: {type: integer, minimum: 1}
+    ProblemDetails:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, detail, instance, trace_id, code]
+      properties:
+        type: {type: string, format: uri}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string}
+        trace_id: {type: string}
+        code: {type: string}
