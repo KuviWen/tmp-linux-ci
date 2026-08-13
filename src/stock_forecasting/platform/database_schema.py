@@ -11,6 +11,7 @@ from stock_forecasting.platform.outbox_relay import (
     research_projection_status,
 )
 from stock_forecasting.platform.schema import (
+    authorization_policy_sets,
     canonical_artifacts,
     fixture_prediction_results,
     health_assessments,
@@ -23,6 +24,7 @@ from stock_forecasting.platform.schema import (
 )
 
 __all__ = [
+    "authorization_policy_sets",
     "canonical_artifacts",
     "fixture_prediction_results",
     "health_assessments",

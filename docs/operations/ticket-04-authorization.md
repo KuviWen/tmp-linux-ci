@@ -20,6 +20,13 @@ acceptance-only `denied-api` and `stock_forecasting_denied` Dagster code locatio
 and action grant but a revoked XTAI entitlement. All adapters call the same `AuthorizationPolicy`;
 the denied services cannot substitute an admin or database role for an allow decision.
 
+`authorization-init` installs immutable, principal-bound policy sets after Alembic migration and
+before application processes start. Runtime environment variables select an explicit policy-set
+identifier; they do not define grants, policies, or entitlements. The application connects as the
+non-superuser `stock` role. `database-grants` grants application DML after initialization and then
+revokes insert, update, and delete privileges on `authorization_policy_sets`; deployed acceptance
+queries PostgreSQL privileges to verify that boundary.
+
 ## Verify the deployed seam
 
 Prerequisites are Docker Engine with the Compose plugin and free host-loopback ports 3000, 5432,

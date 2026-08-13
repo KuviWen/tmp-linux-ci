@@ -11,8 +11,10 @@ from fastapi.testclient import TestClient
 
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import build_test_application
+from stock_forecasting.authorization_repository import FIXTURE_ACTIVE_POLICY_SET
 from stock_forecasting.outbox import EventCompatibility
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from tests.support import assert_success
 
 
 class CrashOperationsConsumer:
@@ -66,7 +68,7 @@ def test_expired_fencing_token_cannot_commit_consumer_effects(tmp_path: Path) ->
         relay_worker_id="expired-worker",
         relay_fault=ExpireResearchConsumerLease(clock),
     )
-    outcome = expired_worker.require_fixture_eod_success(
+    outcome = assert_success(expired_worker).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-03-expired-fence",
@@ -109,7 +111,7 @@ def test_incompatible_event_version_is_isolated_before_consumer_effects() -> Non
             }
         ),
     )
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-03-incompatible-event",
@@ -138,7 +140,7 @@ def test_prediction_publication_is_stale_until_its_outbox_event_is_relayed() -> 
     trace_id = "trace-ticket-03-pending"
     application = build_test_application(observed_at=cutoff)
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id=trace_id,
@@ -147,7 +149,7 @@ def test_prediction_publication_is_stale_until_its_outbox_event_is_relayed() -> 
     )
 
     event = application.operations_control.get_outbox_event(outcome.outbox_event_id)
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -182,7 +184,7 @@ def test_restarted_relay_delivers_the_original_event_once(tmp_path: Path) -> Non
         object_root=object_root,
         database_url=database_url,
     )
-    outcome = first_application.require_fixture_eod_success(
+    outcome = assert_success(first_application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-03-restart",
@@ -203,7 +205,7 @@ def test_restarted_relay_delivers_the_original_event_once(tmp_path: Path) -> Non
         database_url=database_url,
     )
     duplicate = restarted_again.relay_outbox(event_id=outcome.outbox_event_id)
-    research = restarted_again.research_query.require_listing_research(
+    research = assert_success(restarted_again).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -235,7 +237,7 @@ def test_consumer_transaction_crash_retries_without_duplicate_effects(tmp_path: 
         database_url=database_url,
         relay_fault=CrashOperationsConsumer(),
     )
-    outcome = crashing_application.require_fixture_eod_success(
+    outcome = assert_success(crashing_application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-03-consumer-crash",
@@ -284,14 +286,14 @@ def test_out_of_order_versions_defer_and_share_one_incident(tmp_path: Path) -> N
         object_root=tmp_path / "objects",
         database_url=f"sqlite+pysqlite:///{tmp_path / 'ordering.db'}",
     )
-    first = application.require_fixture_eod_success(
+    first = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=first_cutoff,
             trace_id="trace-ticket-03-ordering-1",
             idempotency_key="ticket-03-ordering-1",
         )
     )
-    second = application.require_fixture_eod_success(
+    second = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=second_cutoff,
             trace_id="trace-ticket-03-ordering-2",
@@ -301,7 +303,7 @@ def test_out_of_order_versions_defer_and_share_one_incident(tmp_path: Path) -> N
 
     first_deferral = application.relay_outbox(event_id=second.outbox_event_id)
     second_deferral = application.relay_outbox(event_id=second.outbox_event_id)
-    still_stale = application.research_query.require_listing_research(
+    still_stale = assert_success(application).research_query.get_listing_research(
         listing_id=second.listing_id,
         information_cutoff=second_cutoff,
     )
@@ -347,8 +349,9 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
         observed_at=cutoff,
         object_root=object_root,
         database_url=database_url,
+        authorization_policy_set_id=FIXTURE_ACTIVE_POLICY_SET,
     )
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-03-process-crash",
@@ -387,6 +390,7 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
             "PUBLIC_BIND_HOST": "127.0.0.1",
             "LOCAL_API_KEY_MODE": "enabled",
             "LOCAL_API_KEY_FILE": str(local_key_file),
+            "AUTHORIZATION_POLICY_SET_ID": FIXTURE_ACTIVE_POLICY_SET,
             "PYTHONUTF8": "1",
         },
         stdout=subprocess.PIPE,
@@ -484,8 +488,9 @@ def test_relay_process_crash_after_consumer_commits_redelivers_without_duplicate
         observed_at=cutoff,
         object_root=object_root,
         database_url=database_url,
+        authorization_policy_set_id=FIXTURE_ACTIVE_POLICY_SET,
     )
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-03-before-ack",
@@ -516,6 +521,7 @@ def test_relay_process_crash_after_consumer_commits_redelivers_without_duplicate
             "PUBLIC_BIND_HOST": "127.0.0.1",
             "LOCAL_API_KEY_MODE": "enabled",
             "LOCAL_API_KEY_FILE": str(local_key_file),
+            "AUTHORIZATION_POLICY_SET_ID": FIXTURE_ACTIVE_POLICY_SET,
             "PYTHONUTF8": "1",
         },
         stdout=subprocess.PIPE,
@@ -579,7 +585,7 @@ def test_rest_and_ui_show_projection_staleness_until_recovery() -> None:
     cutoff_text = "2026-08-12T07:00:00Z"
     trace_id = "trace-ticket-03-rest-ui"
     application = build_test_application(observed_at=cutoff)
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id=trace_id,

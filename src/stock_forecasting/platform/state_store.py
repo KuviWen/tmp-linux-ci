@@ -11,6 +11,7 @@ from sqlalchemy import (
     select,
     text,
 )
+from sqlalchemy.engine import Connection
 from sqlalchemy.pool import StaticPool
 
 from stock_forecasting.contracts import PublicationDisposition
@@ -27,6 +28,7 @@ from stock_forecasting.platform.outbox_relay import (
     research_projection_status,
 )
 from stock_forecasting.platform.schema import (
+    authorization_policy_sets,
     canonical_artifacts,
     fixture_prediction_results,
     health_assessments,
@@ -71,6 +73,89 @@ class StateStore:
         with self.engine.connect() as connection:
             return bool(connection.execute(text("SELECT 1")).scalar_one() == 1)
 
+    def authorization_policy_sets_are_read_only_for_current_role(self) -> bool:
+        if self.engine.dialect.name != "postgresql":
+            return False
+        with self.engine.connect() as connection:
+            return bool(
+                connection.execute(
+                    text(
+                        """
+                        SELECT NOT role.rolsuper
+                           AND NOT has_table_privilege(
+                               current_user,
+                               'public.authorization_policy_sets',
+                               'INSERT'
+                           )
+                           AND NOT has_table_privilege(
+                               current_user,
+                               'public.authorization_policy_sets',
+                               'UPDATE'
+                           )
+                           AND NOT has_table_privilege(
+                               current_user,
+                               'public.authorization_policy_sets',
+                               'DELETE'
+                           )
+                        FROM pg_roles AS role
+                        WHERE role.rolname = current_user
+                        """
+                    )
+                ).scalar_one()
+            )
+
+    def install_authorization_policy_set(
+        self,
+        *,
+        policy_set_id: str,
+        principal_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        content_digest = _content_digest(payload)
+        with self.engine.begin() as connection:
+            existing = (
+                connection.execute(
+                    select(
+                        authorization_policy_sets.c.principal_id,
+                        authorization_policy_sets.c.content_digest,
+                    ).where(
+                        authorization_policy_sets.c.policy_set_id == policy_set_id,
+                        authorization_policy_sets.c.principal_id == principal_id,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing is None:
+                connection.execute(
+                    authorization_policy_sets.insert().values(
+                        policy_set_id=policy_set_id,
+                        principal_id=principal_id,
+                        content_digest=content_digest,
+                        payload=payload,
+                    )
+                )
+                return
+            if existing["content_digest"] != content_digest:
+                raise ImmutableStateConflict("immutable_authorization_policy_conflict")
+
+    def get_authorization_policy_set(
+        self,
+        *,
+        policy_set_id: str,
+        principal_id: str,
+    ) -> dict[str, Any]:
+        with self.engine.connect() as connection:
+            payload = connection.execute(
+                select(authorization_policy_sets.c.payload).where(
+                    authorization_policy_sets.c.policy_set_id == policy_set_id,
+                    authorization_policy_sets.c.principal_id == principal_id,
+                )
+            ).scalar_one_or_none()
+        if payload is None:
+            raise KeyError(policy_set_id)
+        return deepcopy(cast(dict[str, Any], payload))
+
     def publish_fixture_trace(
         self,
         *,
@@ -84,9 +169,16 @@ class StateStore:
         operations: PublicationDisposition,
         artifacts: list[dict[str, Any]],
         fixture_predictions: list[dict[str, Any]],
+        authorization_decision: dict[str, str | None],
     ) -> dict[str, Any]:
         identity = payload["identity"]
         with self.engine.begin() as connection:
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization_decision,
+                outcome="allowed",
+                trace_id=trace_id,
+            )
             existing_event = (
                 connection.execute(
                     select(
@@ -312,23 +404,41 @@ class StateStore:
         if event_id is None:
             raise ValueError("authorization_evaluation_id_required")
         with self.engine.begin() as connection:
-            exists = connection.execute(
-                select(security_audit_events.c.event_id).where(
-                    security_audit_events.c.event_id == event_id
-                )
-            ).scalar_one_or_none()
-            if exists is not None:
-                raise ImmutableStateConflict("immutable_authorization_evaluation_conflict")
-            connection.execute(
-                security_audit_events.insert().values(
-                    event_id=event_id,
-                    action=authorization["action"],
-                    outcome=outcome,
-                    reason_code=authorization["reason_code"],
-                    trace_id=trace_id,
-                    authorization=authorization,
-                )
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization,
+                outcome=outcome,
+                trace_id=trace_id,
             )
+
+    def _insert_authorization_decision(
+        self,
+        connection: Connection,
+        *,
+        authorization: dict[str, str | None],
+        outcome: str,
+        trace_id: str,
+    ) -> None:
+        event_id = authorization["evaluation_id"]
+        if event_id is None:
+            raise ValueError("authorization_evaluation_id_required")
+        exists = connection.execute(
+            select(security_audit_events.c.event_id).where(
+                security_audit_events.c.event_id == event_id
+            )
+        ).scalar_one_or_none()
+        if exists is not None:
+            raise ImmutableStateConflict("immutable_authorization_evaluation_conflict")
+        connection.execute(
+            security_audit_events.insert().values(
+                event_id=event_id,
+                action=authorization["action"],
+                outcome=outcome,
+                reason_code=authorization["reason_code"],
+                trace_id=trace_id,
+                authorization=authorization,
+            )
+        )
 
     def get_listing_research(
         self,

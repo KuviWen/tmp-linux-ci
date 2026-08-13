@@ -111,6 +111,27 @@ def test_local_api_key_file_reloads_one_identity_without_exposing_secret_in_repr
     assert identity.credential.authorization_header() not in repr(reloaded)
 
 
+def test_reusing_an_owner_label_does_not_reuse_the_principal_identity() -> None:
+    issued_at = datetime(2026, 8, 14, 1, 0, tzinfo=UTC)
+
+    first = LocalApiKeyIdentity.issue(
+        owner="local-researcher",
+        environment="development",
+        scopes={"research_prediction.read"},
+        issued_at=issued_at,
+        expires_at=issued_at + timedelta(hours=24),
+    )
+    second = LocalApiKeyIdentity.issue(
+        owner="local-researcher",
+        environment="development",
+        scopes={"research_prediction.read"},
+        issued_at=issued_at,
+        expires_at=issued_at + timedelta(hours=24),
+    )
+
+    assert first.context.principal_id != second.context.principal_id
+
+
 def test_local_api_key_rejects_a_lifetime_over_thirty_days() -> None:
     issued_at = datetime(2026, 8, 14, 1, 0, tzinfo=UTC)
 
@@ -497,3 +518,78 @@ def test_conflicting_entitlement_versions_fail_closed_instead_of_using_tuple_ord
     assert decision.allowed is False
     assert decision.reason_code == "source_entitlement_conflict"
     assert decision.source_entitlement_version_id is None
+
+
+def test_non_overlapping_entitlement_history_selects_the_version_effective_at_evaluation() -> None:
+    now = datetime(2026, 8, 14, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="local-researcher",
+        environment="development",
+        scopes={"fixture_pipeline.execute"},
+        issued_at=now - timedelta(days=2),
+        expires_at=now + timedelta(days=2),
+    )
+    context = identity.context
+    grant = ActionGrant(
+        version_id="grant-current",
+        principal_id=context.principal_id,
+        actions=frozenset({"fixture_pipeline.execute"}),
+        environment="development",
+        valid_from=now - timedelta(days=2),
+        valid_to=now + timedelta(days=2),
+    )
+    policy = SourcePolicyVersion(
+        version_id="policy-current",
+        dataset_id="xtai-fixture-eod",
+        allowed_actions=frozenset({"fixture_pipeline.execute"}),
+        purposes=frozenset({"fixture_research"}),
+        environments=frozenset({"development"}),
+        data_protection_class="internal",
+        resource_states=frozenset({"active"}),
+        valid_from=now - timedelta(days=2),
+        valid_to=now + timedelta(hours=12),
+    )
+    historical = SourceEntitlement(
+        version_id="entitlement-historical",
+        principal_id=context.principal_id,
+        dataset_id="xtai-fixture-eod",
+        status="expired",
+        allowed_actions=frozenset({"fixture_pipeline.execute"}),
+        purposes=frozenset({"fixture_research"}),
+        environments=frozenset({"development"}),
+        valid_from=now - timedelta(days=2),
+        valid_to=now - timedelta(days=1),
+    )
+    current = SourceEntitlement(
+        version_id="entitlement-current",
+        principal_id=context.principal_id,
+        dataset_id="xtai-fixture-eod",
+        status="active",
+        allowed_actions=frozenset({"fixture_pipeline.execute"}),
+        purposes=frozenset({"fixture_research"}),
+        environments=frozenset({"development"}),
+        valid_from=now - timedelta(days=1),
+        valid_to=now + timedelta(days=1),
+    )
+
+    decision = AuthorizationPolicy(
+        action_grants=(grant,),
+        source_policies=(policy,),
+        source_entitlements=(historical, current),
+    ).evaluate(
+        context,
+        OperationIntent(
+            action="fixture_pipeline.execute",
+            dataset_id="xtai-fixture-eod",
+            purpose="fixture_research",
+            environment="development",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-effective-entitlement",
+            correlation_id="trace-effective-entitlement",
+        ),
+    )
+
+    assert decision.allowed is True
+    assert decision.source_entitlement_version_id == "entitlement-current"
+    assert decision.valid_until == now + timedelta(hours=12)

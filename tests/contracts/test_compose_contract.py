@@ -14,6 +14,8 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "postgres",
         "migration",
         "local-key-init",
+        "authorization-init",
+        "database-grants",
         "denied-api",
         "api",
         "dagster-init",
@@ -27,7 +29,7 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
     assert services["postgres"]["image"] == "postgres:17-alpine"
     assert services["postgres"]["environment"] == {
         "POSTGRES_DB": "stock_forecasting",
-        "POSTGRES_USER": "stock",
+        "POSTGRES_USER": "postgres",
         "POSTGRES_HOST_AUTH_METHOD": "trust",
     }
     assert services["migration"]["command"][-2:] == ["upgrade", "head"]
@@ -38,6 +40,7 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
     application_services = {
         "migration",
         "local-key-init",
+        "authorization-init",
         "denied-api",
         "api",
         "dagster-init",
@@ -75,7 +78,31 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
     assert services["local-key-init"]["command"].count("--scope") == 2
     assert "--issued-at" not in services["local-key-init"]["command"]
     assert "--expires-at" not in services["local-key-init"]["command"]
-    assert services["denied-api"]["environment"]["XTAI_SOURCE_ENTITLEMENT_STATUS"] == ("revoked")
+    assert services["migration"]["environment"]["DATABASE_URL"].startswith(
+        "postgresql+psycopg://postgres@"
+    )
+    assert services["authorization-init"]["command"][:5] == [
+        "python",
+        "-m",
+        "stock_forecasting.cli",
+        "authorization",
+        "init-fixtures",
+    ]
+    assert (
+        "postgresql+psycopg://postgres@postgres:5432/stock_forecasting"
+        in services["authorization-init"]["command"]
+    )
+    assert services["database-grants"]["image"] == "postgres:17-alpine"
+    assert services["database-grants"]["command"][-2:] == [
+        "-f",
+        "/opt/stock-forecasting/grant-application-role.sql",
+    ]
+    assert services["database-grants"]["volumes"] == [
+        "./docker/postgres/grant-application-role.sql:/opt/stock-forecasting/grant-application-role.sql:ro"
+    ]
+    assert services["denied-api"]["environment"]["AUTHORIZATION_POLICY_SET_ID"] == (
+        "fixture-revoked-v1"
+    )
     assert services["denied-api"]["profiles"] == ["acceptance"]
     assert "--denied-base-url" in services["acceptance"]["command"]
     assert services["acceptance"]["depends_on"]["denied-api"]["condition"] == ("service_healthy")
@@ -87,6 +114,9 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "acceptance",
     ):
         assert services[name]["depends_on"]["local-key-init"]["condition"] == (
+            "service_completed_successfully"
+        )
+        assert services[name]["depends_on"]["database-grants"]["condition"] == (
             "service_completed_successfully"
         )
     assert services["dagster-init"]["command"] == ["dagster", "instance", "migrate"]
@@ -103,7 +133,7 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
     assert services["denied-dagster-code"]["environment"] == services["dagster-code"][
         "environment"
     ] | {
-        "XTAI_SOURCE_ENTITLEMENT_STATUS": "revoked",
+        "AUTHORIZATION_POLICY_SET_ID": "fixture-revoked-v1",
         "AUTHORIZATION_ACCEPTANCE_MODE": "denied",
     }
     for name in (
@@ -160,10 +190,19 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "PUBLIC_BIND_HOST": "127.0.0.1",
         "LOCAL_API_KEY_MODE": "enabled",
         "LOCAL_API_KEY_FILE": "/run/stock-forecasting/local-api-key.json",
+        "PLATFORM_ADMIN_API_KEY_FILE": "/run/stock-forecasting/platform-admin-api-key.json",
+        "AUTHORIZATION_POLICY_SET_ID": "fixture-active-v1",
     }
     for name in application_services:
         assert "local-api-key:/run/stock-forecasting" in services[name]["volumes"]
     assert "local-api-key" in compose["volumes"]
+    role_grant_sql = (
+        REPOSITORY_ROOT / "docker" / "postgres" / "grant-application-role.sql"
+    ).read_text(encoding="utf-8")
+    assert "NOSUPERUSER" in role_grant_sql
+    assert "REVOKE INSERT, UPDATE, DELETE ON authorization_policy_sets FROM stock" in (
+        role_grant_sql
+    )
 
     for name in ("postgres", "api", "dagster-webserver"):
         assert all(str(port).startswith("127.0.0.1:") for port in services[name]["ports"])

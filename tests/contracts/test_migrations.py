@@ -9,9 +9,10 @@ from pathlib import Path
 import yaml
 from sqlalchemy import create_engine, inspect, select
 
-from stock_forecasting.application import build_application
+from stock_forecasting.application import build_test_application
 from stock_forecasting.authorization import LocalApiKeyIdentity
 from stock_forecasting.platform.database_schema import metadata, research_records
+from tests.support import assert_success
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
@@ -84,7 +85,7 @@ def test_ticket_03_upgrade_backfills_existing_research_projection_status(tmp_pat
         "stale": False,
     }
     identity_time = datetime(2026, 8, 13, tzinfo=UTC)
-    application = build_application(
+    application = build_test_application(
         database_url=database_url,
         object_root=tmp_path / "objects",
         observed_at=identity_time,
@@ -96,7 +97,9 @@ def test_ticket_03_upgrade_backfills_existing_research_projection_status(tmp_pat
             expires_at=identity_time + timedelta(hours=24),
         ),
     )
-    records = application.research_query.require_predictions(execution_purpose="fixture")
+    records = assert_success(application).research_query.list_predictions(
+        execution_purpose="fixture"
+    )
     migrated_projection = records[0]["projection"]
     assert migrated_projection == {
         "core_projection_version": 0,
@@ -131,3 +134,6 @@ def test_ticket_04_upgrade_adds_structured_authorization_audit_evidence(
         column["name"]: column for column in inspect(engine).get_columns("security_audit_events")
     }
     assert columns["authorization"]["nullable"] is True
+    assert {
+        column["name"] for column in inspect(engine).get_columns("authorization_policy_sets")
+    } == {"policy_set_id", "principal_id", "content_digest", "payload"}

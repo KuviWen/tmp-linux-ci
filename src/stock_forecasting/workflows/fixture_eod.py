@@ -131,12 +131,12 @@ class FixtureEodWorkflow:
                 correlation_id=command.trace_id,
             ),
         )
-        self._state_store.record_authorization_decision(
-            authorization=authorization_audit_payload(authorization_decision),
-            outcome="allowed" if authorization_decision.allowed else "denied",
-            trace_id=command.trace_id,
-        )
         if not authorization_decision.allowed:
+            self._state_store.record_authorization_decision(
+                authorization=authorization_audit_payload(authorization_decision),
+                outcome="denied",
+                trace_id=command.trace_id,
+            )
             return PolicyDeniedOutcome.from_decision(authorization_decision)
         source_policy = next(
             policy
@@ -697,6 +697,7 @@ class FixtureEodWorkflow:
                 }
                 for prediction in predictions
             ],
+            authorization_decision=authorization_audit_payload(authorization_decision),
         )
 
         return FixtureEodOutcome(

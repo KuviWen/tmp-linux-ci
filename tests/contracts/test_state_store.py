@@ -6,6 +6,7 @@ from uuid import UUID
 
 from stock_forecasting.application import build_test_application
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from tests.support import assert_success
 
 
 def test_fixture_research_state_survives_application_restart(tmp_path: Path) -> None:
@@ -18,14 +19,14 @@ def test_fixture_research_state_survives_application_restart(tmp_path: Path) -> 
         database_url=database_url,
     )
 
-    outcome = first_application.require_fixture_eod_success(
+    outcome = assert_success(first_application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-persistence",
             idempotency_key="ticket-01-persistence",
         )
     )
-    before_restart = first_application.research_query.require_listing_research(
+    before_restart = assert_success(first_application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -35,7 +36,7 @@ def test_fixture_research_state_survives_application_restart(tmp_path: Path) -> 
         object_root=object_root,
         database_url=database_url,
     )
-    after_restart = restarted_application.research_query.require_listing_research(
+    after_restart = assert_success(restarted_application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -56,7 +57,7 @@ def test_work_health_and_audit_evidence_survive_application_restart(tmp_path: Pa
         database_url=database_url,
     )
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id=trace_id,

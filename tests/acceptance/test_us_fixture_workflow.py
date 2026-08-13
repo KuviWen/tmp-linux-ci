@@ -9,13 +9,14 @@ from stock_forecasting.application import build_test_application
 from stock_forecasting.contracts import UnavailableCode
 from stock_forecasting.fixture_scenarios import FixtureScenario
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from tests.support import assert_success
 
 
 def test_xnas_fixture_uses_the_shared_eod_research_contract() -> None:
     cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
     application = build_test_application(observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC))
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-p1-trace-us-01",
@@ -23,7 +24,7 @@ def test_xnas_fixture_uses_the_shared_eod_research_contract() -> None:
             market="XNAS",
         )
     )
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -154,7 +155,7 @@ def test_xnas_fixture_uses_the_shared_eod_research_contract() -> None:
 def test_xnas_necessary_data_failures_do_not_hide_the_successful_xtai_result() -> None:
     cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
     application = build_test_application(observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC))
-    xtai_outcome = application.require_fixture_eod_success(
+    xtai_outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-p1-trace-tw-01-shared-cutoff",
@@ -169,7 +170,7 @@ def test_xnas_necessary_data_failures_do_not_hide_the_successful_xtai_result() -
     }
     for scenario, (unavailable_code, health_reason) in expected_failures.items():
         trace_id = f"trace-p1-trace-us-01-{scenario}"
-        outcome = application.require_fixture_eod_success(
+        outcome = assert_success(application).run_fixture_eod(
             FixtureEodCommand(
                 information_cutoff=cutoff,
                 trace_id=trace_id,
@@ -178,7 +179,7 @@ def test_xnas_necessary_data_failures_do_not_hide_the_successful_xtai_result() -
                 fixture_scenario=scenario,
             )
         )
-        research = application.research_query.require_listing_research(
+        research = assert_success(application).research_query.get_listing_research(
             listing_id=outcome.listing_id,
             information_cutoff=cutoff,
             fixture_scenario=scenario,
@@ -209,7 +210,7 @@ def test_xnas_necessary_data_failures_do_not_hide_the_successful_xtai_result() -
         assert audit[0]["reason_code"] == "authorized"
         assert audit[0]["trace_id"] == trace_id
 
-    xtai_research = application.research_query.require_listing_research(
+    xtai_research = assert_success(application).research_query.get_listing_research(
         listing_id=xtai_outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -222,7 +223,7 @@ def test_xnas_necessary_data_failures_do_not_hide_the_successful_xtai_result() -
 def test_xnas_correction_revises_its_own_source_version() -> None:
     cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
     application = build_test_application(observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC))
-    normal = application.require_fixture_eod_success(
+    normal = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-p1-trace-us-01-normal",
@@ -230,7 +231,7 @@ def test_xnas_correction_revises_its_own_source_version() -> None:
             market="XNAS",
         )
     )
-    correction = application.require_fixture_eod_success(
+    correction = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-p1-trace-us-01-correction",
@@ -244,11 +245,11 @@ def test_xnas_correction_revises_its_own_source_version() -> None:
     correction_raw = json.loads(
         application.object_repository.open(correction.raw_object_ref).read()
     )
-    normal_research = application.research_query.require_listing_research(
+    normal_research = assert_success(application).research_query.get_listing_research(
         listing_id=normal.listing_id,
         information_cutoff=cutoff,
     )
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=correction.listing_id,
         information_cutoff=cutoff,
         fixture_scenario="correction",
@@ -269,7 +270,7 @@ def test_xnas_unresolved_calendar_does_not_publish_a_valid_calendar_artifact() -
     trace_id = "trace-p1-trace-us-01-calendar-unresolved"
     application = build_test_application(observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC))
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id=trace_id,
@@ -278,7 +279,7 @@ def test_xnas_unresolved_calendar_does_not_publish_a_valid_calendar_artifact() -
             fixture_scenario="missing_calendar",
         )
     )
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
         fixture_scenario="missing_calendar",

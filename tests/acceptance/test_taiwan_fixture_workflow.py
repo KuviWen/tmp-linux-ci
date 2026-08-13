@@ -13,13 +13,14 @@ from stock_forecasting.fixture_scenarios import FixtureScenario
 from stock_forecasting.identity import ListingIdentity
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand
+from tests.support import assert_success
 
 
 def test_xtai_fixture_identity_calendar_and_adjustment_are_visible_after_eod() -> None:
     observed_at = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
     application = build_test_application(observed_at=observed_at)
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=observed_at,
             trace_id="trace-ticket-01-identity",
@@ -32,7 +33,7 @@ def test_xtai_fixture_identity_calendar_and_adjustment_are_visible_after_eod() -
     UUID(outcome.listing_id)
     assert outcome.listing_id != outcome.display_ticker
 
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=observed_at,
     )
@@ -123,7 +124,7 @@ def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> No
     observed_at = datetime(2026, 8, 12, 7, 3, tzinfo=UTC)
     application = build_test_application(observed_at=observed_at)
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-evidence",
@@ -131,7 +132,7 @@ def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> No
         )
     )
 
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -177,7 +178,7 @@ def test_default_collection_clock_owns_first_observation_instead_of_copying_cuto
     application = build_test_application()
     before = datetime.now(UTC)
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-platform-clock",
@@ -186,7 +187,7 @@ def test_default_collection_clock_owns_first_observation_instead_of_copying_cuto
     )
     after = datetime.now(UTC)
 
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -215,13 +216,16 @@ def test_adversarial_collection_versions_traverse_the_same_vertical_path(
     }
     records = {}
     operations: dict[FixtureScenario, dict[str, Any]] = {}
+    local_identity = None
     for scenario, observed_at in observed_times.items():
         application = build_test_application(
             observed_at=observed_at,
             object_root=tmp_path / "objects",
             database_url=database_url,
+            local_identity=local_identity,
         )
-        outcome = application.require_fixture_eod_success(
+        local_identity = application.local_identity
+        outcome = assert_success(application).run_fixture_eod(
             FixtureEodCommand(
                 information_cutoff=cutoff,
                 trace_id=f"trace-ticket-01-{scenario}",
@@ -229,7 +233,7 @@ def test_adversarial_collection_versions_traverse_the_same_vertical_path(
                 fixture_scenario=scenario,
             )
         )
-        records[scenario] = application.research_query.require_listing_research(
+        records[scenario] = assert_success(application).research_query.get_listing_research(
             listing_id=outcome.listing_id,
             information_cutoff=cutoff,
             fixture_scenario=scenario,
@@ -294,7 +298,7 @@ def test_standalone_revision_publishes_the_version_it_references(
     trace_id = f"trace-ticket-01-standalone-{scenario}"
     application = build_test_application(observed_at=cutoff)
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id=trace_id,
@@ -303,7 +307,7 @@ def test_standalone_revision_publishes_the_version_it_references(
         )
     )
 
-    record = application.research_query.require_listing_research(
+    record = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
         fixture_scenario=scenario,
@@ -317,14 +321,14 @@ def test_fixture_eod_pins_lineage_and_publishes_three_horizon_probabilities() ->
     cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
     application = build_test_application(observed_at=cutoff)
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-forecast",
             idempotency_key="ticket-01-forecast",
         )
     )
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -369,7 +373,7 @@ def test_missing_necessary_price_evidence_omits_probabilities() -> None:
     cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
     application = build_test_application(observed_at=cutoff)
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-unavailable",
@@ -377,7 +381,7 @@ def test_missing_necessary_price_evidence_omits_probabilities() -> None:
             fixture_scenario="missing",
         )
     )
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
         fixture_scenario="missing",
@@ -400,7 +404,7 @@ def test_fixture_cannot_enter_formal_routes_and_denials_are_observable() -> None
     cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
     trace_id = "trace-ticket-01-fixture-isolation"
     application = build_test_application(observed_at=cutoff)
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-fixture-source",
@@ -427,7 +431,10 @@ def test_fixture_cannot_enter_formal_routes_and_denials_are_observable() -> None
             "target": target,
         }
 
-    assert application.research_query.require_predictions(execution_purpose="production") == []
+    assert (
+        assert_success(application).research_query.list_predictions(execution_purpose="production")
+        == []
+    )
     assert application.security_audit.list_events(trace_id=trace_id) == [
         {
             "action": target,
@@ -456,7 +463,7 @@ def test_collection_persists_raw_evidence_before_exposing_checkpoint(tmp_path: P
     cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
     application = build_test_application(observed_at=cutoff, object_root=tmp_path)
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-object",
@@ -487,7 +494,7 @@ def test_collection_persists_raw_evidence_before_exposing_checkpoint(tmp_path: P
         "volume",
     }
     assert application.object_repository.stat(outcome.raw_object_ref)["size"] == len(raw_content)
-    research = application.research_query.require_listing_research(
+    research = assert_success(application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -500,7 +507,7 @@ def test_canonical_trace_keeps_fixture_results_separate_from_production_records(
     trace_id = "trace-ticket-01-canonical"
     application = build_test_application(observed_at=cutoff)
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id=trace_id,
@@ -548,14 +555,14 @@ def test_distinct_eod_cutoffs_append_content_bound_versions_without_conflicts() 
     second_cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
     application = build_test_application(observed_at=second_cutoff)
 
-    first = application.require_fixture_eod_success(
+    first = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=first_cutoff,
             trace_id="trace-ticket-01-first-cutoff",
             idempotency_key="ticket-01-first-cutoff",
         )
     )
-    second = application.require_fixture_eod_success(
+    second = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=second_cutoff,
             trace_id="trace-ticket-01-second-cutoff",
@@ -563,11 +570,11 @@ def test_distinct_eod_cutoffs_append_content_bound_versions_without_conflicts() 
         )
     )
 
-    first_record = application.research_query.require_listing_research(
+    first_record = assert_success(application).research_query.get_listing_research(
         listing_id=first.listing_id,
         information_cutoff=first_cutoff,
     )
-    second_record = application.research_query.require_listing_research(
+    second_record = assert_success(application).research_query.get_listing_research(
         listing_id=second.listing_id,
         information_cutoff=second_cutoff,
     )
@@ -593,8 +600,8 @@ def test_same_eod_command_is_idempotent_at_the_public_workflow_seam() -> None:
         idempotency_key="ticket-01-retry",
     )
 
-    first = application.require_fixture_eod_success(command)
-    second = application.require_fixture_eod_success(command)
+    first = assert_success(application).run_fixture_eod(command)
+    second = assert_success(application).run_fixture_eod(command)
 
     assert first == second
     evidence = application.operations_control.get_trace_evidence(trace_id)

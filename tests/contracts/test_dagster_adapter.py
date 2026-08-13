@@ -13,6 +13,7 @@ from stock_forecasting.adapters.dagster import (
 from stock_forecasting.application import build_test_application
 from stock_forecasting.authorization import PolicyDeniedOutcome
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from tests.support import assert_success
 
 
 def test_dagster_and_direct_workflow_publish_the_same_outcome(tmp_path: Path) -> None:
@@ -33,7 +34,7 @@ def test_dagster_and_direct_workflow_publish_the_same_outcome(tmp_path: Path) ->
         database_url=f"sqlite+pysqlite:///{tmp_path / 'dagster.db'}",
     )
 
-    direct_outcome = direct_application.require_fixture_eod_success(command)
+    direct_outcome = assert_success(direct_application).run_fixture_eod(command)
     materialization = materialize(
         [xtai_fixture_eod_asset],
         resources={
@@ -56,11 +57,11 @@ def test_dagster_and_direct_workflow_publish_the_same_outcome(tmp_path: Path) ->
         "serving_assignment_id": direct_outcome.serving_assignment_id,
     }
     assert (
-        dagster_application.research_query.require_listing_research(
+        assert_success(dagster_application).research_query.get_listing_research(
             listing_id=direct_outcome.listing_id,
             information_cutoff=cutoff,
         )["predictions"]
-        == direct_application.research_query.require_listing_research(
+        == assert_success(direct_application).research_query.get_listing_research(
             listing_id=direct_outcome.listing_id,
             information_cutoff=cutoff,
         )["predictions"]
@@ -86,7 +87,7 @@ def test_xnas_dagster_asset_calls_the_same_public_workflow(tmp_path: Path) -> No
         database_url=f"sqlite+pysqlite:///{tmp_path / 'xnas-dagster.db'}",
     )
 
-    direct_outcome = direct_application.require_fixture_eod_success(command)
+    direct_outcome = assert_success(direct_application).run_fixture_eod(command)
     materialization = materialize(
         [xnas_fixture_eod_asset],
         resources={
@@ -127,6 +128,7 @@ def test_dagster_projects_policy_denial_as_the_same_stable_outcome(tmp_path: Pat
         object_root=tmp_path / "dagster-denied-objects",
         database_url=f"sqlite+pysqlite:///{tmp_path / 'dagster-denied.db'}",
         entitlement_states={"XTAI": "revoked"},
+        local_identity=direct_application.local_identity,
     )
 
     direct_outcome = direct_application.run_fixture_eod(command)

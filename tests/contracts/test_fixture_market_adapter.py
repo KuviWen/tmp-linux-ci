@@ -30,6 +30,7 @@ from stock_forecasting.workflows.fixture_eod import (
     FixtureEodOutcome,
     FixtureEodWorkflow,
 )
+from tests.support import assert_success
 
 
 def _authorized_security(at: datetime) -> tuple[SecurityContext, AuthorizationPolicy]:
@@ -78,7 +79,7 @@ def test_xtai_and_xnas_adapters_share_the_provider_and_module_contract() -> None
     market_cases: tuple[tuple[FixtureMarket, str], ...] = (("XTAI", "tw"), ("XNAS", "us"))
     for market, suffix in market_cases:
         trace_id = f"trace-ticket-02-contract-{suffix}"
-        outcome = application.require_fixture_eod_success(
+        outcome = assert_success(application).run_fixture_eod(
             FixtureEodCommand(
                 information_cutoff=cutoff,
                 trace_id=trace_id,
@@ -86,7 +87,7 @@ def test_xtai_and_xnas_adapters_share_the_provider_and_module_contract() -> None
                 market=market,
             )
         )
-        research = application.research_query.require_listing_research(
+        research = assert_success(application).research_query.get_listing_research(
             listing_id=outcome.listing_id,
             information_cutoff=cutoff,
         )
@@ -197,8 +198,9 @@ def test_explicit_empty_provider_registry_fails_closed(tmp_path: Path) -> None:
 def test_provider_market_mismatch_fails_closed(tmp_path: Path) -> None:
     observed_at = datetime(2026, 8, 12, 21, 55, tzinfo=UTC)
     security_context, authorization_policy = _authorized_security(observed_at)
+    state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
     workflow = FixtureEodWorkflow(
-        StateStore("sqlite+pysqlite:///:memory:", create_schema=True),
+        state_store,
         observed_at=observed_at,
         object_repository=FilesystemObjectRepository(tmp_path / "objects"),
         market_adapters={"XNAS": XtaiFixtureMarketAdapter()},
@@ -215,6 +217,8 @@ def test_provider_market_mismatch_fails_closed(tmp_path: Path) -> None:
                 market="XNAS",
             )
         )
+
+    assert state_store.list_audit_events(trace_id="trace-provider-market-mismatch") == []
 
 
 def test_provider_batch_rejects_a_calendar_for_another_market() -> None:

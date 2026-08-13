@@ -14,6 +14,12 @@ from stock_forecasting.acceptance import (
     run_ticket_04,
 )
 from stock_forecasting.authorization import LocalApiKeyIdentity
+from stock_forecasting.authorization_repository import (
+    FIXTURE_REVOKED_POLICY_SET,
+    AuthorizationPolicyRepository,
+    fixture_authorization_policy_catalog,
+)
+from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.runtime import RuntimeSettings
 
 
@@ -59,6 +65,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     local_key_init.add_argument("--issued-at", type=_instant)
     local_key_init.add_argument("--expires-at", type=_instant)
+    authorization = commands.add_parser("authorization")
+    authorization_commands = authorization.add_subparsers(
+        dest="authorization_command", required=True
+    )
+    authorization_init = authorization_commands.add_parser("init-fixtures")
+    authorization_init.add_argument("--database-url", required=True)
+    authorization_init.add_argument("--key-file", type=Path, required=True)
+    authorization_init.add_argument("--platform-admin-key-file", type=Path, required=True)
     return parser
 
 
@@ -134,6 +148,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             identity.save(arguments.path)
         print(json.dumps({"status": status}, sort_keys=True))
+        return 0
+    if arguments.command == "authorization" and arguments.authorization_command == (
+        "init-fixtures"
+    ):
+        identity = LocalApiKeyIdentity.load(arguments.key_file)
+        if arguments.platform_admin_key_file.exists():
+            platform_admin = LocalApiKeyIdentity.load(arguments.platform_admin_key_file)
+        else:
+            platform_admin = LocalApiKeyIdentity.issue(
+                owner="platform-admin",
+                environment=identity.context.environment,
+                scopes={"fixture_pipeline.execute", "research_prediction.read"},
+                issued_at=identity.context.issued_at,
+                expires_at=identity.context.expires_at,
+            )
+            platform_admin.save(arguments.platform_admin_key_file)
+        repository = AuthorizationPolicyRepository(
+            StateStore(arguments.database_url, create_schema=False)
+        )
+        catalog = fixture_authorization_policy_catalog(identity.context)
+        for policy_set_id, policy in catalog.items():
+            repository.install(policy_set_id, policy)
+        repository.install(
+            FIXTURE_REVOKED_POLICY_SET,
+            fixture_authorization_policy_catalog(platform_admin.context)[
+                FIXTURE_REVOKED_POLICY_SET
+            ],
+        )
+        print(
+            json.dumps(
+                {"status": "initialized", "policy_set_count": len(catalog)},
+                sort_keys=True,
+            )
+        )
         return 0
     return 2
 

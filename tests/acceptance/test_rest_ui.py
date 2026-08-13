@@ -10,12 +10,13 @@ from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import build_test_application
 from stock_forecasting.fixture_market import FixtureMarket
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from tests.support import assert_success
 
 
 def _client_with_fixture() -> tuple[TestClient, str, str]:
     cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
     application = build_test_application(observed_at=cutoff)
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-rest",
@@ -74,7 +75,7 @@ def test_rest_and_traditional_chinese_matrix_show_both_markets_at_one_cutoff() -
     application = build_test_application(observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC))
     market_cases: tuple[tuple[FixtureMarket, str], ...] = (("XTAI", "tw"), ("XNAS", "us"))
     for market, trace_suffix in market_cases:
-        application.require_fixture_eod_success(
+        assert_success(application).run_fixture_eod(
             FixtureEodCommand(
                 information_cutoff=cutoff,
                 trace_id=f"trace-ticket-02-matrix-{trace_suffix}",

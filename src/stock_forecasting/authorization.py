@@ -8,7 +8,7 @@ import os
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -22,6 +22,8 @@ AuthorizationResourceState = Literal["active"]
 
 _LOCAL_KEY_ENVIRONMENTS = frozenset({"local", "development"})
 _CONTEXT_ISSUER = object()
+_MIN_INSTANT = datetime.min.replace(tzinfo=UTC)
+_MAX_INSTANT = datetime.max.replace(tzinfo=UTC)
 
 
 class IdentityVerificationError(RuntimeError):
@@ -123,7 +125,7 @@ class LocalApiKeyVerifier:
         if expires_at - issued_at > timedelta(days=30):
             raise ValueError("local_api_key_lifetime_exceeded")
         key_id = str(uuid4())
-        principal_id = str(uuid5(NAMESPACE_URL, f"stock-forecasting/local-principal/{owner}"))
+        principal_id = str(uuid4())
         secret = secrets.token_urlsafe(32)
         pepper = secrets.token_bytes(32)
         digest = hmac.new(pepper, secret.encode("utf-8"), hashlib.sha256).digest()
@@ -228,8 +230,9 @@ class LocalApiKeyIdentity:
 
     def save(self, path: Path) -> None:
         payload = {
-            "version": 1,
+            "version": 2,
             "key_id": self.credential.key_id,
+            "principal_id": self.verifier.principal_id,
             "secret": self.credential._secret,
             "owner": self.verifier.owner,
             "environment": self.verifier.environment,
@@ -249,9 +252,10 @@ class LocalApiKeyIdentity:
     def load(cls, path: Path) -> LocalApiKeyIdentity:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict) or payload.get("version") != 1:
+            if not isinstance(payload, dict) or payload.get("version") != 2:
                 raise ValueError
             key_id = payload["key_id"]
+            principal_id = payload["principal_id"]
             secret = payload["secret"]
             owner = payload["owner"]
             environment = payload["environment"]
@@ -262,6 +266,8 @@ class LocalApiKeyIdentity:
             revoked = payload["revoked"]
             if (
                 not isinstance(key_id, str)
+                or not isinstance(principal_id, str)
+                or not principal_id
                 or not isinstance(secret, str)
                 or not isinstance(owner, str)
                 or environment not in _LOCAL_KEY_ENVIRONMENTS
@@ -291,7 +297,7 @@ class LocalApiKeyIdentity:
         pepper = secrets.token_bytes(32)
         verifier = LocalApiKeyVerifier(
             key_id=key_id,
-            principal_id=str(uuid5(NAMESPACE_URL, f"stock-forecasting/local-principal/{owner}")),
+            principal_id=principal_id,
             owner=owner,
             environment=cast(RuntimeEnvironment, environment),
             scopes=frozenset(cast(list[AuthorizationAction], scopes)),
@@ -336,6 +342,8 @@ class SourcePolicyVersion:
     environments: frozenset[RuntimeEnvironment]
     data_protection_class: DataProtectionClass
     resource_states: frozenset[AuthorizationResourceState]
+    valid_from: datetime = _MIN_INSTANT
+    valid_to: datetime = _MAX_INSTANT
 
 
 @dataclass(frozen=True)
@@ -438,21 +446,36 @@ class AuthorizationPolicy:
         context: SecurityContext,
         intent: OperationIntent,
     ) -> AuthorizationDecision:
-        grant_candidates = tuple(
+        grant_history = tuple(
             candidate
             for candidate in self.action_grants
             if candidate.principal_id == context.principal_id
         )
-        source_policy_candidates = tuple(
+        grant_candidates = tuple(
+            candidate
+            for candidate in grant_history
+            if candidate.valid_from <= intent.evaluated_at < candidate.valid_to
+        )
+        source_policy_history = tuple(
             candidate
             for candidate in self.source_policies
             if candidate.dataset_id == intent.dataset_id
         )
-        entitlement_candidates = tuple(
+        source_policy_candidates = tuple(
+            candidate
+            for candidate in source_policy_history
+            if candidate.valid_from <= intent.evaluated_at < candidate.valid_to
+        )
+        entitlement_history = tuple(
             candidate
             for candidate in self.source_entitlements
             if candidate.principal_id == context.principal_id
             and candidate.dataset_id == intent.dataset_id
+        )
+        entitlement_candidates = tuple(
+            candidate
+            for candidate in entitlement_history
+            if candidate.valid_from <= intent.evaluated_at < candidate.valid_to
         )
         grant = grant_candidates[0] if len(grant_candidates) == 1 else None
         source_policy = source_policy_candidates[0] if len(source_policy_candidates) == 1 else None
@@ -468,14 +491,16 @@ class AuthorizationPolicy:
             reason_code = "identity_scope_missing"
         elif len(grant_candidates) > 1:
             reason_code = "action_grant_conflict"
+        elif grant is None and grant_history:
+            reason_code = "action_grant_expired"
         elif grant is None or intent.action not in grant.actions:
             reason_code = "action_grant_missing"
         elif grant.environment != intent.environment:
             reason_code = "action_grant_environment_denied"
-        elif not (grant.valid_from <= intent.evaluated_at < grant.valid_to):
-            reason_code = "action_grant_expired"
         elif len(source_policy_candidates) > 1:
             reason_code = "source_policy_conflict"
+        elif source_policy is None and source_policy_history:
+            reason_code = "source_policy_expired"
         elif source_policy is None:
             reason_code = "source_policy_unknown"
         elif intent.action not in source_policy.allowed_actions:
@@ -490,12 +515,12 @@ class AuthorizationPolicy:
             reason_code = "data_protection_class_denied"
         elif len(entitlement_candidates) > 1:
             reason_code = "source_entitlement_conflict"
+        elif entitlement is None and entitlement_history:
+            reason_code = "source_entitlement_expired"
         elif entitlement is None:
             reason_code = "source_entitlement_missing"
         elif entitlement.status != "active":
             reason_code = f"source_entitlement_{entitlement.status}"
-        elif not (entitlement.valid_from <= intent.evaluated_at < entitlement.valid_to):
-            reason_code = "source_entitlement_expired"
         elif intent.action not in entitlement.allowed_actions:
             reason_code = "source_entitlement_action_denied"
         elif intent.purpose not in entitlement.purposes:
@@ -520,8 +545,13 @@ class AuthorizationPolicy:
             )
         )
         valid_until = intent.evaluated_at
-        if allowed and grant is not None and entitlement is not None:
-            valid_until = min(context.expires_at, grant.valid_to, entitlement.valid_to)
+        if allowed and grant is not None and source_policy is not None and entitlement is not None:
+            valid_until = min(
+                context.expires_at,
+                grant.valid_to,
+                source_policy.valid_to,
+                entitlement.valid_to,
+            )
         return AuthorizationDecision(
             evaluation_id=str(uuid4()),
             decision_id=str(uuid5(NAMESPACE_URL, f"stock-forecasting/authz/{decision_identity}")),
@@ -621,6 +651,8 @@ def build_fixture_authorization_policy(
                 "environments": [context.environment],
                 "data_protection_class": "internal",
                 "resource_states": ["active"],
+                "valid_from": _instant(context.issued_at),
+                "valid_to": _instant(context.expires_at),
             }
             source_policies.append(
                 SourcePolicyVersion(
@@ -631,6 +663,8 @@ def build_fixture_authorization_policy(
                     environments=frozenset({context.environment}),
                     data_protection_class="internal",
                     resource_states=frozenset({"active"}),
+                    valid_from=context.issued_at,
+                    valid_to=context.expires_at,
                 )
             )
         state = states.get(market, "active")

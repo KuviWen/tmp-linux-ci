@@ -13,6 +13,8 @@ x-application-environment: &application-environment
   PUBLIC_BIND_HOST: 127.0.0.1
   LOCAL_API_KEY_MODE: enabled
   LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
+  PLATFORM_ADMIN_API_KEY_FILE: /run/stock-forecasting/platform-admin-api-key.json
+  AUTHORIZATION_POLICY_SET_ID: fixture-active-v1
 
 x-application: &application
   image: stock-forecasting-ticket-04-app:0.1.0
@@ -27,12 +29,12 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_DB: stock_forecasting
-      POSTGRES_USER: stock
+      POSTGRES_USER: postgres
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
       - '127.0.0.1:5432:5432'
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U stock -d stock_forecasting"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d stock_forecasting"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -41,6 +43,9 @@ services:
 
   migration:
     <<: *application
+    environment:
+      <<: *application-environment
+      DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/stock_forecasting
     command: ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
     depends_on:
       postgres:
@@ -65,17 +70,61 @@ services:
       - --scope
       - research_prediction.read
 
+  authorization-init:
+    <<: *application
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - authorization
+      - init-fixtures
+      - --database-url
+      - postgresql+psycopg://postgres@postgres:5432/stock_forecasting
+      - --key-file
+      - /run/stock-forecasting/local-api-key.json
+      - --platform-admin-key-file
+      - /run/stock-forecasting/platform-admin-api-key.json
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      local-key-init:
+        condition: service_completed_successfully
+
+  database-grants:
+    image: postgres:17-alpine
+    command:
+      - psql
+      - --host
+      - postgres
+      - --username
+      - postgres
+      - --dbname
+      - stock_forecasting
+      - -v
+      - ON_ERROR_STOP=1
+      - -f
+      - /opt/stock-forecasting/grant-application-role.sql
+    volumes:
+      - ./docker/postgres/grant-application-role.sql:/opt/stock-forecasting/grant-application-role.sql:ro
+    depends_on:
+      authorization-init:
+        condition: service_completed_successfully
+
   denied-api:
     <<: *application
     profiles: ["acceptance"]
     environment:
       <<: *application-environment
-      XTAI_SOURCE_ENTITLEMENT_STATUS: revoked
+      AUTHORIZATION_POLICY_SET_ID: fixture-revoked-v1
     command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "0.0.0.0", "--port", "8001"]
     depends_on:
       migration:
         condition: service_completed_successfully
       local-key-init:
+        condition: service_completed_successfully
+      authorization-init:
+        condition: service_completed_successfully
+      database-grants:
         condition: service_completed_successfully
     healthcheck:
       test:
@@ -98,6 +147,10 @@ services:
       migration:
         condition: service_completed_successfully
       local-key-init:
+        condition: service_completed_successfully
+      authorization-init:
+        condition: service_completed_successfully
+      database-grants:
         condition: service_completed_successfully
     healthcheck:
       test:
@@ -135,6 +188,10 @@ services:
         condition: service_completed_successfully
       local-key-init:
         condition: service_completed_successfully
+      authorization-init:
+        condition: service_completed_successfully
+      database-grants:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "dagster", "api", "grpc-health-check", "-h", "127.0.0.1", "-p", "4000"]
       interval: 2s
@@ -145,7 +202,7 @@ services:
     <<: *application
     environment:
       <<: *application-environment
-      XTAI_SOURCE_ENTITLEMENT_STATUS: revoked
+      AUTHORIZATION_POLICY_SET_ID: fixture-revoked-v1
       AUTHORIZATION_ACCEPTANCE_MODE: denied
     command:
       - dagster
@@ -163,6 +220,10 @@ services:
       dagster-init:
         condition: service_completed_successfully
       local-key-init:
+        condition: service_completed_successfully
+      authorization-init:
+        condition: service_completed_successfully
+      database-grants:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "dagster", "api", "grpc-health-check", "-h", "127.0.0.1", "-p", "4000"]
@@ -229,6 +290,10 @@ services:
         condition: service_completed_successfully
       local-key-init:
         condition: service_completed_successfully
+      authorization-init:
+        condition: service_completed_successfully
+      database-grants:
+        condition: service_completed_successfully
 
   acceptance:
     <<: *application
@@ -265,6 +330,10 @@ services:
       dagster-daemon:
         condition: service_healthy
       local-key-init:
+        condition: service_completed_successfully
+      authorization-init:
+        condition: service_completed_successfully
+      database-grants:
         condition: service_completed_successfully
       denied-api:
         condition: service_healthy

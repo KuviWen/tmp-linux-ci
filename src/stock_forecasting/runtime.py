@@ -9,7 +9,6 @@ from typing import Literal, cast
 
 from stock_forecasting.application import Application, build_application
 from stock_forecasting.authorization import (
-    EntitlementStatus,
     LocalApiKeyIdentity,
     RuntimeEnvironment,
 )
@@ -26,7 +25,7 @@ class RuntimeSettings:
     public_bind_host: str
     local_api_key_mode: Literal["disabled", "enabled"]
     local_api_key_file: Path | None
-    source_entitlement_states: dict[str, EntitlementStatus]
+    authorization_policy_set_id: str
 
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
@@ -38,20 +37,7 @@ class RuntimeSettings:
         public_bind_host = os.environ.get("PUBLIC_BIND_HOST", "127.0.0.1")
         local_api_key_mode_text = os.environ.get("LOCAL_API_KEY_MODE", "disabled")
         local_api_key_file_text = os.environ.get("LOCAL_API_KEY_FILE")
-        entitlement_states: dict[str, EntitlementStatus] = {}
-        valid_entitlement_states = {
-            "draft",
-            "under_review",
-            "active",
-            "suspended",
-            "expired",
-            "revoked",
-        }
-        for market in ("XTAI", "XNAS"):
-            status = os.environ.get(f"{market}_SOURCE_ENTITLEMENT_STATUS", "active")
-            if status not in valid_entitlement_states:
-                raise RuntimeError(f"{market}_SOURCE_ENTITLEMENT_STATUS is invalid")
-            entitlement_states[market] = cast(EntitlementStatus, status)
+        authorization_policy_set_id = os.environ.get("AUTHORIZATION_POLICY_SET_ID")
         if not database_url:
             raise RuntimeError("DATABASE_URL is required")
         if not object_root:
@@ -60,6 +46,8 @@ class RuntimeSettings:
             raise RuntimeError("FIXTURE_INFORMATION_CUTOFF is required")
         if not observed_at_text:
             raise RuntimeError("FIXTURE_COLLECTION_OBSERVED_AT is required")
+        if not authorization_policy_set_id:
+            raise RuntimeError("AUTHORIZATION_POLICY_SET_ID is required")
         cutoff = datetime.fromisoformat(cutoff_text.replace("Z", "+00:00"))
         observed_at = datetime.fromisoformat(observed_at_text.replace("Z", "+00:00"))
         if cutoff.tzinfo is None:
@@ -94,7 +82,7 @@ class RuntimeSettings:
             local_api_key_file=(
                 Path(local_api_key_file_text) if local_api_key_file_text is not None else None
             ),
-            source_entitlement_states=entitlement_states,
+            authorization_policy_set_id=authorization_policy_set_id,
         )
 
     def build_application(self, *, relay_fault: RelayFault | None = None) -> Application:
@@ -111,6 +99,6 @@ class RuntimeSettings:
             observed_at=self.fixture_collection_observed_at,
             relay_fault=relay_fault,
             local_identity=local_identity,
+            authorization_policy_set_id=self.authorization_policy_set_id,
             public_bind_host=self.public_bind_host,
-            entitlement_states=self.source_entitlement_states,
         )

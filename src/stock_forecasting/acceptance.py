@@ -26,6 +26,15 @@ from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
     PolicyDeniedOutcome,
 )
+from stock_forecasting.authorization_repository import (
+    FIXTURE_ACTIVE_POLICY_SET,
+    FIXTURE_EXPIRED_POLICY_SET,
+    FIXTURE_GRANT_MISSING_POLICY_SET,
+    FIXTURE_POLICY_UNKNOWN_SET,
+    FIXTURE_PURPOSE_REMOVED_POLICY_SET,
+    FIXTURE_REVOKED_POLICY_SET,
+    FIXTURE_SUSPENDED_POLICY_SET,
+)
 from stock_forecasting.dagster_deployment import (
     inspect_dagster_deployment,
     materialize_deployed_asset,
@@ -33,6 +42,7 @@ from stock_forecasting.dagster_deployment import (
 from stock_forecasting.fixture_market import FixtureMarket, default_fixture_market_adapters
 from stock_forecasting.fixture_scenarios import FixtureScenario
 from stock_forecasting.outbox import RelayFault, RelayOutcome
+from stock_forecasting.research_query import ResearchQuery
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodOutcome
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand, FixtureUseTarget
 
@@ -61,6 +71,33 @@ class _CrashOperationsProjection(RelayFault):
         pass
 
 
+def _fixture_success(
+    application: Application,
+    command: FixtureEodCommand,
+) -> FixtureEodOutcome:
+    outcome = application.run_fixture_eod(command)
+    assert isinstance(outcome, FixtureEodOutcome)
+    return outcome
+
+
+def _listing_success(
+    query: ResearchQuery,
+    *,
+    listing_id: str,
+    information_cutoff: datetime,
+    fixture_scenario: str = "normal",
+    trace_id: str | None = None,
+) -> dict[str, Any]:
+    outcome = query.get_listing_research(
+        listing_id=listing_id,
+        information_cutoff=information_cutoff,
+        fixture_scenario=fixture_scenario,
+        trace_id=trace_id,
+    )
+    assert not isinstance(outcome, PolicyDeniedOutcome)
+    return outcome
+
+
 def _validate_deployment_endpoints(base_url: str | None, dagster_url: str | None) -> None:
     if (base_url is None) != (dagster_url is None):
         raise ValueError("deployment_endpoints_must_be_provided_together")
@@ -84,12 +121,14 @@ def _build_acceptance_application(
             database_url=database_url,
             relay_fault=relay_fault,
             local_identity=LocalApiKeyIdentity.load(Path(key_file)),
+            authorization_policy_set_id=FIXTURE_ACTIVE_POLICY_SET,
         )
     return build_test_application(
         observed_at=observed_at,
         object_root=object_root,
         database_url=database_url,
         relay_fault=relay_fault,
+        authorization_policy_set_id=FIXTURE_ACTIVE_POLICY_SET,
     )
 
 
@@ -101,6 +140,7 @@ def _capture_fixture_scenarios(
     deployed: bool,
     market: FixtureMarket,
     scenario_times: dict[FixtureScenario, datetime],
+    local_identity: LocalApiKeyIdentity | None,
 ) -> tuple[
     dict[FixtureScenario, dict[str, Any]],
     dict[FixtureScenario, dict[str, Any]],
@@ -112,23 +152,36 @@ def _capture_fixture_scenarios(
     records: dict[FixtureScenario, dict[str, Any]] = {}
     operations: dict[FixtureScenario, dict[str, Any]] = {}
     for scenario, scenario_time in scenario_times.items():
-        application = _build_acceptance_application(
-            observed_at=scenario_time,
-            object_root=object_root,
-            database_url=database_url,
-            deployed=deployed,
+        application = (
+            _build_acceptance_application(
+                observed_at=scenario_time,
+                object_root=object_root,
+                database_url=database_url,
+                deployed=True,
+            )
+            if deployed
+            else build_test_application(
+                observed_at=scenario_time,
+                object_root=object_root,
+                database_url=database_url,
+                local_identity=local_identity,
+                authorization_policy_set_id=FIXTURE_ACTIVE_POLICY_SET,
+            )
         )
+        local_identity = application.local_identity
         trace_id = f"{trace_prefix}-{scenario}"
-        outcome = application.require_fixture_eod_success(
+        outcome = _fixture_success(
+            application,
             FixtureEodCommand(
                 information_cutoff=information_cutoff,
                 trace_id=trace_id,
                 idempotency_key=f"{idempotency_prefix}-{scenario}",
                 market=market,
                 fixture_scenario=scenario,
-            )
+            ),
         )
-        records[scenario] = application.research_query.require_listing_research(
+        records[scenario] = _listing_success(
+            application.research_query,
             listing_id=outcome.listing_id,
             information_cutoff=information_cutoff,
             fixture_scenario=scenario,
@@ -219,7 +272,7 @@ def run_ticket_01(
         trace_id="trace-p1-trace-tw-01",
         idempotency_key="p1-trace-tw-01",
     )
-    outcome = application.require_fixture_eod_success(command)
+    outcome = _fixture_success(application, command)
     materialization = materialize(
         [xtai_fixture_eod_asset],
         resources={
@@ -243,8 +296,10 @@ def run_ticket_01(
         deployed=base_url is not None,
         market="XTAI",
         scenario_times=scenario_observed_at,
+        local_identity=application.local_identity,
     )
-    research = application.research_query.require_listing_research(
+    research = _listing_success(
+        application.research_query,
         listing_id=outcome.listing_id,
         information_cutoff=information_cutoff,
     )
@@ -394,11 +449,11 @@ def run_ticket_02(
         ),
     }
     outcomes = {
-        market: application.require_fixture_eod_success(command)
-        for market, command in commands.items()
+        market: _fixture_success(application, command) for market, command in commands.items()
     }
     research = {
-        market: application.research_query.require_listing_research(
+        market: _listing_success(
+            application.research_query,
             listing_id=outcome.listing_id,
             information_cutoff=information_cutoff,
         )
@@ -447,6 +502,7 @@ def run_ticket_02(
         deployed=base_url is not None,
         market="XNAS",
         scenario_times=scenario_times,
+        local_identity=application.local_identity,
     )
 
     adapters = default_fixture_market_adapters()
@@ -614,6 +670,7 @@ def _terminate_relay_before_consumers(
                 "PUBLIC_BIND_HOST": "127.0.0.1",
                 "LOCAL_API_KEY_MODE": "enabled",
                 "LOCAL_API_KEY_FILE": str(local_key_file),
+                "AUTHORIZATION_POLICY_SET_ID": FIXTURE_ACTIVE_POLICY_SET,
                 "PYTHONUTF8": "1",
             },
             stdout=subprocess.PIPE,
@@ -672,7 +729,7 @@ def run_ticket_03(
         trace_id="trace-p1-trace-outbox-01-relay-crash",
         idempotency_key="p1-trace-outbox-01-relay-crash",
     )
-    first = application.require_fixture_eod_success(first_command)
+    first = _fixture_success(application, first_command)
     event_before = application.operations_control.get_outbox_event(first.outbox_event_id)
     predictions_before = application.operations_control.list_prediction_records(
         trace_id=first_command.trace_id
@@ -751,12 +808,13 @@ def run_ticket_03(
         deployed=deployed,
         relay_fault=_CrashOperationsProjection(),
     )
-    second = crashing_consumer.require_fixture_eod_success(
+    second = _fixture_success(
+        crashing_consumer,
         FixtureEodCommand(
             information_cutoff=second_cutoff,
             trace_id="trace-p1-trace-outbox-01-consumer-crash",
             idempotency_key="p1-trace-outbox-01-consumer-crash",
-        )
+        ),
     )
     consumer_failed = crashing_consumer.relay_outbox(event_id=second.outbox_event_id)
     consumer_restarted = _build_acceptance_application(
@@ -770,19 +828,21 @@ def run_ticket_03(
         second.outbox_event_id
     )
 
-    third = consumer_restarted.require_fixture_eod_success(
+    third = _fixture_success(
+        consumer_restarted,
         FixtureEodCommand(
             information_cutoff=information_cutoff + timedelta(days=2),
             trace_id="trace-p1-trace-outbox-01-ordering-3",
             idempotency_key="p1-trace-outbox-01-ordering-3",
-        )
+        ),
     )
-    fourth = consumer_restarted.require_fixture_eod_success(
+    fourth = _fixture_success(
+        consumer_restarted,
         FixtureEodCommand(
             information_cutoff=information_cutoff + timedelta(days=3),
             trace_id="trace-p1-trace-outbox-01-ordering-4",
             idempotency_key="p1-trace-outbox-01-ordering-4",
-        )
+        ),
     )
     first_deferral = consumer_restarted.relay_outbox(event_id=fourth.outbox_event_id)
     second_deferral = consumer_restarted.relay_outbox(event_id=fourth.outbox_event_id)
@@ -928,13 +988,14 @@ def run_ticket_04(
         for market in markets
     }
     active_outcomes = {
-        market: active_application.require_fixture_eod_success(command)
+        market: _fixture_success(active_application, command)
         for market, command in active_commands.items()
     }
     object_files_after_allow = {path for path in object_root.rglob("*") if path.is_file()}
 
     def policy_application(
         *,
+        policy_set_id: str,
         status: EntitlementStatus,
         purposes: frozenset[str],
         grant_actions: frozenset[str] | None = None,
@@ -946,10 +1007,7 @@ def run_ticket_04(
                 object_root=object_root,
                 database_url=database_url,
                 local_identity=active_application.local_identity,
-                entitlement_states={"XTAI": status},
-                entitlement_purposes={"XTAI": purposes},
-                grant_actions=grant_actions,
-                policy_markets=policy_markets,
+                authorization_policy_set_id=policy_set_id,
             )
         return build_test_application(
             observed_at=observed_at,
@@ -969,6 +1027,7 @@ def run_ticket_04(
             str,
             frozenset[str] | None,
             frozenset[str] | None,
+            str,
         ],
         ...,
     ] = (
@@ -978,6 +1037,7 @@ def run_ticket_04(
             "source_entitlement_suspended",
             None,
             None,
+            FIXTURE_SUSPENDED_POLICY_SET,
         ),
         (
             "expired",
@@ -985,6 +1045,7 @@ def run_ticket_04(
             "source_entitlement_expired",
             None,
             None,
+            FIXTURE_EXPIRED_POLICY_SET,
         ),
         (
             "revoked",
@@ -992,14 +1053,23 @@ def run_ticket_04(
             "source_entitlement_revoked",
             None,
             None,
+            FIXTURE_REVOKED_POLICY_SET,
         ),
-        ("active", frozenset(), "source_entitlement_purpose_denied", None, None),
+        (
+            "active",
+            frozenset(),
+            "source_entitlement_purpose_denied",
+            None,
+            None,
+            FIXTURE_PURPOSE_REMOVED_POLICY_SET,
+        ),
         (
             "active",
             frozenset({"fixture_research"}),
             "action_grant_missing",
             frozenset(),
             None,
+            FIXTURE_GRANT_MISSING_POLICY_SET,
         ),
         (
             "active",
@@ -1007,14 +1077,23 @@ def run_ticket_04(
             "source_policy_unknown",
             None,
             frozenset({"XNAS"}),
+            FIXTURE_POLICY_UNKNOWN_SET,
         ),
     )
     matrix_results: dict[str, bool] = {}
     matrix_audits: list[dict[str, Any]] = []
     denied_traces: list[str] = []
     revoked_application: Application | None = None
-    for status, purposes, expected_reason, grant_actions, policy_markets in matrix_cases:
+    for (
+        status,
+        purposes,
+        expected_reason,
+        grant_actions,
+        policy_markets,
+        policy_set_id,
+    ) in matrix_cases:
         candidate = policy_application(
+            policy_set_id=policy_set_id,
             status=status,
             purposes=purposes,
             grant_actions=grant_actions,
@@ -1044,20 +1123,26 @@ def run_ticket_04(
             matrix_results[expected_reason] = False
     assert revoked_application is not None
 
-    administrative_identity = LocalApiKeyIdentity.issue(
-        owner="platform-admin",
-        environment=active_application.security_context.environment,
-        scopes={"fixture_pipeline.execute", "research_prediction.read"},
-        issued_at=active_application.security_context.issued_at,
-        expires_at=active_application.security_context.expires_at,
-    )
+    if deployed:
+        platform_admin_key_file = os.environ.get("PLATFORM_ADMIN_API_KEY_FILE")
+        if platform_admin_key_file is None:
+            raise RuntimeError("PLATFORM_ADMIN_API_KEY_FILE is required for deployed acceptance")
+        administrative_identity = LocalApiKeyIdentity.load(Path(platform_admin_key_file))
+    else:
+        administrative_identity = LocalApiKeyIdentity.issue(
+            owner="platform-admin",
+            environment=active_application.security_context.environment,
+            scopes={"fixture_pipeline.execute", "research_prediction.read"},
+            issued_at=active_application.security_context.issued_at,
+            expires_at=active_application.security_context.expires_at,
+        )
     administrative_application = (
         build_application(
             observed_at=observed_at,
             object_root=object_root,
             database_url=database_url,
             local_identity=administrative_identity,
-            entitlement_states={"XTAI": "revoked"},
+            authorization_policy_set_id=FIXTURE_REVOKED_POLICY_SET,
         )
         if deployed
         else build_test_application(
@@ -1088,7 +1173,8 @@ def run_ticket_04(
         trace_id=query_trace,
     )
     existing_projection_denied = isinstance(query_outcome, PolicyDeniedOutcome)
-    restored_record = active_application.research_query.require_listing_research(
+    restored_record = _listing_success(
+        active_application.research_query,
         listing_id=active_outcomes["XTAI"].listing_id,
         information_cutoff=information_cutoff,
         trace_id="trace-p1-trace-auth-01-existing-projection-restored",
@@ -1217,6 +1303,10 @@ def run_ticket_04(
             for event in active_audits + matrix_audits + dagster_audit
         ),
     }
+    if deployed:
+        checks["application_database_role_least_privilege"] = (
+            active_application.state_store.authorization_policy_sets_are_read_only_for_current_role()
+        )
     if dagster_url is not None:
         deployed_dagster_trace = "trace-p1-trace-auth-01-deployed-dagster-denied"
         deployed_materialization = materialize_deployed_asset(

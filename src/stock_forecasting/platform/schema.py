@@ -57,6 +57,15 @@ security_audit_events = Table(
     Column("authorization", JSON, nullable=True),
 )
 
+authorization_policy_sets = Table(
+    "authorization_policy_sets",
+    metadata,
+    Column("policy_set_id", String(128), primary_key=True),
+    Column("principal_id", String(36), primary_key=True),
+    Column("content_digest", String(64), nullable=False),
+    Column("payload", JSON, nullable=False),
+)
+
 canonical_artifacts = Table(
     "lineage_canonical_artifacts",
     metadata,

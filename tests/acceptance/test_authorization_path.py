@@ -13,6 +13,7 @@ from stock_forecasting.authorization import (
 )
 from stock_forecasting.fixture_market import FixtureMarket
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from tests.support import assert_success
 
 
 def test_active_entitlements_allow_both_fixture_sources_through_the_public_workflow() -> None:
@@ -21,7 +22,7 @@ def test_active_entitlements_allow_both_fixture_sources_through_the_public_workf
 
     markets: tuple[FixtureMarket, ...] = ("XTAI", "XNAS")
     outcomes = {
-        market: application.require_fixture_eod_success(
+        market: assert_success(application).run_fixture_eod(
             FixtureEodCommand(
                 information_cutoff=cutoff,
                 trace_id=f"trace-ticket-04-active-{market.lower()}",
@@ -34,7 +35,7 @@ def test_active_entitlements_allow_both_fixture_sources_through_the_public_workf
 
     for market, outcome in outcomes.items():
         assert outcome.status == "succeeded"
-        research = application.research_query.require_listing_research(
+        research = assert_success(application).research_query.get_listing_research(
             listing_id=outcome.listing_id,
             information_cutoff=cutoff,
         )
@@ -90,7 +91,7 @@ def test_authorization_uses_execution_clock_not_historical_fixture_observation()
         local_identity=identity,
     )
 
-    outcome = application.require_fixture_eod_success(
+    outcome = assert_success(application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=observed_at,
             trace_id="trace-ticket-04-security-clock",
@@ -182,7 +183,7 @@ def test_revoked_entitlement_blocks_an_existing_projection_without_deleting_it(
         object_root=tmp_path / "objects",
         database_url=database_url,
     )
-    outcome = active_application.require_fixture_eod_success(
+    outcome = assert_success(active_application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-04-existing-active",
@@ -233,7 +234,7 @@ def test_revoked_entitlement_blocks_an_existing_projection_without_deleting_it(
         "evaluated_at": "2026-08-12T22:00:00Z",
         "valid_until": "2026-08-12T22:00:00Z",
     }
-    restored = active_application.research_query.require_listing_research(
+    restored = assert_success(active_application).research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
         trace_id="trace-ticket-04-existing-restored",
@@ -276,7 +277,7 @@ def test_rest_and_ui_return_only_stable_denial_problem_while_audit_keeps_reason(
         object_root=tmp_path / "objects",
         database_url=database_url,
     )
-    outcome = active_application.require_fixture_eod_success(
+    outcome = assert_success(active_application).run_fixture_eod(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-04-rest-active",

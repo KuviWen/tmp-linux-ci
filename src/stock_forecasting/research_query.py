@@ -102,39 +102,3 @@ class ResearchQuery:
             if denial is not None:
                 return denial
         return records
-
-    def require_listing_research(
-        self,
-        *,
-        listing_id: str,
-        information_cutoff: datetime,
-        fixture_scenario: str = "normal",
-        trace_id: str | None = None,
-        security_context: SecurityContext | None = None,
-    ) -> dict[str, Any]:
-        outcome = self.get_listing_research(
-            listing_id=listing_id,
-            information_cutoff=information_cutoff,
-            fixture_scenario=fixture_scenario,
-            trace_id=trace_id,
-            security_context=security_context,
-        )
-        if isinstance(outcome, PolicyDeniedOutcome):
-            raise RuntimeError("policy_denied_outcome_requires_handling")
-        return outcome
-
-    def require_predictions(
-        self,
-        *,
-        execution_purpose: str,
-        trace_id: str | None = None,
-        security_context: SecurityContext | None = None,
-    ) -> list[dict[str, Any]]:
-        outcome = self.list_predictions(
-            execution_purpose=execution_purpose,
-            trace_id=trace_id,
-            security_context=security_context,
-        )
-        if isinstance(outcome, PolicyDeniedOutcome):
-            raise RuntimeError("policy_denied_outcome_requires_handling")
-        return outcome

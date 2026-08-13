@@ -14,6 +14,7 @@ from stock_forecasting.authorization import (
     SecurityContext,
     build_fixture_authorization_policy,
 )
+from stock_forecasting.authorization_repository import AuthorizationPolicyRepository
 from stock_forecasting.operations_control import OperationsControl
 from stock_forecasting.outbox import (
     EventCompatibility,
@@ -48,14 +49,24 @@ class Application:
         relay_clock: RelayClock | None = None,
         relay_worker_id: str | None = None,
         local_identity: LocalApiKeyIdentity,
-        authorization_policy: AuthorizationPolicy,
+        authorization_policy_set_id: str,
+        authorization_policy_bootstrap: AuthorizationPolicy | None,
         public_bind_host: str,
         fixed_security_time: datetime | None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
         self.local_identity = local_identity
         self.security_context: SecurityContext = local_identity.context
-        self.authorization_policy = authorization_policy
+        self.authorization_policy_repository = AuthorizationPolicyRepository(self.state_store)
+        if authorization_policy_bootstrap is not None:
+            self.authorization_policy_repository.install(
+                authorization_policy_set_id,
+                authorization_policy_bootstrap,
+            )
+        self.authorization_policy = self.authorization_policy_repository.get(
+            authorization_policy_set_id,
+            principal_id=self.security_context.principal_id,
+        )
         self.public_bind_host = public_bind_host
         self._fixed_security_time = fixed_security_time
         self.research_query = ResearchQuery(
@@ -88,12 +99,6 @@ class Application:
         self, command: FixtureEodCommand
     ) -> FixtureEodOutcome | PolicyDeniedOutcome:
         return self._fixture_eod.execute(command)
-
-    def require_fixture_eod_success(self, command: FixtureEodCommand) -> FixtureEodOutcome:
-        outcome = self.run_fixture_eod(command)
-        if isinstance(outcome, PolicyDeniedOutcome):
-            raise RuntimeError("policy_denied_outcome_requires_handling")
-        return outcome
 
     def authenticate_local_request(
         self,
@@ -135,6 +140,7 @@ def build_test_application(
     policy_markets: frozenset[str] | None = None,
     public_bind_host: str = "127.0.0.1",
     authorization_time: datetime | None = None,
+    authorization_policy_set_id: str | None = None,
 ) -> Application:
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
     resolved_database_url = database_url or "sqlite+pysqlite:///:memory:"
@@ -146,7 +152,7 @@ def build_test_application(
         issued_at=identity_time - timedelta(minutes=1),
         expires_at=identity_time + timedelta(hours=24),
     )
-    authorization_policy = build_fixture_authorization_policy(
+    authorization_policy_bootstrap = build_fixture_authorization_policy(
         resolved_identity.context,
         entitlement_states=entitlement_states,
         entitlement_purposes=entitlement_purposes,
@@ -163,7 +169,8 @@ def build_test_application(
         relay_clock=relay_clock,
         relay_worker_id=relay_worker_id,
         local_identity=resolved_identity,
-        authorization_policy=authorization_policy,
+        authorization_policy_set_id=authorization_policy_set_id or f"test-policy-{uuid4()}",
+        authorization_policy_bootstrap=authorization_policy_bootstrap,
         public_bind_host=public_bind_host,
         fixed_security_time=authorization_time or observed_at,
     )
@@ -179,11 +186,8 @@ def build_application(
     relay_clock: RelayClock | None = None,
     relay_worker_id: str | None = None,
     local_identity: LocalApiKeyIdentity,
-    entitlement_states: Mapping[str, EntitlementStatus] | None = None,
-    entitlement_purposes: Mapping[str, frozenset[str]] | None = None,
+    authorization_policy_set_id: str,
     public_bind_host: str = "127.0.0.1",
-    grant_actions: frozenset[str] | None = None,
-    policy_markets: frozenset[str] | None = None,
 ) -> Application:
     return Application(
         observed_at=observed_at,
@@ -195,13 +199,8 @@ def build_application(
         relay_clock=relay_clock,
         relay_worker_id=relay_worker_id,
         local_identity=local_identity,
-        authorization_policy=build_fixture_authorization_policy(
-            local_identity.context,
-            entitlement_states=entitlement_states,
-            entitlement_purposes=entitlement_purposes,
-            grant_actions=grant_actions,
-            policy_markets=policy_markets,
-        ),
+        authorization_policy_set_id=authorization_policy_set_id,
+        authorization_policy_bootstrap=None,
         public_bind_host=public_bind_host,
         fixed_security_time=None,
     )
