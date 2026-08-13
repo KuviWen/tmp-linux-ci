@@ -151,7 +151,8 @@ components:
         price_volume: {type: string, enum: [full, degraded, unavailable]}
     MatrixItem:
       type: object
-      required: [listing_id, display_ticker, market, fixture_badge, predictions, lineage]
+      required:
+        [listing_id, display_ticker, market, fixture_badge, predictions, lineage, projection]
       properties:
         listing_id: {type: string, format: uuid}
         display_ticker: {type: string}
@@ -163,6 +164,7 @@ components:
           maxItems: 3
           items: {$ref: '#/components/schemas/PredictionResult'}
         lineage: {$ref: '#/components/schemas/Lineage'}
+        projection: {$ref: '#/components/schemas/ProjectionStatus'}
     PredictionMatrix:
       type: object
       required: [information_cutoff, execution_purpose, items]
@@ -183,6 +185,7 @@ components:
         - predictions
         - lineage
         - source_evidence
+        - projection
       properties:
         identity: {type: object}
         calendar: {type: object}
@@ -194,6 +197,18 @@ components:
           items: {$ref: '#/components/schemas/PredictionResult'}
         lineage: {$ref: '#/components/schemas/Lineage'}
         source_evidence: {type: object}
+        projection: {$ref: '#/components/schemas/ProjectionStatus'}
+    ProjectionStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - core_projection_version
+        - evidence_projection_version
+        - stale
+      properties:
+        core_projection_version: {type: integer, minimum: 1}
+        evidence_projection_version: {type: integer, minimum: 0}
+        stale: {type: boolean}
     Lineage:
       type: object
       required:

@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import mkdtemp
 
 from stock_forecasting.operations_control import OperationsControl
+from stock_forecasting.outbox import NoRelayFault, RelayFault, RelayOutcome
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.research_query import ResearchQuery
@@ -25,12 +26,14 @@ class Application:
         object_root: Path,
         database_url: str,
         create_schema: bool,
+        relay_fault: RelayFault | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
         self.research_query = ResearchQuery(self.state_store)
         self.security_audit = SecurityAudit(self.state_store)
         self.operations_control = OperationsControl(self.state_store)
         self.object_repository = FilesystemObjectRepository(object_root)
+        self._relay_fault = relay_fault or NoRelayFault()
         self._fixture_eod = FixtureEodWorkflow(
             self.state_store,
             observed_at=observed_at,
@@ -43,6 +46,9 @@ class Application:
     def run_fixture_eod(self, command: FixtureEodCommand) -> FixtureEodOutcome:
         return self._fixture_eod.execute(command)
 
+    def relay_outbox(self, *, event_id: str | None = None) -> RelayOutcome:
+        return self.state_store.relay_outbox(event_id=event_id, fault=self._relay_fault)
+
     def attempt_fixture_use(self, command: FixtureUseCommand) -> dict[str, str]:
         return self._fixture_use.execute(command)
 
@@ -52,6 +58,7 @@ def build_test_application(
     observed_at: datetime | None = None,
     object_root: Path | None = None,
     database_url: str | None = None,
+    relay_fault: RelayFault | None = None,
 ) -> Application:
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
     resolved_database_url = database_url or "sqlite+pysqlite:///:memory:"
@@ -60,6 +67,7 @@ def build_test_application(
         object_root=root,
         database_url=resolved_database_url,
         create_schema=True,
+        relay_fault=relay_fault,
     )
 
 
@@ -68,10 +76,12 @@ def build_application(
     database_url: str,
     object_root: Path,
     observed_at: datetime,
+    relay_fault: RelayFault | None = None,
 ) -> Application:
     return Application(
         observed_at=observed_at,
         object_root=object_root,
         database_url=database_url,
         create_schema=False,
+        relay_fault=relay_fault,
     )

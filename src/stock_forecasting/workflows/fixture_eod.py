@@ -72,6 +72,8 @@ class FixtureEodOutcome:
     serving_assignment_id: str
     raw_object_ref: ObjectRef
     work_id: str
+    outbox_event_id: str
+    outbox_aggregate_version: int
 
 
 class FixtureEodWorkflow:
@@ -570,7 +572,8 @@ class FixtureEodWorkflow:
             },
         ]
         work_id = fixture_id(f"work/{command.idempotency_key}")
-        self._state_store.publish_fixture_trace(
+        outbox_event_id = fixture_id(f"outbox/forecast-publication/{command.idempotency_key}")
+        published_event = self._state_store.publish_fixture_trace(
             record_id=fixture_id(f"research-record/{command.idempotency_key}"),
             payload=research_record,
             work_id=work_id,
@@ -578,6 +581,7 @@ class FixtureEodWorkflow:
             idempotency_key=command.idempotency_key,
             health_assessment_id=fixture_id(f"source-health/{command.idempotency_key}"),
             audit_event_id=fixture_id(f"audit/{command.idempotency_key}"),
+            outbox_event_id=outbox_event_id,
             operations=disposition,
             artifacts=artifacts,
             fixture_predictions=[
@@ -614,4 +618,6 @@ class FixtureEodWorkflow:
             serving_assignment_id=serving_assignment_id,
             raw_object_ref=raw_object_ref,
             work_id=work_id,
+            outbox_event_id=outbox_event_id,
+            outbox_aggregate_version=published_event["aggregate_version"],
         )

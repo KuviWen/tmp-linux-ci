@@ -5,11 +5,11 @@ import yaml
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
-def test_compose_declares_the_deployable_ticket_02_runtime() -> None:
+def test_compose_declares_the_deployable_ticket_03_runtime() -> None:
     compose = yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8"))
     services = compose["services"]
 
-    assert compose["name"] == "stock-forecasting-ticket-02"
+    assert compose["name"] == "stock-forecasting-ticket-03"
     assert set(services) == {
         "postgres",
         "migration",
@@ -18,6 +18,7 @@ def test_compose_declares_the_deployable_ticket_02_runtime() -> None:
         "dagster-code",
         "dagster-webserver",
         "dagster-daemon",
+        "outbox-relay",
         "acceptance",
     }
     assert services["postgres"]["image"] == "postgres:17-alpine"
@@ -28,7 +29,7 @@ def test_compose_declares_the_deployable_ticket_02_runtime() -> None:
     }
     assert services["migration"]["command"][-2:] == ["upgrade", "head"]
     assert services["acceptance"]["profiles"] == ["acceptance"]
-    assert "ticket-02" in services["acceptance"]["command"]
+    assert "ticket-03" in services["acceptance"]["command"]
     assert "--base-url" in services["acceptance"]["command"]
     assert "--observed-at" in services["acceptance"]["command"]
     application_services = {
@@ -38,13 +39,25 @@ def test_compose_declares_the_deployable_ticket_02_runtime() -> None:
         "dagster-code",
         "dagster-webserver",
         "dagster-daemon",
+        "outbox-relay",
         "acceptance",
     }
     assert {services[name]["image"] for name in application_services} == {
-        "stock-forecasting-ticket-02-app:0.1.0"
+        "stock-forecasting-ticket-03-app:0.1.0"
     }
     assert services["api"]["build"] == {"context": "."}
     assert all("build" not in services[name] for name in application_services if name != "api")
+    assert services["outbox-relay"]["profiles"] == ["relay"]
+    assert services["outbox-relay"]["command"] == [
+        "python",
+        "-m",
+        "stock_forecasting.cli",
+        "relay",
+        "--once",
+    ]
+    assert services["outbox-relay"]["depends_on"]["migration"]["condition"] == (
+        "service_completed_successfully"
+    )
     assert services["dagster-init"]["command"] == ["dagster", "instance", "migrate"]
     assert services["dagster-code"]["healthcheck"]["test"] == [
         "CMD",

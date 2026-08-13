@@ -263,3 +263,49 @@ def test_ticket_02_acceptance_runner_verifies_the_shared_us_seams(tmp_path: Path
         observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
     )
     assert direct_report["status"] == "passed"
+
+
+def test_ticket_03_acceptance_runner_verifies_outbox_crash_recovery(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "stock_forecasting.cli",
+            "acceptance",
+            "ticket-03",
+            "--database-url",
+            f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+            "--object-root",
+            str(tmp_path / "objects"),
+            "--information-cutoff",
+            "2026-08-12T07:00:00Z",
+            "--observed-at",
+            "2026-08-12T06:55:00Z",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["status"] == "passed"
+    assert report["trace_ids"] == ["P1-TRACE-OUTBOX-01"]
+    assert report["execution_purpose"] == "fixture"
+    assert report["formal_prediction"] is False
+    assert all(report["checks"].values())
+    assert set(report["checks"]) == {
+        "canonical_commit_before_consumers",
+        "original_event_identity_recovered",
+        "consumer_transaction_recovered",
+        "duplicate_delivery_idempotent",
+        "out_of_order_deferred",
+        "rest_projection_stale_then_fresh",
+        "ui_projection_stale_then_fresh",
+        "canonical_state_immutable",
+        "operations_recovery_evidence",
+        "single_correlated_incident",
+        "zero_lost_or_duplicate_effects",
+    }

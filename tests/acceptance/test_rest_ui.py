@@ -95,6 +95,7 @@ def test_rest_and_traditional_chinese_matrix_show_both_markets_at_one_cutoff() -
             "listing_id",
             "market",
             "predictions",
+            "projection",
         )
     }
     assert all(

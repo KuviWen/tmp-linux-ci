@@ -100,6 +100,15 @@ def _horizon_cards(
     return "".join(cards)
 
 
+def _projection_status(projection: dict[str, object]) -> str:
+    state = "等待恢復" if projection["stale"] else "已同步"
+    return (
+        f'<p class="status">投影狀態：{state}</p>'
+        f"<p>核心版本 {projection['core_projection_version']}／"
+        f"證據版本 {projection['evidence_projection_version']}</p>"
+    )
+
+
 def create_web_app(application: Application) -> FastAPI:
     app = FastAPI(
         title="台美個股趨勢研究",
@@ -179,6 +188,7 @@ def create_web_app(application: Application) -> FastAPI:
                 "fixture_badge": record["fixture_badge"],
                 "predictions": record["predictions"],
                 "lineage": record["lineage"],
+                "projection": record["projection"],
             }
             for record in records
         ]
@@ -261,6 +271,7 @@ def create_web_app(application: Application) -> FastAPI:
                 f"<h2>{escape(str(record['identity']['display_ticker']))} · "
                 f"{escape(str(record['calendar']['exchange']))}</h2>"
                 f"<p>資訊截止點 {escape(information_cutoff)}</p>"
+                f"{_projection_status(record['projection'])}"
                 f'<div class="horizons">'
                 f"{_horizon_cards(record['predictions'], focused_horizon=horizon)}</div>"
                 f'<p><a href="/research/listings/{escape(listing_id)}?{detail_query}">'
@@ -340,6 +351,7 @@ def create_web_app(application: Application) -> FastAPI:
             f"<p>{escape(str(record['identity']['display_ticker']))} · "
             f"{escape(str(record['calendar']['exchange']))}</p>"
             f"<p>資訊截止點 {escape(information_cutoff)}</p></header>"
+            f"{_projection_status(record['projection'])}"
             f'<nav aria-label="研究細節">{"".join(tab_links)}</nav>'
             f'<section class="panel"><div class="horizons">{horizon_cards}</div></section>'
             f'<section class="panel"><h2>版本追溯</h2>{lineage_html}</section></main>'

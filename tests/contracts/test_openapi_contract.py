@@ -34,6 +34,27 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "type": "string",
         "enum": ["XTAI", "XNAS"],
     }
+    assert "projection" in matrix_item["required"]
+    assert matrix_item["properties"]["projection"] == {
+        "$ref": "#/components/schemas/ProjectionStatus"
+    }
+    listing_research = contract["components"]["schemas"]["ListingResearch"]
+    assert "projection" in listing_research["required"]
+    projection = contract["components"]["schemas"]["ProjectionStatus"]
+    assert projection == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "core_projection_version",
+            "evidence_projection_version",
+            "stale",
+        ],
+        "properties": {
+            "core_projection_version": {"type": "integer", "minimum": 1},
+            "evidence_projection_version": {"type": "integer", "minimum": 0},
+            "stale": {"type": "boolean"},
+        },
+    }
     problem = contract["components"]["schemas"]["ProblemDetails"]
     assert set(problem["required"]) == {
         "type",

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from stock_forecasting.application import Application, build_application
+from stock_forecasting.outbox import RelayFault
 
 
 @dataclass(frozen=True)
@@ -42,9 +43,10 @@ class RuntimeSettings:
             fixture_collection_observed_at=observed_at.astimezone(UTC),
         )
 
-    def build_application(self) -> Application:
+    def build_application(self, *, relay_fault: RelayFault | None = None) -> Application:
         return build_application(
             database_url=self.database_url,
             object_root=self.object_root,
             observed_at=self.fixture_collection_observed_at,
+            relay_fault=relay_fault,
         )

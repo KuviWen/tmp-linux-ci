@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
 from dagster import ResourceDefinition, materialize
@@ -19,6 +24,7 @@ from stock_forecasting.application import Application, build_application, build_
 from stock_forecasting.dagster_deployment import inspect_dagster_deployment
 from stock_forecasting.fixture_market import FixtureMarket, default_fixture_market_adapters
 from stock_forecasting.fixture_scenarios import FixtureScenario
+from stock_forecasting.outbox import RelayFault
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodOutcome
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand, FixtureUseTarget
 
@@ -35,6 +41,18 @@ class HttpClient(Protocol):
     def close(self) -> None: ...
 
 
+class _CrashOperationsProjection(RelayFault):
+    def before_consumers(self, event_id: str) -> None:
+        pass
+
+    def before_consumer_commit(self, consumer_name: str, event_id: str) -> None:
+        if consumer_name == "operations_projection":
+            raise RuntimeError("injected_consumer_transaction_crash")
+
+    def before_ack(self, event_id: str) -> None:
+        pass
+
+
 def _validate_deployment_endpoints(base_url: str | None, dagster_url: str | None) -> None:
     if (base_url is None) != (dagster_url is None):
         raise ValueError("deployment_endpoints_must_be_provided_together")
@@ -46,17 +64,20 @@ def _build_acceptance_application(
     object_root: Path,
     observed_at: datetime,
     deployed: bool,
+    relay_fault: RelayFault | None = None,
 ) -> Application:
     if deployed:
         return build_application(
             observed_at=observed_at,
             object_root=object_root,
             database_url=database_url,
+            relay_fault=relay_fault,
         )
     return build_test_application(
         observed_at=observed_at,
         object_root=object_root,
         database_url=database_url,
+        relay_fault=relay_fault,
     )
 
 
@@ -533,5 +554,267 @@ def run_ticket_02(
         "formal_source_qualified": False,
         "formal_prediction": False,
         "listing_ids": {market: outcome.listing_id for market, outcome in outcomes.items()},
+        "checks": checks,
+    }
+
+
+def _terminate_relay_before_consumers(
+    *,
+    database_url: str,
+    object_root: Path,
+    information_cutoff: datetime,
+    observed_at: datetime,
+    event_id: str,
+) -> int:
+    with TemporaryDirectory(prefix="stock-forecasting-relay-") as directory:
+        ready_file = Path(directory) / "before-consumers.ready"
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "stock_forecasting.acceptance_relay",
+                "--event-id",
+                event_id,
+                "--pause-before-consumers",
+                str(ready_file),
+            ],
+            env={
+                **os.environ,
+                "DATABASE_URL": database_url,
+                "OBJECT_ROOT": str(object_root),
+                "FIXTURE_INFORMATION_CUTOFF": information_cutoff.isoformat(),
+                "FIXTURE_COLLECTION_OBSERVED_AT": observed_at.isoformat(),
+                "PYTHONUTF8": "1",
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while (
+                not ready_file.exists() and process.poll() is None and time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+            if not ready_file.exists():
+                _, error = process.communicate(timeout=5)
+                raise RuntimeError(f"relay_process_did_not_reach_failpoint: {error}")
+            process.terminate()
+            process.communicate(timeout=5)
+            return int(process.returncode or 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+
+
+def run_ticket_03(
+    *,
+    database_url: str,
+    object_root: Path,
+    information_cutoff: datetime,
+    observed_at: datetime,
+    base_url: str | None = None,
+    dagster_url: str | None = None,
+) -> dict[str, Any]:
+    _validate_deployment_endpoints(base_url, dagster_url)
+    deployed = base_url is not None
+
+    application = _build_acceptance_application(
+        observed_at=observed_at,
+        object_root=object_root,
+        database_url=database_url,
+        deployed=deployed,
+    )
+    first_command = FixtureEodCommand(
+        information_cutoff=information_cutoff,
+        trace_id="trace-p1-trace-outbox-01-relay-crash",
+        idempotency_key="p1-trace-outbox-01-relay-crash",
+    )
+    first = application.run_fixture_eod(first_command)
+    event_before = application.operations_control.get_outbox_event(first.outbox_event_id)
+    predictions_before = application.operations_control.list_prediction_records(
+        trace_id=first_command.trace_id
+    )
+    lineage_before = application.operations_control.get_trace_evidence(first_command.trace_id)
+    audit_before = application.security_audit.list_events(trace_id=first_command.trace_id)
+
+    relay_returncode = _terminate_relay_before_consumers(
+        database_url=database_url,
+        object_root=object_root,
+        information_cutoff=information_cutoff,
+        observed_at=observed_at,
+        event_id=first.outbox_event_id,
+    )
+    crashed = application.operations_control.get_outbox_recovery(first.outbox_event_id)
+
+    client: HttpClient = (
+        TestClient(create_web_app(application))
+        if base_url is None
+        else Client(base_url=base_url, timeout=10.0)
+    )
+    cutoff_text = information_cutoff.isoformat().replace("+00:00", "Z")
+    pending_rest = client.get(
+        "/api/v1/research/predictions",
+        params={"information_cutoff": cutoff_text},
+    )
+    pending_ui = client.get(
+        "/research",
+        params={"information_cutoff": cutoff_text, "support": "full"},
+    )
+
+    restarted = _build_acceptance_application(
+        observed_at=observed_at,
+        object_root=object_root,
+        database_url=database_url,
+        deployed=deployed,
+    )
+    recovered = restarted.relay_outbox(event_id=first.outbox_event_id)
+    duplicate = restarted.relay_outbox(event_id=first.outbox_event_id)
+    event_after = restarted.operations_control.get_outbox_event(first.outbox_event_id)
+    predictions_after = restarted.operations_control.list_prediction_records(
+        trace_id=first_command.trace_id
+    )
+    lineage_after = restarted.operations_control.get_trace_evidence(first_command.trace_id)
+    audit_after = restarted.security_audit.list_events(trace_id=first_command.trace_id)
+    first_recovery = restarted.operations_control.get_outbox_recovery(first.outbox_event_id)
+    recovered_rest = client.get(
+        "/api/v1/research/predictions",
+        params={"information_cutoff": cutoff_text},
+    )
+    recovered_ui = client.get(
+        "/research",
+        params={"information_cutoff": cutoff_text, "support": "full"},
+    )
+    client.close()
+
+    second_cutoff = information_cutoff + timedelta(days=1)
+    crashing_consumer = _build_acceptance_application(
+        observed_at=observed_at,
+        object_root=object_root,
+        database_url=database_url,
+        deployed=deployed,
+        relay_fault=_CrashOperationsProjection(),
+    )
+    second = crashing_consumer.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=second_cutoff,
+            trace_id="trace-p1-trace-outbox-01-consumer-crash",
+            idempotency_key="p1-trace-outbox-01-consumer-crash",
+        )
+    )
+    consumer_failed = crashing_consumer.relay_outbox(event_id=second.outbox_event_id)
+    consumer_restarted = _build_acceptance_application(
+        observed_at=observed_at,
+        object_root=object_root,
+        database_url=database_url,
+        deployed=deployed,
+    )
+    consumer_recovered = consumer_restarted.relay_outbox(event_id=second.outbox_event_id)
+    second_recovery = consumer_restarted.operations_control.get_outbox_recovery(
+        second.outbox_event_id
+    )
+
+    third = consumer_restarted.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=information_cutoff + timedelta(days=2),
+            trace_id="trace-p1-trace-outbox-01-ordering-3",
+            idempotency_key="p1-trace-outbox-01-ordering-3",
+        )
+    )
+    fourth = consumer_restarted.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=information_cutoff + timedelta(days=3),
+            trace_id="trace-p1-trace-outbox-01-ordering-4",
+            idempotency_key="p1-trace-outbox-01-ordering-4",
+        )
+    )
+    first_deferral = consumer_restarted.relay_outbox(event_id=fourth.outbox_event_id)
+    second_deferral = consumer_restarted.relay_outbox(event_id=fourth.outbox_event_id)
+    third_delivery = consumer_restarted.relay_outbox(event_id=third.outbox_event_id)
+    fourth_delivery = consumer_restarted.relay_outbox(event_id=fourth.outbox_event_id)
+    all_recoveries = [
+        consumer_restarted.operations_control.get_outbox_recovery(event_id)
+        for event_id in (
+            first.outbox_event_id,
+            second.outbox_event_id,
+            third.outbox_event_id,
+            fourth.outbox_event_id,
+        )
+    ]
+    incidents = consumer_restarted.operations_control.list_outbox_incidents(
+        aggregate_id=first.listing_id
+    )
+
+    pending_projection = pending_rest.json()["items"][0]["projection"]
+    recovered_projection = recovered_rest.json()["items"][0]["projection"]
+    identity_fields = (
+        "event_id",
+        "event_type",
+        "schema_version",
+        "aggregate_id",
+        "aggregate_version",
+        "producer",
+        "trace_id",
+    )
+    checks = {
+        "canonical_commit_before_consumers": relay_returncode != 0
+        and event_before["delivery_status"] == "pending"
+        and crashed["consumer_effect_counts"]
+        == {"research_projection": 0, "operations_projection": 0}
+        and len(predictions_before) == 3,
+        "original_event_identity_recovered": recovered.status == "delivered"
+        and all(event_before[field] == event_after[field] for field in identity_fields),
+        "consumer_transaction_recovered": consumer_failed.status == "failed"
+        and consumer_recovered.status == "delivered"
+        and [attempt["status"] for attempt in second_recovery["delivery_attempts"]]
+        == ["failed", "delivered"],
+        "duplicate_delivery_idempotent": duplicate.status == "already_delivered",
+        "out_of_order_deferred": first_deferral.status == "deferred"
+        and second_deferral.status == "deferred"
+        and third_delivery.status == "delivered"
+        and fourth_delivery.status == "delivered",
+        "rest_projection_stale_then_fresh": pending_projection["stale"] is True
+        and pending_projection["evidence_projection_version"] == 0
+        and recovered_projection["stale"] is False
+        and recovered_projection["evidence_projection_version"]
+        == recovered_projection["core_projection_version"]
+        and pending_rest.json()["items"][0]["predictions"] == predictions_before
+        and recovered_rest.json()["items"][0]["predictions"] == predictions_after,
+        "ui_projection_stale_then_fresh": "投影狀態：等待恢復" in pending_ui.text
+        and "投影狀態：已同步" in recovered_ui.text,
+        "canonical_state_immutable": predictions_after == predictions_before
+        and lineage_after == lineage_before
+        and audit_after[0] == audit_before[0],
+        "operations_recovery_evidence": [
+            attempt["status"] for attempt in first_recovery["delivery_attempts"]
+        ]
+        == ["crashed", "delivered"]
+        and [event["action"] for event in audit_after]
+        == ["fixture_eod_publication", "outbox_recovery", "outbox_delivery"],
+        "single_correlated_incident": len(incidents) == 3
+        and all(incident["status"] == "monitoring" for incident in incidents)
+        and len(
+            [
+                incident
+                for incident in incidents
+                if incident["reason_code"] == "out_of_order_aggregate_version"
+                and incident["occurrence_count"] == 2
+            ]
+        )
+        == 1,
+        "zero_lost_or_duplicate_effects": all(
+            recovery["consumer_effect_counts"]
+            == {"research_projection": 1, "operations_projection": 1}
+            for recovery in all_recoveries
+        ),
+    }
+    return {
+        "status": "passed" if all(checks.values()) else "failed",
+        "trace_ids": ["P1-TRACE-OUTBOX-01"],
+        "execution_purpose": "fixture",
+        "formal_prediction": False,
+        "event_id": first.outbox_event_id,
         "checks": checks,
     }

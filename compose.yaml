@@ -1,4 +1,4 @@
-name: stock-forecasting-ticket-02
+name: stock-forecasting-ticket-03
 
 x-fixture-information-cutoff: &fixture-information-cutoff '2026-08-12T22:00:00Z'
 x-fixture-collection-observed-at: &fixture-collection-observed-at '2026-08-12T21:55:00Z'
@@ -11,7 +11,7 @@ x-application-environment: &application-environment
   DAGSTER_HOME: /var/lib/dagster
 
 x-application: &application
-  image: stock-forecasting-ticket-02-app:0.1.0
+  image: stock-forecasting-ticket-03-app:0.1.0
   environment: *application-environment
   volumes:
     - fixture-objects:/var/lib/stock-forecasting/objects
@@ -137,6 +137,14 @@ services:
       timeout: 3s
       retries: 30
 
+  outbox-relay:
+    <<: *application
+    profiles: ["relay"]
+    command: ["python", "-m", "stock_forecasting.cli", "relay", "--once"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+
   acceptance:
     <<: *application
     profiles: ["acceptance"]
@@ -145,7 +153,7 @@ services:
       - -m
       - stock_forecasting.cli
       - acceptance
-      - ticket-02
+      - ticket-03
       - --database-url
       - postgresql+psycopg://stock@postgres:5432/stock_forecasting
       - --object-root
