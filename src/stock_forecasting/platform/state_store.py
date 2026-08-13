@@ -43,6 +43,16 @@ class ImmutableStateConflict(RuntimeError):
     """Raised when a caller tries to replace an immutable published record."""
 
 
+def _content_digest(payload: object) -> str:
+    canonical_payload = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical_payload).hexdigest()
+
+
 class StateStore:
     def __init__(self, database_url: str, *, create_schema: bool) -> None:
         if database_url == "sqlite+pysqlite:///:memory:":
@@ -383,6 +393,24 @@ class StateStore:
             ).scalars()
             return [deepcopy(payload) for payload in payloads]
 
+    def list_prediction_record_evidence(self, *, trace_id: str) -> list[dict[str, str]]:
+        with self.engine.connect() as connection:
+            records = connection.execute(
+                select(
+                    fixture_prediction_results.c.prediction_id,
+                    fixture_prediction_results.c.payload,
+                )
+                .where(fixture_prediction_results.c.trace_id == trace_id)
+                .order_by(fixture_prediction_results.c.horizon_sessions)
+            ).mappings()
+            return [
+                {
+                    "prediction_id": str(record["prediction_id"]),
+                    "content_digest": _content_digest(record["payload"]),
+                }
+                for record in records
+            ]
+
     def relay_outbox(
         self,
         *,
@@ -517,14 +545,7 @@ class StateStore:
             "artifact_kinds": [artifact["artifact_kind"] for artifact in artifacts],
             "artifact_ids": [artifact["artifact_id"] for artifact in artifacts],
             "artifact_content_digests": {
-                artifact["artifact_id"]: hashlib.sha256(
-                    json.dumps(
-                        artifact["payload"],
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()
+                artifact["artifact_id"]: _content_digest(artifact["payload"])
                 for artifact in artifacts
             },
             "lineage_ids": {

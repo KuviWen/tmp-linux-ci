@@ -648,6 +648,9 @@ def run_ticket_03(
     predictions_before = application.operations_control.list_prediction_records(
         trace_id=first_command.trace_id
     )
+    prediction_evidence_before = application.operations_control.list_prediction_record_evidence(
+        trace_id=first_command.trace_id
+    )
     lineage_before = application.operations_control.get_trace_evidence(first_command.trace_id)
     audit_before = application.security_audit.list_events(trace_id=first_command.trace_id)
 
@@ -659,7 +662,7 @@ def run_ticket_03(
         event_id=first.outbox_event_id,
         competing_application=application,
     )
-    crashed = application.operations_control.get_outbox_recovery(first.outbox_event_id)
+    interrupted_evidence = application.operations_control.get_outbox_recovery(first.outbox_event_id)
 
     client: HttpClient = (
         TestClient(create_web_app(application))
@@ -686,6 +689,9 @@ def run_ticket_03(
     duplicate = restarted.relay_outbox(event_id=first.outbox_event_id)
     event_after = restarted.operations_control.get_outbox_event(first.outbox_event_id)
     predictions_after = restarted.operations_control.list_prediction_records(
+        trace_id=first_command.trace_id
+    )
+    prediction_evidence_after = restarted.operations_control.list_prediction_record_evidence(
         trace_id=first_command.trace_id
     )
     lineage_after = restarted.operations_control.get_trace_evidence(first_command.trace_id)
@@ -774,7 +780,7 @@ def run_ticket_03(
         "canonical_commit_before_consumers": relay_returncode != 0
         and competing_status == "busy"
         and event_before["delivery_status"] == "pending"
-        and crashed["consumer_effect_counts"]
+        and interrupted_evidence["consumer_effect_counts"]
         == {"research_projection": 0, "operations_projection": 0}
         and len(predictions_before) == 3,
         "original_event_identity_recovered": recovered.status == "delivered"
@@ -798,6 +804,10 @@ def run_ticket_03(
         "ui_projection_stale_then_fresh": "投影狀態：等待恢復" in pending_ui.text
         and "投影狀態：已同步" in recovered_ui.text,
         "canonical_state_immutable": predictions_after == predictions_before
+        and prediction_evidence_after == prediction_evidence_before
+        and len(prediction_evidence_before) == 3
+        and all(evidence["prediction_id"] for evidence in prediction_evidence_before)
+        and all(len(evidence["content_digest"]) == 64 for evidence in prediction_evidence_before)
         and lineage_after["lineage_ids"] == lineage_before["lineage_ids"]
         and lineage_after["artifact_content_digests"] == lineage_before["artifact_content_digests"]
         and all(
@@ -810,7 +820,8 @@ def run_ticket_03(
         "operations_recovery_evidence": [
             attempt["status"] for attempt in first_recovery["delivery_attempts"]
         ]
-        == ["crashed", "delivered"]
+        == ["superseded", "delivered"]
+        and first_recovery["delivery_attempts"][0]["reason_code"] == "relay_lease_superseded"
         and [event["action"] for event in audit_after]
         == ["fixture_eod_publication", "outbox_recovery", "outbox_delivery"]
         and [attempt["fencing_token"] for attempt in first_recovery["delivery_attempts"]] == [1, 2]

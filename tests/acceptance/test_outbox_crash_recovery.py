@@ -361,6 +361,9 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
     lineage_before = application.operations_control.get_trace_evidence(
         "trace-ticket-03-process-crash"
     )
+    prediction_evidence_before = application.operations_control.list_prediction_record_evidence(
+        trace_id="trace-ticket-03-process-crash"
+    )
 
     process = subprocess.Popen(
         [
@@ -422,13 +425,17 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
     event_after = restarted.operations_control.get_outbox_event(outcome.outbox_event_id)
     audit_after = restarted.security_audit.list_events(trace_id="trace-ticket-03-process-crash")
     lineage_after = restarted.operations_control.get_trace_evidence("trace-ticket-03-process-crash")
+    prediction_evidence_after = restarted.operations_control.list_prediction_record_evidence(
+        trace_id="trace-ticket-03-process-crash"
+    )
 
     assert recovered.status == "delivered"
     assert event_after == {**event_before, "delivery_status": "delivered"}
     assert [attempt["status"] for attempt in evidence["delivery_attempts"]] == [
-        "crashed",
+        "superseded",
         "delivered",
     ]
+    assert evidence["delivery_attempts"][0]["reason_code"] == "relay_lease_superseded"
     assert [attempt["work_status"] for attempt in evidence["delivery_attempts"]] == [
         "failed",
         "succeeded",
@@ -449,6 +456,10 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
         )
     assert lineage_after["audit_events"][0] == lineage_before["audit_events"][0]
     assert lineage_before["audit_events"][0]["event_id"]
+    assert prediction_evidence_after == prediction_evidence_before
+    assert len(prediction_evidence_before) == 3
+    assert all(evidence["prediction_id"] for evidence in prediction_evidence_before)
+    assert all(len(evidence["content_digest"]) == 64 for evidence in prediction_evidence_before)
     assert [event["action"] for event in audit_after] == [
         "fixture_eod_publication",
         "outbox_recovery",
@@ -518,6 +529,7 @@ def test_relay_process_crash_after_consumer_commits_redelivers_without_duplicate
     committed_before_ack = application.operations_control.get_outbox_recovery(
         outcome.outbox_event_id
     )
+    assert process.returncode != 0
     assert committed_before_ack["consumer_effect_counts"] == {
         "research_projection": 1,
         "operations_projection": 1,
@@ -541,9 +553,10 @@ def test_relay_process_crash_after_consumer_commits_redelivers_without_duplicate
 
     assert recovered.status == "delivered"
     assert [attempt["status"] for attempt in evidence["delivery_attempts"]] == [
-        "crashed",
+        "superseded",
         "delivered",
     ]
+    assert evidence["delivery_attempts"][0]["reason_code"] == "relay_lease_superseded"
     assert evidence["consumer_effect_counts"] == {
         "research_projection": 1,
         "operations_projection": 1,

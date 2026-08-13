@@ -50,7 +50,7 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
             "stale",
         ],
         "properties": {
-            "core_projection_version": {"type": "integer", "minimum": 1},
+            "core_projection_version": {"type": "integer", "minimum": 0},
             "evidence_projection_version": {"type": "integer", "minimum": 0},
             "stale": {"type": "boolean"},
         },

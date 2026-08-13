@@ -6,6 +6,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import yaml
 from sqlalchemy import create_engine, inspect, select
 
 from stock_forecasting.application import build_application
@@ -84,8 +85,17 @@ def test_ticket_03_upgrade_backfills_existing_research_projection_status(tmp_pat
         observed_at=datetime(2026, 8, 13, tzinfo=UTC),
     )
     records = application.research_query.list_predictions(execution_purpose="fixture")
-    assert records[0]["projection"] == {
+    migrated_projection = records[0]["projection"]
+    assert migrated_projection == {
         "core_projection_version": 0,
         "evidence_projection_version": 0,
         "stale": False,
     }
+    projection_contract = yaml.safe_load(
+        (REPOSITORY_ROOT / "openapi" / "openapi.yaml").read_text(encoding="utf-8")
+    )["components"]["schemas"]["ProjectionStatus"]
+    for version_field in ("core_projection_version", "evidence_projection_version"):
+        assert (
+            migrated_projection[version_field]
+            >= projection_contract["properties"][version_field]["minimum"]
+        )

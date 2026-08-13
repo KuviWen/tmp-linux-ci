@@ -253,10 +253,10 @@ class OutboxRelay:
         ):
             raise RelayLeaseLost("expired_fencing_token")
 
-    def _recover_abandoned(self, *, event: Any, fencing_token: int) -> None:
+    def _record_superseded_leases(self, *, event: Any, fencing_token: int) -> None:
         event_id = str(event["event_id"])
         with self._engine.begin() as connection:
-            abandoned = list(
+            superseded = list(
                 connection.execute(
                     select(
                         outbox_delivery_attempts.c.attempt_id,
@@ -269,11 +269,11 @@ class OutboxRelay:
                     )
                 ).mappings()
             )
-            for attempt in abandoned:
+            for attempt in superseded:
                 connection.execute(
                     outbox_delivery_attempts.update()
                     .where(outbox_delivery_attempts.c.attempt_id == attempt["attempt_id"])
-                    .values(status="crashed", reason_code="relay_process_terminated")
+                    .values(status="superseded", reason_code="relay_lease_superseded")
                 )
                 connection.execute(
                     work_attempts.update()
@@ -283,7 +283,7 @@ class OutboxRelay:
                 self._record_incident(
                     connection,
                     event=event,
-                    reason_code="relay_process_terminated",
+                    reason_code="relay_lease_superseded",
                 )
                 connection.execute(
                     security_audit_events.insert().values(
@@ -294,7 +294,7 @@ class OutboxRelay:
                         ),
                         action="outbox_recovery",
                         outcome="allowed",
-                        reason_code="relay_process_terminated",
+                        reason_code="relay_lease_superseded",
                         trace_id=event["trace_id"],
                     )
                 )
@@ -493,7 +493,7 @@ class OutboxRelay:
             return RelayOutcome("busy", resolved_event_id, aggregate_version)
         token = int(fencing_token)
 
-        self._recover_abandoned(event=event, fencing_token=token)
+        self._record_superseded_leases(event=event, fencing_token=token)
         attempt_id, work_id, attempt_number = self._start_attempt(
             event=event,
             worker_id=worker_id,

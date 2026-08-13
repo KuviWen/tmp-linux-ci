@@ -44,7 +44,9 @@ the authoritative prediction, core research projection, and pending outbox event
 PostgreSQL transaction. It then kills a separate relay process before consumer work, restarts
 the application from PostgreSQL truth, and verifies one-time research and operations effects.
 The relay uses an atomic PostgreSQL claim with worker identity, lease expiry, and a monotonically
-increasing fencing token; a live worker cannot be mislabeled as crashed by a competitor.
+increasing fencing token. A takeover records only the durable fact that the expired lease was
+superseded; the acceptance parent process separately proves that its disposable relay child was
+terminated, so the operational ledger never infers process death from lease expiry alone.
 It also exercises a consumer-transaction crash, duplicate delivery, repeated out-of-order
 delivery, version catch-up, REST/UI stale-to-fresh status, audit evidence, work attempts, and
 incident correlation. Consumers accept only documented event type/schema pairs; incompatible

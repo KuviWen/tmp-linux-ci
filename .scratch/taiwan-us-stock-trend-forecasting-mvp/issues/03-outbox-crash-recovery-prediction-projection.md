@@ -24,3 +24,6 @@ Status: ready-for-agent
 - 升級 migration 會為 ticket 01／02 的既有研究紀錄補上已同步的 `0／0` projection 狀態，避免 in-place upgrade 後從查詢消失。
 - 驗證命令：`python -m pytest -q`、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、`python -m alembic -c alembic.ini upgrade head`、真實 PostgreSQL integration，以及 `docker compose --profile acceptance run --build --rm acceptance`。
 - Compose acceptance 從乾淨 PostgreSQL volume 執行，`P1-TRACE-OUTBOX-01` 的 11 項 externally observable checks 全數通過；fixture 證據不代表正式資料或正式預測。
+- OperationsControl recovery evidence 會在重啟前後保留每筆 PredictionRecord ID 與 canonical content digest。
+- Lease takeover 只記錄 `superseded`／`relay_lease_superseded`；程序終止由 acceptance 父程序觀察到的子程序非零 return code 獨立證明。
+- Ticket 01 legacy record 維持真實的未版本化 `0／0`；`ProjectionStatus` 明確允許零，而 ticket 03 新發布仍由 core version 1 開始。

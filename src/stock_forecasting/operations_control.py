@@ -24,6 +24,9 @@ class OperationsControl:
     def list_prediction_records(self, *, trace_id: str) -> list[dict[str, Any]]:
         return self._state_store.list_prediction_records(trace_id=trace_id)
 
+    def list_prediction_record_evidence(self, *, trace_id: str) -> list[dict[str, str]]:
+        return self._state_store.list_prediction_record_evidence(trace_id=trace_id)
+
     def get_outbox_recovery(self, event_id: str) -> dict[str, Any]:
         return self._state_store.get_outbox_recovery(event_id)
 

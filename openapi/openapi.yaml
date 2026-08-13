@@ -206,7 +206,7 @@ components:
         - evidence_projection_version
         - stale
       properties:
-        core_projection_version: {type: integer, minimum: 1}
+        core_projection_version: {type: integer, minimum: 0}
         evidence_projection_version: {type: integer, minimum: 0}
         stale: {type: boolean}
     Lineage:
