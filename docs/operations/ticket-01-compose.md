@@ -43,6 +43,8 @@ filesystem raw-object checksum, canonical lineage, source health, security audit
 denials, the absence of production prediction records, and the deployed Dagster workspace and
 daemon health. The runner uses the migrated PostgreSQL schema and calls the separately running API
 and Dagster GraphQL endpoints over HTTP.
+The CLI treats `--base-url` and `--dagster-url` as one deployed-mode contract: callers must
+provide both or neither, so an external acceptance run cannot silently omit Dagster readiness.
 
 The durable engineering evidence is split deliberately:
 

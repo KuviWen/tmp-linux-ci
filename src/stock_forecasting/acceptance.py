@@ -39,6 +39,8 @@ def run_ticket_01(
     base_url: str | None = None,
     dagster_url: str | None = None,
 ) -> dict[str, Any]:
+    if (base_url is None) != (dagster_url is None):
+        raise ValueError("deployment_endpoints_must_be_provided_together")
     if base_url is None:
         application = build_test_application(
             observed_at=observed_at,

@@ -31,8 +31,11 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = _parser().parse_args(argv)
+    parser = _parser()
+    arguments = parser.parse_args(argv)
     if arguments.command == "acceptance" and arguments.ticket == "ticket-01":
+        if (arguments.base_url is None) != (arguments.dagster_url is None):
+            parser.error("--base-url and --dagster-url must be provided together")
         report = run_ticket_01(
             database_url=arguments.database_url,
             object_root=arguments.object_root,

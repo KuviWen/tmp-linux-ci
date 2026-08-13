@@ -6,11 +6,15 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 from typing import Any
 
+import pytest
+
+from stock_forecasting.acceptance import run_ticket_01
 from stock_forecasting.dagster_deployment import inspect_dagster_deployment
 
 
@@ -48,7 +52,57 @@ def test_deployed_dagster_health_fails_closed_on_malformed_payload() -> None:
     assert status.ready is False
 
 
-def test_ticket_01_acceptance_runner_verifies_the_public_seams(tmp_path: Path) -> None:
+def test_acceptance_rejects_partial_deployment_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="deployment_endpoints_must_be_provided_together"):
+        run_ticket_01(
+            database_url="sqlite+pysqlite:///:memory:",
+            object_root=tmp_path / "objects",
+            information_cutoff=datetime(2026, 8, 12, 7, tzinfo=UTC),
+            observed_at=datetime(2026, 8, 12, 6, 55, tzinfo=UTC),
+            base_url="http://api:8000",
+        )
+
+
+@pytest.mark.parametrize(
+    "endpoint_args",
+    [
+        ["--base-url", "http://api:8000"],
+        ["--dagster-url", "http://dagster-webserver:3000/graphql"],
+    ],
+)
+def test_acceptance_cli_reports_partial_deployment_mode(
+    tmp_path: Path,
+    endpoint_args: list[str],
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "stock_forecasting.cli",
+            "acceptance",
+            "ticket-01",
+            "--database-url",
+            f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+            "--object-root",
+            str(tmp_path / "objects"),
+            "--information-cutoff",
+            "2026-08-12T07:00:00Z",
+            "--observed-at",
+            "2026-08-12T06:55:00Z",
+            *endpoint_args,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+
+    assert completed.returncode == 2
+    assert "--base-url and --dagster-url must be provided together" in completed.stderr
+
+
+def test_deployed_dagster_health_requires_loaded_asset_and_heartbeats() -> None:
     dagster_payload = {
         "data": {
             "workspaceOrError": {
@@ -85,30 +139,34 @@ def test_ticket_01_acceptance_runner_verifies_the_public_seams(tmp_path: Path) -
         }
     }
     with _dagster_graphql(dagster_payload) as dagster_url:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "stock_forecasting.cli",
-                "acceptance",
-                "ticket-01",
-                "--database-url",
-                f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
-                "--object-root",
-                str(tmp_path / "objects"),
-                "--information-cutoff",
-                "2026-08-12T07:00:00Z",
-                "--observed-at",
-                "2026-08-12T06:55:00Z",
-                "--dagster-url",
-                dagster_url,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env={**os.environ, "PYTHONUTF8": "1"},
-        )
+        status = inspect_dagster_deployment(dagster_url)
+
+    assert status.ready is True
+
+
+def test_ticket_01_acceptance_runner_verifies_the_public_seams(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "stock_forecasting.cli",
+            "acceptance",
+            "ticket-01",
+            "--database-url",
+            f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+            "--object-root",
+            str(tmp_path / "objects"),
+            "--information-cutoff",
+            "2026-08-12T07:00:00Z",
+            "--observed-at",
+            "2026-08-12T06:55:00Z",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
 
     assert completed.returncode == 0, completed.stderr
     report = json.loads(completed.stdout)
@@ -121,7 +179,6 @@ def test_ticket_01_acceptance_runner_verifies_the_public_seams(tmp_path: Path) -
     assert set(report["checks"]) == {
         "workflow_succeeded",
         "dagster_parity",
-        "deployed_dagster_ready",
         "adversarial_scenarios",
         "immutable_identity",
         "xtai_253_sessions",
