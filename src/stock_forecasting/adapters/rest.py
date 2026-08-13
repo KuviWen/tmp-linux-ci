@@ -8,11 +8,16 @@ from pathlib import Path
 from urllib.parse import urlencode
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from stock_forecasting.application import Application
+from stock_forecasting.authorization import (
+    AuthorizationDenied,
+    IdentityVerificationError,
+    SecurityContext,
+)
 from stock_forecasting.contracts import PredictionPayload
 
 OPENAPI_SOURCE = Path(__file__).parents[3] / "openapi" / "openapi.yaml"
@@ -125,7 +130,17 @@ def create_web_app(application: Application) -> FastAPI:
     @app.exception_handler(HTTPException)
     async def problem_details(request: Request, error: HTTPException) -> JSONResponse:
         trace_id = request.headers.get("X-Trace-Id", f"trace-{uuid4()}")
-        if error.status_code == 404 and error.detail == "listing_not_found":
+        if error.status_code == 401 and error.detail == "authentication_required":
+            payload = {
+                "type": "https://example.invalid/problems/authentication-required",
+                "title": "Authentication required",
+                "status": 401,
+                "detail": "A valid local API key is required.",
+                "instance": request.url.path,
+                "trace_id": trace_id,
+                "code": "authentication_required",
+            }
+        elif error.status_code == 404 and error.detail == "listing_not_found":
             payload = {
                 "type": "https://example.invalid/problems/listing-not-found",
                 "title": "找不到掛牌研究資源",
@@ -151,6 +166,40 @@ def create_web_app(application: Application) -> FastAPI:
             media_type="application/problem+json",
         )
 
+    @app.exception_handler(AuthorizationDenied)
+    async def authorization_denied(
+        request: Request,
+        error: AuthorizationDenied,
+    ) -> JSONResponse:
+        return JSONResponse(
+            {
+                "type": "https://example.invalid/problems/authorization-denied",
+                "title": "Authorization denied",
+                "status": 403,
+                "detail": "The requested operation is not authorized.",
+                "instance": request.url.path,
+                "trace_id": error.correlation_id,
+                "code": error.public_code,
+            },
+            status_code=403,
+            media_type="application/problem+json",
+        )
+
+    def authenticate_research_request(
+        authorization: str | None = Header(default=None, alias="Authorization"),
+    ) -> SecurityContext:
+        if authorization is None:
+            raise HTTPException(status_code=401, detail="authentication_required")
+        try:
+            return application.authenticate_local_request(authorization)
+        except IdentityVerificationError as error:
+            raise HTTPException(
+                status_code=401,
+                detail="authentication_required",
+            ) from error
+
+    research_authentication = Depends(authenticate_research_request)
+
     @app.get("/livez")
     def live() -> dict[str, str]:
         return {"status": "live"}
@@ -171,13 +220,20 @@ def create_web_app(application: Application) -> FastAPI:
 
     @app.get("/api/v1/research/predictions", response_model=None)
     def list_predictions(
+        request: Request,
         response: Response,
         information_cutoff: str = Query(...),
         if_none_match: str | None = Header(default=None, alias="If-None-Match"),
+        security_context: SecurityContext = research_authentication,
     ) -> dict[str, object] | Response:
+        trace_id = request.headers.get("X-Trace-Id", f"trace-{uuid4()}")
         records = [
             record
-            for record in application.research_query.list_predictions(execution_purpose="fixture")
+            for record in application.research_query.list_predictions(
+                execution_purpose="fixture",
+                trace_id=trace_id,
+                security_context=security_context,
+            )
             if record["information_cutoff"] == information_cutoff
         ]
         items = [
@@ -205,28 +261,39 @@ def create_web_app(application: Application) -> FastAPI:
 
     @app.get("/api/v1/research/listings/{listing_id}")
     def get_listing_research(
+        request: Request,
         listing_id: str,
         information_cutoff: str = Query(...),
+        security_context: SecurityContext = research_authentication,
     ) -> dict[str, object]:
         try:
             return application.research_query.get_listing_research(
                 listing_id=listing_id,
                 information_cutoff=_parse_instant(information_cutoff),
+                trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+                security_context=security_context,
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="listing_not_found") from error
 
     @app.get("/research", response_class=HTMLResponse)
     def research_matrix(
+        request: Request,
         information_cutoff: str = Query(...),
         horizon: int = Query(5),
         market: str = Query("all"),
         support: str = Query("full"),
         sort: str = Query("confidence_desc"),
+        security_context: SecurityContext = research_authentication,
     ) -> str:
+        trace_id = request.headers.get("X-Trace-Id", f"trace-{uuid4()}")
         records = [
             record
-            for record in application.research_query.list_predictions(execution_purpose="fixture")
+            for record in application.research_query.list_predictions(
+                execution_purpose="fixture",
+                trace_id=trace_id,
+                security_context=security_context,
+            )
             if record["information_cutoff"] == information_cutoff
             and (market == "all" or record["calendar"]["exchange"] == market)
         ]
@@ -290,6 +357,7 @@ def create_web_app(application: Application) -> FastAPI:
 
     @app.get("/research/listings/{listing_id}", response_class=HTMLResponse)
     def listing_research_page(
+        request: Request,
         listing_id: str,
         information_cutoff: str = Query(...),
         horizon: int = Query(5),
@@ -297,11 +365,14 @@ def create_web_app(application: Application) -> FastAPI:
         support: str = Query("full"),
         sort: str = Query("confidence_desc"),
         tab: str = Query("forecast"),
+        security_context: SecurityContext = research_authentication,
     ) -> str:
         try:
             record = application.research_query.get_listing_research(
                 listing_id=listing_id,
                 information_cutoff=_parse_instant(information_cutoff),
+                trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+                security_context=security_context,
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="listing_not_found") from error

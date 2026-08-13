@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from stock_forecasting.acceptance import run_ticket_01, run_ticket_02
+from stock_forecasting.acceptance import run_ticket_01, run_ticket_02, run_ticket_04
 from stock_forecasting.dagster_deployment import inspect_dagster_deployment
 
 
@@ -309,3 +309,58 @@ def test_ticket_03_acceptance_runner_verifies_outbox_crash_recovery(tmp_path: Pa
         "single_correlated_incident",
         "zero_lost_or_duplicate_effects",
     }
+
+
+def test_ticket_04_acceptance_runner_verifies_authorization_denial_path(
+    tmp_path: Path,
+) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "stock_forecasting.cli",
+            "acceptance",
+            "ticket-04",
+            "--database-url",
+            f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+            "--object-root",
+            str(tmp_path / "objects"),
+            "--information-cutoff",
+            "2026-08-12T22:00:00Z",
+            "--observed-at",
+            "2026-08-12T21:55:00Z",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["status"] == "passed"
+    assert report["trace_ids"] == ["P1-TRACE-AUTH-01"]
+    assert report["execution_purpose"] == "fixture"
+    assert report["formal_prediction"] is False
+    assert all(report["checks"].values())
+    assert set(report["checks"]) == {
+        "shared_security_context",
+        "active_entitlements_allow",
+        "same_grant_denial",
+        "decision_matrix_fail_closed",
+        "denial_before_persistence",
+        "existing_projection_blocked_not_deleted",
+        "rest_problem_redacted",
+        "ui_problem_redacted",
+        "dagster_denial",
+        "audit_decision_evidence",
+    }
+
+    direct_report = run_ticket_04(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'direct.db'}",
+        object_root=tmp_path / "direct-objects",
+        information_cutoff=datetime(2026, 8, 12, 22, tzinfo=UTC),
+        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+    )
+    assert direct_report["status"] == "passed"

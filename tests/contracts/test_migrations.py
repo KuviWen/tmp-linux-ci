@@ -63,7 +63,10 @@ def test_ticket_03_upgrade_backfills_existing_research_projection_status(tmp_pat
                 information_cutoff="2026-08-11T07:00:00Z",
                 execution_purpose="fixture",
                 fixture_scenario="normal",
-                payload={"identity": {"listing_id": "listing-before-ticket-03"}},
+                payload={
+                    "identity": {"listing_id": "listing-before-ticket-03"},
+                    "calendar": {"exchange": "XTAI"},
+                },
             )
         )
 
@@ -99,3 +102,23 @@ def test_ticket_03_upgrade_backfills_existing_research_projection_status(tmp_pat
             migrated_projection[version_field]
             >= projection_contract["properties"][version_field]["minimum"]
         )
+
+
+def test_ticket_04_upgrade_adds_structured_authorization_audit_evidence(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'authorization-upgrade.db'}"
+    prior_upgrade = _upgrade(database_url, "20260813_02")
+    assert prior_upgrade.returncode == 0, prior_upgrade.stderr
+    engine = create_engine(database_url)
+    assert "authorization" not in {
+        column["name"] for column in inspect(engine).get_columns("security_audit_events")
+    }
+
+    final_upgrade = _upgrade(database_url, "head")
+
+    assert final_upgrade.returncode == 0, final_upgrade.stderr
+    columns = {
+        column["name"]: column for column in inspect(engine).get_columns("security_audit_events")
+    }
+    assert columns["authorization"]["nullable"] is True

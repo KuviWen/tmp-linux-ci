@@ -116,7 +116,6 @@ def test_incompatible_event_version_is_isolated_before_consumer_effects() -> Non
             idempotency_key="ticket-03-incompatible-event",
         )
     )
-
     isolated = application.relay_outbox(event_id=outcome.outbox_event_id)
     event = application.operations_control.get_outbox_event(outcome.outbox_event_id)
     recovery = application.operations_control.get_outbox_recovery(outcome.outbox_event_id)
@@ -364,6 +363,8 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
     prediction_evidence_before = application.operations_control.list_prediction_record_evidence(
         trace_id="trace-ticket-03-process-crash"
     )
+    local_key_file = tmp_path / "relay-process-local-api-key.json"
+    application.local_identity.save(local_key_file)
 
     process = subprocess.Popen(
         [
@@ -382,6 +383,10 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
             "OBJECT_ROOT": str(object_root),
             "FIXTURE_INFORMATION_CUTOFF": cutoff_text,
             "FIXTURE_COLLECTION_OBSERVED_AT": cutoff_text,
+            "RUNTIME_ENVIRONMENT": "development",
+            "PUBLIC_BIND_HOST": "127.0.0.1",
+            "LOCAL_API_KEY_MODE": "enabled",
+            "LOCAL_API_KEY_FILE": str(local_key_file),
             "PYTHONUTF8": "1",
         },
         stdout=subprocess.PIPE,
@@ -461,7 +466,7 @@ def test_relay_process_crash_before_consumers_recovers_from_postgresql_truth(
     assert all(evidence["prediction_id"] for evidence in prediction_evidence_before)
     assert all(len(evidence["content_digest"]) == 64 for evidence in prediction_evidence_before)
     assert [event["action"] for event in audit_after] == [
-        "fixture_eod_publication",
+        "fixture_pipeline.execute",
         "outbox_recovery",
         "outbox_delivery",
     ]
@@ -487,6 +492,8 @@ def test_relay_process_crash_after_consumer_commits_redelivers_without_duplicate
             idempotency_key="ticket-03-before-ack",
         )
     )
+    local_key_file = tmp_path / "relay-before-ack-local-api-key.json"
+    application.local_identity.save(local_key_file)
 
     process = subprocess.Popen(
         [
@@ -505,6 +512,10 @@ def test_relay_process_crash_after_consumer_commits_redelivers_without_duplicate
             "OBJECT_ROOT": str(object_root),
             "FIXTURE_INFORMATION_CUTOFF": cutoff_text,
             "FIXTURE_COLLECTION_OBSERVED_AT": cutoff_text,
+            "RUNTIME_ENVIRONMENT": "development",
+            "PUBLIC_BIND_HOST": "127.0.0.1",
+            "LOCAL_API_KEY_MODE": "enabled",
+            "LOCAL_API_KEY_FILE": str(local_key_file),
             "PYTHONUTF8": "1",
         },
         stdout=subprocess.PIPE,
@@ -578,7 +589,11 @@ def test_rest_and_ui_show_projection_staleness_until_recovery() -> None:
     authoritative_predictions = application.operations_control.list_prediction_records(
         trace_id=trace_id
     )
-    client = TestClient(create_web_app(application))
+    client = TestClient(
+        create_web_app(application),
+        headers={"Authorization": application.local_identity.credential.authorization_header()},
+        client=("127.0.0.1", 50000),
+    )
 
     pending_rest = client.get(
         "/api/v1/research/predictions",

@@ -54,6 +54,7 @@ security_audit_events = Table(
     Column("outcome", String(32), nullable=False),
     Column("reason_code", String(128), nullable=False),
     Column("trace_id", String(128), nullable=False),
+    Column("authorization", JSON, nullable=True),
 )
 
 canonical_artifacts = Table(

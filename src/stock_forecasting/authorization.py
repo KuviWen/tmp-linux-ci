@@ -1,0 +1,588 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+import ipaddress
+import json
+import os
+import secrets
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Literal, cast
+from uuid import NAMESPACE_URL, uuid4, uuid5
+
+RuntimeEnvironment = Literal["local", "development", "test", "staging", "production"]
+EntitlementStatus = Literal["draft", "under_review", "active", "suspended", "expired", "revoked"]
+DataProtectionClass = Literal["public_source", "internal", "licensed", "restricted", "secret"]
+
+_LOCAL_KEY_ENVIRONMENTS = frozenset({"local", "development"})
+_TRUST_PROOF = object()
+
+
+class IdentityVerificationError(RuntimeError):
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+class AuthorizationDenied(RuntimeError):
+    public_code = "authorization_denied"
+
+    def __init__(self, decision: AuthorizationDecision) -> None:
+        super().__init__(self.public_code)
+        self.decision_id = decision.decision_id
+        self.correlation_id = decision.correlation_id
+
+
+@dataclass(frozen=True)
+class LocalApiKeyCredential:
+    key_id: str
+    _secret: str = field(repr=False)
+
+    def authorization_header(self) -> str:
+        return f"ApiKey {self.key_id}.{self._secret}"
+
+    def __repr__(self) -> str:
+        return f"LocalApiKeyCredential(key_id={self.key_id!r}, secret=<redacted>)"
+
+
+@dataclass(frozen=True)
+class SecurityContext:
+    principal_id: str
+    credential_id: str
+    owner: str
+    environment: RuntimeEnvironment
+    scopes: frozenset[str]
+    data_protection_classes: frozenset[DataProtectionClass]
+    issued_at: datetime
+    expires_at: datetime
+    authentication_method: Literal["local_api_key"]
+    _proof: object
+
+    @property
+    def trusted(self) -> bool:
+        return self._proof is _TRUST_PROOF
+
+
+@dataclass(frozen=True)
+class LocalApiKeyVerifier:
+    key_id: str
+    principal_id: str
+    owner: str
+    environment: RuntimeEnvironment
+    scopes: frozenset[str]
+    data_protection_classes: frozenset[DataProtectionClass]
+    issued_at: datetime
+    expires_at: datetime
+    revoked: bool
+    _pepper: bytes = field(repr=False)
+    _secret_digest: bytes = field(repr=False)
+
+    @classmethod
+    def issue(
+        cls,
+        *,
+        owner: str,
+        environment: RuntimeEnvironment,
+        scopes: set[str],
+        issued_at: datetime,
+        expires_at: datetime,
+        data_protection_classes: set[DataProtectionClass] | None = None,
+    ) -> tuple[LocalApiKeyCredential, LocalApiKeyVerifier]:
+        if not owner:
+            raise ValueError("local_api_key_owner_required")
+        if environment not in _LOCAL_KEY_ENVIRONMENTS:
+            raise ValueError("local_api_key_environment_forbidden")
+        if not scopes:
+            raise ValueError("local_api_key_scopes_required")
+        if issued_at.tzinfo is None or expires_at.tzinfo is None:
+            raise ValueError("local_api_key_times_require_timezone")
+        if expires_at <= issued_at:
+            raise ValueError("local_api_key_expiry_invalid")
+        if expires_at - issued_at > timedelta(days=30):
+            raise ValueError("local_api_key_lifetime_exceeded")
+        key_id = str(uuid4())
+        principal_id = str(uuid5(NAMESPACE_URL, f"stock-forecasting/local-key/{owner}/{key_id}"))
+        secret = secrets.token_urlsafe(32)
+        pepper = secrets.token_bytes(32)
+        digest = hmac.new(pepper, secret.encode("utf-8"), hashlib.sha256).digest()
+        credential = LocalApiKeyCredential(key_id=key_id, _secret=secret)
+        verifier = cls(
+            key_id=key_id,
+            principal_id=principal_id,
+            owner=owner,
+            environment=environment,
+            scopes=frozenset(scopes),
+            data_protection_classes=frozenset(data_protection_classes or {"internal"}),
+            issued_at=issued_at,
+            expires_at=expires_at,
+            revoked=False,
+            _pepper=pepper,
+            _secret_digest=digest,
+        )
+        return credential, verifier
+
+    def authenticate(
+        self,
+        authorization_header: str,
+        *,
+        client_host: str,
+        environment: RuntimeEnvironment,
+        authenticated_at: datetime,
+    ) -> SecurityContext:
+        try:
+            scheme, presentation = authorization_header.split(" ", 1)
+            key_id, secret = presentation.split(".", 1)
+        except ValueError as error:
+            raise IdentityVerificationError("local_api_key_malformed") from error
+        if scheme != "ApiKey" or key_id != self.key_id:
+            raise IdentityVerificationError("local_api_key_invalid")
+        try:
+            is_loopback = ipaddress.ip_address(client_host).is_loopback
+        except ValueError as error:
+            raise IdentityVerificationError("local_api_key_loopback_required") from error
+        if not is_loopback:
+            raise IdentityVerificationError("local_api_key_loopback_required")
+        if environment not in _LOCAL_KEY_ENVIRONMENTS or environment != self.environment:
+            raise IdentityVerificationError("local_api_key_environment_forbidden")
+        if self.revoked:
+            raise IdentityVerificationError("local_api_key_revoked")
+        if authenticated_at.tzinfo is None:
+            raise IdentityVerificationError("authentication_time_requires_timezone")
+        if authenticated_at < self.issued_at or authenticated_at >= self.expires_at:
+            raise IdentityVerificationError("local_api_key_expired")
+        presented_digest = hmac.new(
+            self._pepper,
+            secret.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        if not hmac.compare_digest(presented_digest, self._secret_digest):
+            raise IdentityVerificationError("local_api_key_invalid")
+        return SecurityContext(
+            principal_id=self.principal_id,
+            credential_id=self.key_id,
+            owner=self.owner,
+            environment=self.environment,
+            scopes=self.scopes,
+            data_protection_classes=self.data_protection_classes,
+            issued_at=self.issued_at,
+            expires_at=self.expires_at,
+            authentication_method="local_api_key",
+            _proof=_TRUST_PROOF,
+        )
+
+
+@dataclass(frozen=True)
+class LocalApiKeyIdentity:
+    credential: LocalApiKeyCredential
+    verifier: LocalApiKeyVerifier
+    context: SecurityContext
+
+    @classmethod
+    def issue(
+        cls,
+        *,
+        owner: str,
+        environment: RuntimeEnvironment,
+        scopes: set[str],
+        issued_at: datetime,
+        expires_at: datetime,
+        data_protection_classes: set[DataProtectionClass] | None = None,
+    ) -> LocalApiKeyIdentity:
+        credential, verifier = LocalApiKeyVerifier.issue(
+            owner=owner,
+            environment=environment,
+            scopes=scopes,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            data_protection_classes=data_protection_classes,
+        )
+        context = verifier.authenticate(
+            credential.authorization_header(),
+            client_host="127.0.0.1",
+            environment=environment,
+            authenticated_at=issued_at,
+        )
+        return cls(credential=credential, verifier=verifier, context=context)
+
+    def save(self, path: Path) -> None:
+        payload = {
+            "version": 1,
+            "key_id": self.credential.key_id,
+            "secret": self.credential._secret,
+            "owner": self.verifier.owner,
+            "environment": self.verifier.environment,
+            "scopes": sorted(self.verifier.scopes),
+            "data_protection_classes": sorted(self.verifier.data_protection_classes),
+            "issued_at": self.verifier.issued_at.isoformat(),
+            "expires_at": self.verifier.expires_at.isoformat(),
+            "revoked": self.verifier.revoked,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+
+    @classmethod
+    def load(cls, path: Path) -> LocalApiKeyIdentity:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("version") != 1:
+                raise ValueError
+            key_id = payload["key_id"]
+            secret = payload["secret"]
+            owner = payload["owner"]
+            environment = payload["environment"]
+            scopes = payload["scopes"]
+            data_protection_classes = payload["data_protection_classes"]
+            issued_at = datetime.fromisoformat(payload["issued_at"])
+            expires_at = datetime.fromisoformat(payload["expires_at"])
+            revoked = payload["revoked"]
+            if (
+                not isinstance(key_id, str)
+                or not isinstance(secret, str)
+                or not isinstance(owner, str)
+                or environment not in _LOCAL_KEY_ENVIRONMENTS
+                or not isinstance(scopes, list)
+                or not scopes
+                or not all(isinstance(scope, str) for scope in scopes)
+                or not isinstance(data_protection_classes, list)
+                or not data_protection_classes
+                or not all(
+                    protection_class
+                    in {"public_source", "internal", "licensed", "restricted", "secret"}
+                    for protection_class in data_protection_classes
+                )
+                or issued_at.tzinfo is None
+                or expires_at.tzinfo is None
+                or expires_at <= issued_at
+                or expires_at - issued_at > timedelta(days=30)
+                or not isinstance(revoked, bool)
+            ):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("local_api_key_file_invalid") from error
+        credential = LocalApiKeyCredential(key_id=key_id, _secret=secret)
+        pepper = secrets.token_bytes(32)
+        verifier = LocalApiKeyVerifier(
+            key_id=key_id,
+            principal_id=str(uuid5(NAMESPACE_URL, f"stock-forecasting/local-key/{owner}/{key_id}")),
+            owner=owner,
+            environment=cast(RuntimeEnvironment, environment),
+            scopes=frozenset(cast(list[str], scopes)),
+            data_protection_classes=frozenset(
+                cast(list[DataProtectionClass], data_protection_classes)
+            ),
+            issued_at=issued_at,
+            expires_at=expires_at,
+            revoked=revoked,
+            _pepper=pepper,
+            _secret_digest=hmac.new(
+                pepper,
+                secret.encode("utf-8"),
+                hashlib.sha256,
+            ).digest(),
+        )
+        context = verifier.authenticate(
+            credential.authorization_header(),
+            client_host="127.0.0.1",
+            environment=verifier.environment,
+            authenticated_at=issued_at,
+        )
+        return cls(credential=credential, verifier=verifier, context=context)
+
+
+@dataclass(frozen=True)
+class ActionGrant:
+    version_id: str
+    principal_id: str
+    actions: frozenset[str]
+    environment: RuntimeEnvironment
+    valid_from: datetime
+    valid_to: datetime
+
+
+@dataclass(frozen=True)
+class SourcePolicyVersion:
+    version_id: str
+    dataset_id: str
+    allowed_actions: frozenset[str]
+    purposes: frozenset[str]
+    environments: frozenset[str]
+    data_protection_class: DataProtectionClass
+    resource_states: frozenset[str]
+
+
+@dataclass(frozen=True)
+class SourceEntitlement:
+    version_id: str
+    principal_id: str
+    dataset_id: str
+    status: EntitlementStatus
+    allowed_actions: frozenset[str]
+    purposes: frozenset[str]
+    environments: frozenset[str]
+    valid_from: datetime
+    valid_to: datetime
+
+
+@dataclass(frozen=True)
+class OperationIntent:
+    action: str
+    dataset_id: str
+    purpose: str
+    environment: RuntimeEnvironment
+    resource_state: str
+    evaluated_at: datetime
+    trace_id: str
+    correlation_id: str
+
+
+@dataclass(frozen=True)
+class AuthorizationDecision:
+    decision_id: str
+    allowed: bool
+    reason_code: str
+    principal_id: str
+    action: str
+    dataset_id: str
+    purpose: str
+    environment: RuntimeEnvironment
+    grant_version_id: str | None
+    source_policy_version_id: str | None
+    source_entitlement_version_id: str | None
+    data_protection_class: DataProtectionClass | None
+    trace_id: str
+    correlation_id: str
+    evaluated_at: datetime
+    valid_until: datetime
+
+
+def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, str | None]:
+    return {
+        "decision_id": decision.decision_id,
+        "correlation_id": decision.correlation_id,
+        "principal_id": decision.principal_id,
+        "purpose": decision.purpose,
+        "environment": decision.environment,
+        "grant_version_id": decision.grant_version_id,
+        "source_policy_version_id": decision.source_policy_version_id,
+        "source_entitlement_version_id": decision.source_entitlement_version_id,
+        "data_protection_class": decision.data_protection_class,
+        "action": decision.action,
+        "reason_code": decision.reason_code,
+    }
+
+
+@dataclass(frozen=True)
+class AuthorizationPolicy:
+    action_grants: tuple[ActionGrant, ...]
+    source_policies: tuple[SourcePolicyVersion, ...]
+    source_entitlements: tuple[SourceEntitlement, ...]
+
+    def evaluate(
+        self,
+        context: SecurityContext,
+        intent: OperationIntent,
+    ) -> AuthorizationDecision:
+        grant_candidates = tuple(
+            candidate
+            for candidate in self.action_grants
+            if candidate.principal_id == context.principal_id
+        )
+        source_policy_candidates = tuple(
+            candidate
+            for candidate in self.source_policies
+            if candidate.dataset_id == intent.dataset_id
+        )
+        entitlement_candidates = tuple(
+            candidate
+            for candidate in self.source_entitlements
+            if candidate.principal_id == context.principal_id
+            and candidate.dataset_id == intent.dataset_id
+        )
+        grant = grant_candidates[0] if len(grant_candidates) == 1 else None
+        source_policy = source_policy_candidates[0] if len(source_policy_candidates) == 1 else None
+        entitlement = entitlement_candidates[0] if len(entitlement_candidates) == 1 else None
+        reason_code = "authorized"
+        if not context.trusted:
+            reason_code = "identity_untrusted"
+        elif not (context.issued_at <= intent.evaluated_at < context.expires_at):
+            reason_code = "identity_expired"
+        elif context.environment != intent.environment:
+            reason_code = "identity_environment_mismatch"
+        elif intent.action not in context.scopes:
+            reason_code = "identity_scope_missing"
+        elif len(grant_candidates) > 1:
+            reason_code = "action_grant_conflict"
+        elif grant is None or intent.action not in grant.actions:
+            reason_code = "action_grant_missing"
+        elif grant.environment != intent.environment:
+            reason_code = "action_grant_environment_denied"
+        elif not (grant.valid_from <= intent.evaluated_at < grant.valid_to):
+            reason_code = "action_grant_expired"
+        elif len(source_policy_candidates) > 1:
+            reason_code = "source_policy_conflict"
+        elif source_policy is None:
+            reason_code = "source_policy_unknown"
+        elif intent.action not in source_policy.allowed_actions:
+            reason_code = "source_policy_action_denied"
+        elif intent.purpose not in source_policy.purposes:
+            reason_code = "source_policy_purpose_denied"
+        elif intent.environment not in source_policy.environments:
+            reason_code = "source_policy_environment_denied"
+        elif intent.resource_state not in source_policy.resource_states:
+            reason_code = "source_policy_resource_state_denied"
+        elif source_policy.data_protection_class not in context.data_protection_classes:
+            reason_code = "data_protection_class_denied"
+        elif len(entitlement_candidates) > 1:
+            reason_code = "source_entitlement_conflict"
+        elif entitlement is None:
+            reason_code = "source_entitlement_missing"
+        elif entitlement.status != "active":
+            reason_code = f"source_entitlement_{entitlement.status}"
+        elif not (entitlement.valid_from <= intent.evaluated_at < entitlement.valid_to):
+            reason_code = "source_entitlement_expired"
+        elif intent.action not in entitlement.allowed_actions:
+            reason_code = "source_entitlement_action_denied"
+        elif intent.purpose not in entitlement.purposes:
+            reason_code = "source_entitlement_purpose_denied"
+        elif intent.environment not in entitlement.environments:
+            reason_code = "source_entitlement_environment_denied"
+        allowed = reason_code == "authorized"
+        decision_identity = "/".join(
+            (
+                context.principal_id,
+                intent.action,
+                intent.dataset_id,
+                intent.purpose,
+                intent.environment,
+                intent.resource_state,
+                grant.version_id if grant is not None else "no-grant",
+                source_policy.version_id if source_policy is not None else "no-policy",
+                entitlement.version_id if entitlement is not None else "no-entitlement",
+                reason_code,
+                intent.trace_id,
+                intent.correlation_id,
+            )
+        )
+        valid_until = intent.evaluated_at
+        if allowed and grant is not None and entitlement is not None:
+            valid_until = min(context.expires_at, grant.valid_to, entitlement.valid_to)
+        return AuthorizationDecision(
+            decision_id=str(uuid5(NAMESPACE_URL, f"stock-forecasting/authz/{decision_identity}")),
+            allowed=allowed,
+            reason_code=reason_code,
+            principal_id=context.principal_id,
+            action=intent.action,
+            dataset_id=intent.dataset_id,
+            purpose=intent.purpose,
+            environment=intent.environment,
+            grant_version_id=grant.version_id if grant is not None else None,
+            source_policy_version_id=(
+                source_policy.version_id if source_policy is not None else None
+            ),
+            source_entitlement_version_id=(
+                entitlement.version_id if entitlement is not None else None
+            ),
+            data_protection_class=(
+                source_policy.data_protection_class if source_policy is not None else None
+            ),
+            trace_id=intent.trace_id,
+            correlation_id=intent.correlation_id,
+            evaluated_at=intent.evaluated_at,
+            valid_until=valid_until,
+        )
+
+
+def fixture_dataset_id(market: str) -> str:
+    datasets = {
+        "XTAI": "xtai-fixture-eod",
+        "XNAS": "xnas-fixture-eod",
+    }
+    try:
+        return datasets[market]
+    except KeyError as error:
+        raise ValueError("unknown_fixture_market") from error
+
+
+def build_fixture_authorization_policy(
+    context: SecurityContext,
+    *,
+    entitlement_states: Mapping[str, EntitlementStatus] | None = None,
+    entitlement_purposes: Mapping[str, frozenset[str]] | None = None,
+    grant_actions: frozenset[str] | None = None,
+    policy_markets: frozenset[str] | None = None,
+) -> AuthorizationPolicy:
+    states = entitlement_states or {}
+    purposes = entitlement_purposes or {}
+    known_markets = policy_markets or frozenset({"XTAI", "XNAS"})
+    actions = frozenset({"fixture_pipeline.execute", "research_prediction.read"})
+    resolved_grant_actions = actions if grant_actions is None else grant_actions
+    grant = ActionGrant(
+        version_id=str(
+            uuid5(
+                NAMESPACE_URL,
+                "stock-forecasting/action-grant/"
+                f"{context.principal_id}/fixture-research/"
+                f"{'-'.join(sorted(resolved_grant_actions)) or 'no-actions'}",
+            )
+        ),
+        principal_id=context.principal_id,
+        actions=resolved_grant_actions,
+        environment=context.environment,
+        valid_from=context.issued_at,
+        valid_to=context.expires_at,
+    )
+    source_policies: list[SourcePolicyVersion] = []
+    source_entitlements: list[SourceEntitlement] = []
+    for market in ("XTAI", "XNAS"):
+        dataset_id = fixture_dataset_id(market)
+        namespace = market.lower()
+        if market in known_markets:
+            source_policies.append(
+                SourcePolicyVersion(
+                    version_id=str(
+                        uuid5(
+                            NAMESPACE_URL,
+                            f"stock-forecasting/{namespace}/source-policy/fixture-research-v1",
+                        )
+                    ),
+                    dataset_id=dataset_id,
+                    allowed_actions=actions,
+                    purposes=frozenset({"fixture_research"}),
+                    environments=frozenset({context.environment}),
+                    data_protection_class="internal",
+                    resource_states=frozenset({"active"}),
+                )
+            )
+        state = states.get(market, "active")
+        allowed_purposes = purposes.get(market, frozenset({"fixture_research"}))
+        source_entitlements.append(
+            SourceEntitlement(
+                version_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        "stock-forecasting/"
+                        f"{namespace}/source-entitlement/{context.principal_id}/"
+                        f"{state}/{'-'.join(sorted(allowed_purposes)) or 'no-purpose'}",
+                    )
+                ),
+                principal_id=context.principal_id,
+                dataset_id=dataset_id,
+                status=state,
+                allowed_actions=actions,
+                purposes=allowed_purposes,
+                environments=frozenset({context.environment}),
+                valid_from=context.issued_at,
+                valid_to=context.expires_at,
+            )
+        )
+    return AuthorizationPolicy(
+        action_grants=(grant,),
+        source_policies=tuple(source_policies),
+        source_entitlements=tuple(source_entitlements),
+    )

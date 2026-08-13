@@ -10,6 +10,14 @@ from io import BytesIO
 from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
+from stock_forecasting.authorization import (
+    AuthorizationDenied,
+    AuthorizationPolicy,
+    OperationIntent,
+    SecurityContext,
+    authorization_audit_payload,
+    fixture_dataset_id,
+)
 from stock_forecasting.fixture_market import (
     FixtureMarket,
     FixtureMarketAdapter,
@@ -85,6 +93,10 @@ class FixtureEodWorkflow:
         object_repository: FilesystemObjectRepository,
         forecaster: TrendForecaster | None = None,
         market_adapters: Mapping[FixtureMarket, FixtureMarketAdapter] | None = None,
+        security_context: SecurityContext,
+        authorization_policy: AuthorizationPolicy,
+        authorization_time: datetime | None = None,
+        authorization_uses_system_clock: bool = False,
     ) -> None:
         self._state_store = state_store
         self._observed_at = observed_at
@@ -93,9 +105,54 @@ class FixtureEodWorkflow:
             default_fixture_market_adapters() if market_adapters is None else market_adapters
         )
         self._forecaster = forecaster or FixtureTrendForecaster()
+        self._security_context = security_context
+        self._authorization_policy = authorization_policy
+        self._authorization_time = authorization_time
+        self._authorization_uses_system_clock = authorization_uses_system_clock
 
     def execute(self, command: FixtureEodCommand) -> FixtureEodOutcome:
         observed_at = self._observed_at or datetime.now(UTC)
+        authorization_time = (
+            datetime.now(UTC)
+            if self._authorization_uses_system_clock
+            else self._authorization_time or observed_at
+        )
+        dataset_id = fixture_dataset_id(command.market)
+        authorization_decision = self._authorization_policy.evaluate(
+            self._security_context,
+            OperationIntent(
+                action="fixture_pipeline.execute",
+                dataset_id=dataset_id,
+                purpose="fixture_research",
+                environment=self._security_context.environment,
+                resource_state="active",
+                evaluated_at=authorization_time,
+                trace_id=command.trace_id,
+                correlation_id=command.trace_id,
+            ),
+        )
+        if not authorization_decision.allowed:
+            self._state_store.record_authorization_decision(
+                authorization=authorization_audit_payload(authorization_decision),
+                outcome="denied",
+                trace_id=command.trace_id,
+            )
+            raise AuthorizationDenied(authorization_decision)
+        source_policy = next(
+            policy
+            for policy in self._authorization_policy.source_policies
+            if policy.version_id == authorization_decision.source_policy_version_id
+        )
+        source_entitlement = next(
+            entitlement
+            for entitlement in self._authorization_policy.source_entitlements
+            if entitlement.version_id == authorization_decision.source_entitlement_version_id
+        )
+        action_grant = next(
+            grant
+            for grant in self._authorization_policy.action_grants
+            if grant.version_id == authorization_decision.grant_version_id
+        )
         policy = scenario_policy(command.fixture_scenario)
         market_batch = self._market_adapters[command.market].load(command.information_cutoff)
         if market_batch.market != command.market:
@@ -125,12 +182,45 @@ class FixtureEodWorkflow:
             ),
         )
         display_ticker = identity_timeline.ticker_at(market_batch.market_date)
-        source_policy_payload = {
+        source_policy_payload: dict[str, object] = {
+            "dataset_id": source_policy.dataset_id,
             "execution_purpose": "fixture",
             "content_origin": "synthetic",
             "formal_source_qualified": False,
+            "allowed_actions": sorted(source_policy.allowed_actions),
+            "purposes": sorted(source_policy.purposes),
+            "environments": sorted(source_policy.environments),
+            "data_protection_class": source_policy.data_protection_class,
+            "resource_states": sorted(source_policy.resource_states),
         }
-        source_policy_version_id = version_id("source-policy-version", source_policy_payload)
+        source_policy_version_id = source_policy.version_id
+        source_entitlement_payload = {
+            "dataset_id": source_entitlement.dataset_id,
+            "principal_id": source_entitlement.principal_id,
+            "status": source_entitlement.status,
+            "allowed_actions": sorted(source_entitlement.allowed_actions),
+            "purposes": sorted(source_entitlement.purposes),
+            "environments": sorted(source_entitlement.environments),
+            "valid_from": _instant(source_entitlement.valid_from),
+            "valid_to": _instant(source_entitlement.valid_to),
+        }
+        action_grant_payload = {
+            "principal_id": action_grant.principal_id,
+            "actions": sorted(action_grant.actions),
+            "environment": action_grant.environment,
+            "valid_from": _instant(action_grant.valid_from),
+            "valid_to": _instant(action_grant.valid_to),
+        }
+        authorization_evidence = {
+            "decision_id": authorization_decision.decision_id,
+            "decision": "allow",
+            "reason_code": authorization_decision.reason_code,
+            "grant_version_id": authorization_decision.grant_version_id,
+            "source_policy_version_id": authorization_decision.source_policy_version_id,
+            "source_entitlement_version_id": (authorization_decision.source_entitlement_version_id),
+            "data_protection_class": authorization_decision.data_protection_class,
+        }
+        authorization_audit = authorization_audit_payload(authorization_decision)
         subject_ids = {
             "issuer": issuer_id,
             "security": security_id,
@@ -421,6 +511,7 @@ class FixtureEodWorkflow:
                     "version_id": source_policy_version_id,
                     **source_policy_payload,
                 },
+                "authorization": authorization_evidence,
                 "coverage": coverage_payload,
                 "committed_checkpoint": market_batch.committed_checkpoint,
                 **policy.source_evidence(base_source_record_version_id),
@@ -512,6 +603,16 @@ class FixtureEodWorkflow:
                 "artifact_kind": "source_policy_version",
                 "payload": source_policy_payload,
             },
+            {
+                "artifact_id": source_entitlement.version_id,
+                "artifact_kind": "source_entitlement",
+                "payload": source_entitlement_payload,
+            },
+            {
+                "artifact_id": action_grant.version_id,
+                "artifact_kind": "action_grant",
+                "payload": action_grant_payload,
+            },
             *related_artifacts,
             {
                 "artifact_id": raw_artifact_id,
@@ -598,6 +699,7 @@ class FixtureEodWorkflow:
                 }
                 for prediction in predictions
             ],
+            authorization_decision=authorization_audit,
         )
 
         return FixtureEodOutcome(

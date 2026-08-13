@@ -126,9 +126,15 @@ def test_xnas_fixture_uses_the_shared_eod_research_contract() -> None:
     }
     assert research["source_evidence"]["source_policy"] == {
         "version_id": outcome.source_policy_version_id,
+        "dataset_id": "xnas-fixture-eod",
         "execution_purpose": "fixture",
         "content_origin": "synthetic",
         "formal_source_qualified": False,
+        "allowed_actions": ["fixture_pipeline.execute", "research_prediction.read"],
+        "purposes": ["fixture_research"],
+        "environments": ["development"],
+        "data_protection_class": "internal",
+        "resource_states": ["active"],
     }
     assert research["source_evidence"]["coverage"]["last_session_id"] == "XNAS:2026-08-12"
     assert research["source_evidence"]["committed_checkpoint"] == "xnas-fixture-page:1"
@@ -196,14 +202,12 @@ def test_xnas_necessary_data_failures_do_not_hide_the_successful_xtai_result() -
                 "affected_attempts": 1,
             }
         ]
-        assert application.security_audit.list_events(trace_id=trace_id) == [
-            {
-                "action": "fixture_eod_publication",
-                "outcome": "allowed",
-                "reason_code": "fixture_policy_active",
-                "trace_id": trace_id,
-            }
-        ]
+        audit = application.security_audit.list_events(trace_id=trace_id)
+        assert len(audit) == 1
+        assert audit[0]["action"] == "fixture_pipeline.execute"
+        assert audit[0]["outcome"] == "allowed"
+        assert audit[0]["reason_code"] == "authorized"
+        assert audit[0]["trace_id"] == trace_id
 
     xtai_research = application.research_query.get_listing_research(
         listing_id=xtai_outcome.listing_id,

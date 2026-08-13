@@ -9,6 +9,8 @@ paths:
   /api/v1/research/predictions:
     get:
       operationId: listPredictionMatrix
+      security:
+        - LocalApiKey: []
       parameters:
         - $ref: '#/components/parameters/InformationCutoff'
         - name: If-None-Match
@@ -27,11 +29,17 @@ paths:
                 $ref: '#/components/schemas/PredictionMatrix'
         '304':
           description: The snapshot representation is unchanged.
+        '401':
+          $ref: '#/components/responses/ProblemResponse'
+        '403':
+          $ref: '#/components/responses/ProblemResponse'
         '503':
           $ref: '#/components/responses/ProblemResponse'
   /api/v1/research/listings/{listing_id}:
     get:
       operationId: getListingResearch
+      security:
+        - LocalApiKey: []
       parameters:
         - $ref: '#/components/parameters/ListingId'
         - $ref: '#/components/parameters/InformationCutoff'
@@ -43,6 +51,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/ListingResearch'
         '404':
+          $ref: '#/components/responses/ProblemResponse'
+        '401':
+          $ref: '#/components/responses/ProblemResponse'
+        '403':
           $ref: '#/components/responses/ProblemResponse'
         '503':
           $ref: '#/components/responses/ProblemResponse'
@@ -67,6 +79,12 @@ paths:
                     type: array
                     items: {$ref: '#/components/schemas/HealthAssessment'}
 components:
+  securitySchemes:
+    LocalApiKey:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Loopback local/development ApiKey credential.
   parameters:
     InformationCutoff:
       name: information_cutoff

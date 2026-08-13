@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import mkdtemp
 from uuid import uuid4
 
+from stock_forecasting.authorization import (
+    AuthorizationPolicy,
+    EntitlementStatus,
+    LocalApiKeyIdentity,
+    SecurityContext,
+    build_fixture_authorization_policy,
+)
 from stock_forecasting.operations_control import OperationsControl
 from stock_forecasting.outbox import (
     EventCompatibility,
@@ -38,9 +46,23 @@ class Application:
         event_compatibility: EventCompatibility | None = None,
         relay_clock: RelayClock | None = None,
         relay_worker_id: str | None = None,
+        local_identity: LocalApiKeyIdentity,
+        authorization_policy: AuthorizationPolicy,
+        public_bind_host: str,
+        fixed_security_time: datetime | None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
-        self.research_query = ResearchQuery(self.state_store)
+        self.local_identity = local_identity
+        self.security_context: SecurityContext = local_identity.context
+        self.authorization_policy = authorization_policy
+        self.public_bind_host = public_bind_host
+        self._fixed_security_time = fixed_security_time
+        self.research_query = ResearchQuery(
+            self.state_store,
+            security_context=self.security_context,
+            authorization_policy=self.authorization_policy,
+            authorization_time=fixed_security_time,
+        )
         self.security_audit = SecurityAudit(self.state_store)
         self.operations_control = OperationsControl(self.state_store)
         self.object_repository = FilesystemObjectRepository(object_root)
@@ -52,6 +74,10 @@ class Application:
             self.state_store,
             observed_at=observed_at,
             object_repository=self.object_repository,
+            security_context=self.security_context,
+            authorization_policy=self.authorization_policy,
+            authorization_time=fixed_security_time,
+            authorization_uses_system_clock=fixed_security_time is None,
         )
         self._fixture_use = FixtureUseWorkflow(
             state_store=self.state_store,
@@ -59,6 +85,17 @@ class Application:
 
     def run_fixture_eod(self, command: FixtureEodCommand) -> FixtureEodOutcome:
         return self._fixture_eod.execute(command)
+
+    def authenticate_local_request(
+        self,
+        authorization_header: str,
+    ) -> SecurityContext:
+        return self.local_identity.verifier.authenticate(
+            authorization_header,
+            client_host=self.public_bind_host,
+            environment=self.security_context.environment,
+            authenticated_at=self._fixed_security_time or datetime.now(UTC),
+        )
 
     def relay_outbox(self, *, event_id: str | None = None) -> RelayOutcome:
         return self.state_store.relay_outbox(
@@ -82,9 +119,31 @@ def build_test_application(
     event_compatibility: EventCompatibility | None = None,
     relay_clock: RelayClock | None = None,
     relay_worker_id: str | None = None,
+    local_identity: LocalApiKeyIdentity | None = None,
+    entitlement_states: Mapping[str, EntitlementStatus] | None = None,
+    entitlement_purposes: Mapping[str, frozenset[str]] | None = None,
+    grant_actions: frozenset[str] | None = None,
+    policy_markets: frozenset[str] | None = None,
+    public_bind_host: str = "127.0.0.1",
+    authorization_time: datetime | None = None,
 ) -> Application:
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
     resolved_database_url = database_url or "sqlite+pysqlite:///:memory:"
+    identity_time = authorization_time or observed_at or datetime.now(UTC)
+    resolved_identity = local_identity or LocalApiKeyIdentity.issue(
+        owner="local-researcher",
+        environment="development",
+        scopes={"fixture_pipeline.execute", "research_prediction.read"},
+        issued_at=identity_time - timedelta(minutes=1),
+        expires_at=identity_time + timedelta(hours=24),
+    )
+    authorization_policy = build_fixture_authorization_policy(
+        resolved_identity.context,
+        entitlement_states=entitlement_states,
+        entitlement_purposes=entitlement_purposes,
+        grant_actions=grant_actions,
+        policy_markets=policy_markets,
+    )
     return Application(
         observed_at=observed_at,
         object_root=root,
@@ -94,6 +153,10 @@ def build_test_application(
         event_compatibility=event_compatibility,
         relay_clock=relay_clock,
         relay_worker_id=relay_worker_id,
+        local_identity=resolved_identity,
+        authorization_policy=authorization_policy,
+        public_bind_host=public_bind_host,
+        fixed_security_time=authorization_time or observed_at,
     )
 
 
@@ -106,7 +169,21 @@ def build_application(
     event_compatibility: EventCompatibility | None = None,
     relay_clock: RelayClock | None = None,
     relay_worker_id: str | None = None,
+    local_identity: LocalApiKeyIdentity | None = None,
+    entitlement_states: Mapping[str, EntitlementStatus] | None = None,
+    entitlement_purposes: Mapping[str, frozenset[str]] | None = None,
+    public_bind_host: str = "127.0.0.1",
+    grant_actions: frozenset[str] | None = None,
+    policy_markets: frozenset[str] | None = None,
 ) -> Application:
+    identity_time = datetime.now(UTC)
+    resolved_identity = local_identity or LocalApiKeyIdentity.issue(
+        owner="local-researcher",
+        environment="development",
+        scopes={"fixture_pipeline.execute", "research_prediction.read"},
+        issued_at=identity_time - timedelta(minutes=1),
+        expires_at=identity_time + timedelta(hours=24),
+    )
     return Application(
         observed_at=observed_at,
         object_root=object_root,
@@ -116,4 +193,14 @@ def build_application(
         event_compatibility=event_compatibility,
         relay_clock=relay_clock,
         relay_worker_id=relay_worker_id,
+        local_identity=resolved_identity,
+        authorization_policy=build_fixture_authorization_policy(
+            resolved_identity.context,
+            entitlement_states=entitlement_states,
+            entitlement_purposes=entitlement_purposes,
+            grant_actions=grant_actions,
+            policy_markets=policy_markets,
+        ),
+        public_bind_host=public_bind_host,
+        fixed_security_time=None,
     )

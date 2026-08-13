@@ -85,6 +85,7 @@ class StateStore:
         operations: PublicationDisposition,
         artifacts: list[dict[str, Any]],
         fixture_predictions: list[dict[str, Any]],
+        authorization_decision: dict[str, Any],
     ) -> dict[str, Any]:
         identity = payload["identity"]
         with self.engine.begin() as connection:
@@ -204,10 +205,11 @@ class StateStore:
                 connection.execute(
                     security_audit_events.insert().values(
                         event_id=audit_event_id,
-                        action="fixture_eod_publication",
+                        action=authorization_decision["action"],
                         outcome="allowed",
-                        reason_code=operations.audit_reason_code,
+                        reason_code=authorization_decision["reason_code"],
                         trace_id=trace_id,
+                        authorization=authorization_decision,
                     )
                 )
                 for artifact in artifacts:
@@ -298,6 +300,7 @@ class StateStore:
                     outcome="denied",
                     reason_code="fixture_use_forbidden",
                     trace_id=trace_id,
+                    authorization=None,
                 )
             )
             connection.execute(
@@ -307,6 +310,33 @@ class StateStore:
                     status="blocked",
                     reason_code="fixture_use_forbidden",
                     trace_id=trace_id,
+                )
+            )
+
+    def record_authorization_decision(
+        self,
+        *,
+        authorization: dict[str, str | None],
+        outcome: str,
+        trace_id: str,
+    ) -> None:
+        event_id = authorization["decision_id"]
+        with self.engine.begin() as connection:
+            exists = connection.execute(
+                select(security_audit_events.c.event_id).where(
+                    security_audit_events.c.event_id == event_id
+                )
+            ).scalar_one_or_none()
+            if exists is not None:
+                return
+            connection.execute(
+                security_audit_events.insert().values(
+                    event_id=event_id,
+                    action=authorization["action"],
+                    outcome=outcome,
+                    reason_code=authorization["reason_code"],
+                    trace_id=trace_id,
+                    authorization=authorization,
                 )
             )
 
@@ -475,7 +505,7 @@ class StateStore:
             }
         ]
 
-    def list_audit_events(self, *, trace_id: str) -> list[dict[str, str]]:
+    def list_audit_events(self, *, trace_id: str) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:
             rows = connection.execute(
                 select(
@@ -483,11 +513,23 @@ class StateStore:
                     security_audit_events.c.outcome,
                     security_audit_events.c.reason_code,
                     security_audit_events.c.trace_id,
+                    security_audit_events.c.authorization,
                 )
                 .where(security_audit_events.c.trace_id == trace_id)
                 .order_by(security_audit_events.c.sequence)
             ).mappings()
-            return [dict(row) for row in rows]
+            events: list[dict[str, Any]] = []
+            for row in rows:
+                event = {
+                    "action": row["action"],
+                    "outcome": row["outcome"],
+                    "reason_code": row["reason_code"],
+                    "trace_id": row["trace_id"],
+                }
+                if row["authorization"] is not None:
+                    event.update(row["authorization"])
+                events.append(event)
+            return events
 
     def get_trace_evidence(self, trace_id: str) -> dict[str, Any]:
         with self.engine.connect() as connection:

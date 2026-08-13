@@ -15,8 +15,8 @@ COPY src ./src
 COPY migrations ./migrations
 COPY openapi ./openapi
 COPY alembic.ini dagster-workspace.yaml ./
-RUN mkdir -p /var/lib/stock-forecasting/objects /var/lib/dagster \
-    && chown -R app:app /var/lib/stock-forecasting /var/lib/dagster
+RUN mkdir -p /var/lib/stock-forecasting/objects /var/lib/dagster /run/stock-forecasting \
+    && chown -R app:app /var/lib/stock-forecasting /var/lib/dagster /run/stock-forecasting
 
 USER app
 

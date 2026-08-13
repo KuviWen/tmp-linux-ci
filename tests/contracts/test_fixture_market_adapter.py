@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from stock_forecasting.application import build_test_application
+from stock_forecasting.authorization import (
+    AuthorizationPolicy,
+    LocalApiKeyIdentity,
+    SecurityContext,
+    build_fixture_authorization_policy,
+)
 from stock_forecasting.fixture_market import (
     FixtureMarket,
     FixtureMarketBatch,
@@ -20,6 +26,17 @@ from stock_forecasting.fixture_market import (
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodWorkflow
+
+
+def _authorized_security(at: datetime) -> tuple[SecurityContext, AuthorizationPolicy]:
+    identity = LocalApiKeyIdentity.issue(
+        owner="contract-test",
+        environment="development",
+        scopes={"fixture_pipeline.execute", "research_prediction.read"},
+        issued_at=at - timedelta(minutes=1),
+        expires_at=at + timedelta(hours=1),
+    )
+    return identity.context, build_fixture_authorization_policy(identity.context)
 
 
 def test_xtai_and_xnas_adapters_share_the_provider_and_module_contract() -> None:
@@ -77,14 +94,12 @@ def test_xtai_and_xnas_adapters_share_the_provider_and_module_contract() -> None
         assert research["calendar"]["exchange"] == market
         assert research["identity"]["listing_id"] == outcome.listing_id
         assert research["identity"]["listing_id"] != research["identity"]["display_ticker"]
-        assert application.security_audit.list_events(trace_id=trace_id) == [
-            {
-                "action": "fixture_eod_publication",
-                "outcome": "allowed",
-                "reason_code": "fixture_policy_active",
-                "trace_id": trace_id,
-            }
-        ]
+        audit = application.security_audit.list_events(trace_id=trace_id)
+        assert len(audit) == 1
+        assert audit[0]["action"] == "fixture_pipeline.execute"
+        assert audit[0]["outcome"] == "allowed"
+        assert audit[0]["reason_code"] == "authorized"
+        assert audit[0]["trace_id"] == trace_id
         research_shapes.add(tuple(sorted(research)))
         source_evidence_shapes.add(tuple(sorted(research["source_evidence"])))
         prediction_shapes.update(
@@ -129,11 +144,14 @@ def test_workflow_uses_the_adapter_market_date_for_identity_and_selection(
             assert information_cutoff == cutoff
             return batch
 
+    security_context, authorization_policy = _authorized_security(cutoff)
     workflow = FixtureEodWorkflow(
         StateStore("sqlite+pysqlite:///:memory:", create_schema=True),
         observed_at=cutoff,
         object_repository=FilesystemObjectRepository(tmp_path / "objects"),
         market_adapters={"XNAS": Adapter()},
+        security_context=security_context,
+        authorization_policy=authorization_policy,
     )
 
     outcome = workflow.execute(
@@ -149,11 +167,15 @@ def test_workflow_uses_the_adapter_market_date_for_identity_and_selection(
 
 
 def test_explicit_empty_provider_registry_fails_closed(tmp_path: Path) -> None:
+    observed_at = datetime(2026, 8, 12, 21, 55, tzinfo=UTC)
+    security_context, authorization_policy = _authorized_security(observed_at)
     workflow = FixtureEodWorkflow(
         StateStore("sqlite+pysqlite:///:memory:", create_schema=True),
-        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+        observed_at=observed_at,
         object_repository=FilesystemObjectRepository(tmp_path / "objects"),
         market_adapters={},
+        security_context=security_context,
+        authorization_policy=authorization_policy,
     )
 
     with pytest.raises(KeyError, match="XNAS"):
@@ -168,11 +190,15 @@ def test_explicit_empty_provider_registry_fails_closed(tmp_path: Path) -> None:
 
 
 def test_provider_market_mismatch_fails_closed(tmp_path: Path) -> None:
+    observed_at = datetime(2026, 8, 12, 21, 55, tzinfo=UTC)
+    security_context, authorization_policy = _authorized_security(observed_at)
     workflow = FixtureEodWorkflow(
         StateStore("sqlite+pysqlite:///:memory:", create_schema=True),
-        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+        observed_at=observed_at,
         object_repository=FilesystemObjectRepository(tmp_path / "objects"),
         market_adapters={"XNAS": XtaiFixtureMarketAdapter()},
+        security_context=security_context,
+        authorization_policy=authorization_policy,
     )
 
     with pytest.raises(ValueError, match="fixture_adapter_market_mismatch"):

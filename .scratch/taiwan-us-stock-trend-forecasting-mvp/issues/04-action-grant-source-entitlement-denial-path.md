@@ -8,10 +8,25 @@
 
 Status: ready-for-agent
 
-- [ ] Loopback local／development API key 只能建立具 owner、expiry、scope 與 environment 的可信 SecurityContext；非 loopback 或正式設定會啟動失敗。
-- [ ] 兩個 fixture 來源具版本化來源政策、資料保護類別與來源使用資格，且 allow 決策同時要求有效身分、行動權限、來源使用資格、用途、環境與資源狀態。
-- [ ] 相同行動權限配合 active entitlement 時，擷取、FeatureSnapshot、fixture 預測、projection 與授權允許的研究查詢能完整成功。
-- [ ] 將 entitlement 改為 suspended／expired／revoked 或移除指定用途後，新的擷取、推論、projection 及展示均在一致位置 fail closed，且不回傳受限 payload。
-- [ ] REST 對 caller 只回穩定 problem code 與 correlation ID；受控 audit 保存真實 decision、reason、policy／grant／entitlement version 與 trace。
-- [ ] Dagster、CLI、REST handler、資料庫角色或 platform-admin 身分都不能產生與 AuthorizationPolicy 相反的 allow 結果。
-- [ ] 端到端 decision-matrix 測試同時涵蓋有權限無資格、有資格無權限、未知政策、到期資格與正常 allow，並驗證 workflow、REST、projection 與 audit 一致。
+- [x] Loopback local／development API key 只能建立具 owner、expiry、scope 與 environment 的可信 SecurityContext；非 loopback 或正式設定會啟動失敗。
+- [x] 兩個 fixture 來源具版本化來源政策、資料保護類別與來源使用資格，且 allow 決策同時要求有效身分、行動權限、來源使用資格、用途、環境與資源狀態。
+- [x] 相同行動權限配合 active entitlement 時，擷取、FeatureSnapshot、fixture 預測、projection 與授權允許的研究查詢能完整成功。
+- [x] 將 entitlement 改為 suspended／expired／revoked 或移除指定用途後，新的擷取、推論、projection 及展示均在一致位置 fail closed，且不回傳受限 payload。
+- [x] REST 對 caller 只回穩定 problem code 與 correlation ID；受控 audit 保存真實 decision、reason、policy／grant／entitlement version 與 trace。
+- [x] Dagster、CLI、REST handler、資料庫角色或 platform-admin 身分都不能產生與 AuthorizationPolicy 相反的 allow 結果。
+- [x] 端到端 decision-matrix 測試同時涵蓋有權限無資格、有資格無權限、未知政策、到期資格與正常 allow，並驗證 workflow、REST、projection 與 audit 一致。
+
+## Implementation notes
+
+- 公共 seam：`stock-forecasting acceptance ticket-04`；深層 seam 為
+  `LocalApiKeyVerifier.authenticate(...) -> SecurityContext` 與
+  `AuthorizationPolicy.evaluate(...) -> AuthorizationDecision`。Workflow、ResearchQuery、
+  REST／UI、Dagster 與 CLI 都使用同一 policy，受控 audit 保存完整 decision evidence。
+- Compose 使用不進 Git 的 named-volume ephemeral key file；active API 與 revoked-entitlement
+  API 使用同一身分與 action grant。部署驗證步驟記錄於
+  `docs/operations/ticket-04-authorization.md`。
+- 驗證：`python -m pytest -q`（97 passed、1 個需外部 PostgreSQL 的 integration test
+  skipped）、`python -m mypy src tests`、`python -m ruff check .`、
+  `python -m ruff format --check .`、ticket-04 acceptance runner，以及 Alembic upgrade 均通過。
+- 本機沒有 Docker executable，因此本次未執行 Compose clean-container／PostgreSQL acceptance；
+  Compose 契約測試已通過，但不得將其描述為實際容器執行證據。

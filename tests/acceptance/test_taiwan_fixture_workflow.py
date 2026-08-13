@@ -149,9 +149,15 @@ def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> No
     assert evidence["first_observed_at"] == "2026-08-12T07:03:00Z"
     assert evidence["source_policy"] == {
         "version_id": outcome.source_policy_version_id,
+        "dataset_id": "xtai-fixture-eod",
         "execution_purpose": "fixture",
         "content_origin": "synthetic",
         "formal_source_qualified": False,
+        "allowed_actions": ["fixture_pipeline.execute", "research_prediction.read"],
+        "purposes": ["fixture_research"],
+        "environments": ["development"],
+        "data_protection_class": "internal",
+        "resource_states": ["active"],
     }
     assert evidence["coverage"] == {
         "status": "completed",
@@ -273,7 +279,7 @@ def test_adversarial_collection_versions_traverse_the_same_vertical_path(
         "reason_code": "source_withdrawn",
         "affected_attempts": 1,
     }
-    assert operations["withdrawal"]["audit"][0]["reason_code"] == "fixture_policy_active"
+    assert operations["withdrawal"]["audit"][0]["reason_code"] == "authorized"
 
 
 @pytest.mark.parametrize(
@@ -510,6 +516,8 @@ def test_canonical_trace_keeps_fixture_results_separate_from_production_records(
         "listing",
         "identity_assertion",
         "source_policy_version",
+        "source_entitlement",
+        "action_grant",
         "raw_artifact",
         "source_record_version",
         "normalized_record_version",
@@ -591,11 +599,10 @@ def test_same_eod_command_is_idempotent_at_the_public_workflow_seam() -> None:
     assert first == second
     evidence = application.operations_control.get_trace_evidence(trace_id)
     assert evidence["fixture_prediction_result_count"] == 3
-    assert application.security_audit.list_events(trace_id=trace_id) == [
-        {
-            "action": "fixture_eod_publication",
-            "outcome": "allowed",
-            "reason_code": "fixture_policy_active",
-            "trace_id": trace_id,
-        }
-    ]
+    audit = application.security_audit.list_events(trace_id=trace_id)
+    assert len(audit) == 1
+    assert audit[0]["action"] == "fixture_pipeline.execute"
+    assert audit[0]["outcome"] == "allowed"
+    assert audit[0]["reason_code"] == "authorized"
+    assert audit[0]["trace_id"] == trace_id
+    assert audit[0]["source_policy_version_id"] == first.source_policy_version_id

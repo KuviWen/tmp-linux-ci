@@ -21,6 +21,11 @@ from stock_forecasting.adapters.dagster import (
 )
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import Application, build_application, build_test_application
+from stock_forecasting.authorization import (
+    AuthorizationDenied,
+    EntitlementStatus,
+    LocalApiKeyIdentity,
+)
 from stock_forecasting.dagster_deployment import inspect_dagster_deployment
 from stock_forecasting.fixture_market import FixtureMarket, default_fixture_market_adapters
 from stock_forecasting.fixture_scenarios import FixtureScenario
@@ -67,11 +72,15 @@ def _build_acceptance_application(
     relay_fault: RelayFault | None = None,
 ) -> Application:
     if deployed:
+        key_file = os.environ.get("LOCAL_API_KEY_FILE")
+        if key_file is None:
+            raise RuntimeError("LOCAL_API_KEY_FILE is required for deployed acceptance")
         return build_application(
             observed_at=observed_at,
             object_root=object_root,
             database_url=database_url,
             relay_fault=relay_fault,
+            local_identity=LocalApiKeyIdentity.load(Path(key_file)),
         )
     return build_test_application(
         observed_at=observed_at,
@@ -139,10 +148,17 @@ def _probe_research_surfaces(
     outcome: FixtureEodOutcome,
     market_filter: str,
 ) -> dict[str, Any]:
+    authorization_headers = {
+        "Authorization": application.local_identity.credential.authorization_header()
+    }
     client: HttpClient = (
-        TestClient(create_web_app(application))
+        TestClient(
+            create_web_app(application),
+            headers=authorization_headers,
+            client=("127.0.0.1", 50000),
+        )
         if base_url is None
-        else Client(base_url=base_url, timeout=10.0)
+        else Client(base_url=base_url, timeout=10.0, headers=authorization_headers)
     )
     cutoff_text = information_cutoff.isoformat().replace("+00:00", "Z")
     matrix_response = client.get(
@@ -293,7 +309,7 @@ def run_ticket_01(
             and scenario_operations["late"]["work"]["status"] == "blocked"
             and scenario_operations["missing"]["health"]["reason_code"] == "coverage_incomplete"
             and scenario_operations["withdrawal"]["health"]["status"] == "blocked"
-            and scenario_operations["withdrawal"]["audit"]["reason_code"] == "fixture_policy_active"
+            and scenario_operations["withdrawal"]["audit"]["reason_code"] == "authorized"
         ),
         "immutable_identity": outcome.listing_id != outcome.display_ticker
         and len(research["identity"]["ticker_assertions"]) == 2
@@ -532,7 +548,7 @@ def run_ticket_02(
         and xnas_detail.status_code == 200
         and "USF2 · XNAS" in xnas_detail.text,
         "operations_and_audit": all(
-            scenario_operations[scenario]["audit"]["reason_code"] == "fixture_policy_active"
+            scenario_operations[scenario]["audit"]["reason_code"] == "authorized"
             for scenario in scenario_times
         )
         and scenario_operations["late"]["work"]["status"] == "blocked"
@@ -569,6 +585,8 @@ def _terminate_relay_before_consumers(
 ) -> tuple[int, str]:
     with TemporaryDirectory(prefix="stock-forecasting-relay-") as directory:
         ready_file = Path(directory) / "before-consumers.ready"
+        local_key_file = Path(directory) / "local-api-key.json"
+        competing_application.local_identity.save(local_key_file)
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -585,6 +603,10 @@ def _terminate_relay_before_consumers(
                 "OBJECT_ROOT": str(object_root),
                 "FIXTURE_INFORMATION_CUTOFF": information_cutoff.isoformat(),
                 "FIXTURE_COLLECTION_OBSERVED_AT": observed_at.isoformat(),
+                "RUNTIME_ENVIRONMENT": "development",
+                "PUBLIC_BIND_HOST": "127.0.0.1",
+                "LOCAL_API_KEY_MODE": "enabled",
+                "LOCAL_API_KEY_FILE": str(local_key_file),
                 "PYTHONUTF8": "1",
             },
             stdout=subprocess.PIPE,
@@ -664,10 +686,17 @@ def run_ticket_03(
     )
     interrupted_evidence = application.operations_control.get_outbox_recovery(first.outbox_event_id)
 
+    authorization_headers = {
+        "Authorization": application.local_identity.credential.authorization_header()
+    }
     client: HttpClient = (
-        TestClient(create_web_app(application))
+        TestClient(
+            create_web_app(application),
+            headers=authorization_headers,
+            client=("127.0.0.1", 50000),
+        )
         if base_url is None
-        else Client(base_url=base_url, timeout=10.0)
+        else Client(base_url=base_url, timeout=10.0, headers=authorization_headers)
     )
     cutoff_text = information_cutoff.isoformat().replace("+00:00", "Z")
     pending_rest = client.get(
@@ -823,7 +852,7 @@ def run_ticket_03(
         == ["superseded", "delivered"]
         and first_recovery["delivery_attempts"][0]["reason_code"] == "relay_lease_superseded"
         and [event["action"] for event in audit_after]
-        == ["fixture_eod_publication", "outbox_recovery", "outbox_delivery"]
+        == ["fixture_pipeline.execute", "outbox_recovery", "outbox_delivery"]
         and [attempt["fencing_token"] for attempt in first_recovery["delivery_attempts"]] == [1, 2]
         and all(attempt["worker_id"] for attempt in first_recovery["delivery_attempts"]),
         "single_correlated_incident": len(incidents) == 3
@@ -856,5 +885,296 @@ def run_ticket_03(
         "execution_purpose": "fixture",
         "formal_prediction": False,
         "event_id": first.outbox_event_id,
+        "checks": checks,
+    }
+
+
+def run_ticket_04(
+    *,
+    database_url: str,
+    object_root: Path,
+    information_cutoff: datetime,
+    observed_at: datetime,
+    base_url: str | None = None,
+    dagster_url: str | None = None,
+    denied_base_url: str | None = None,
+) -> dict[str, Any]:
+    _validate_deployment_endpoints(base_url, dagster_url)
+    deployed = base_url is not None
+    if deployed != (denied_base_url is not None):
+        raise ValueError("denied_deployment_endpoint_must_match_deployment_mode")
+    active_application = _build_acceptance_application(
+        observed_at=observed_at,
+        object_root=object_root,
+        database_url=database_url,
+        deployed=deployed,
+    )
+
+    markets: tuple[FixtureMarket, ...] = ("XTAI", "XNAS")
+    active_commands: dict[FixtureMarket, FixtureEodCommand] = {
+        market: FixtureEodCommand(
+            information_cutoff=information_cutoff,
+            trace_id=f"trace-p1-trace-auth-01-active-{market.lower()}",
+            idempotency_key=f"p1-trace-auth-01-active-{market.lower()}",
+            market=market,
+        )
+        for market in markets
+    }
+    active_outcomes = {
+        market: active_application.run_fixture_eod(command)
+        for market, command in active_commands.items()
+    }
+    object_files_after_allow = {path for path in object_root.rglob("*") if path.is_file()}
+
+    def policy_application(
+        *,
+        status: EntitlementStatus,
+        purposes: frozenset[str],
+        grant_actions: frozenset[str] | None = None,
+        policy_markets: frozenset[str] | None = None,
+    ) -> Application:
+        if deployed:
+            return build_application(
+                observed_at=observed_at,
+                object_root=object_root,
+                database_url=database_url,
+                local_identity=active_application.local_identity,
+                entitlement_states={"XTAI": status},
+                entitlement_purposes={"XTAI": purposes},
+                grant_actions=grant_actions,
+                policy_markets=policy_markets,
+            )
+        return build_test_application(
+            observed_at=observed_at,
+            object_root=object_root,
+            database_url=database_url,
+            local_identity=active_application.local_identity,
+            entitlement_states={"XTAI": status},
+            entitlement_purposes={"XTAI": purposes},
+            grant_actions=grant_actions,
+            policy_markets=policy_markets,
+        )
+
+    matrix_cases: tuple[
+        tuple[
+            EntitlementStatus,
+            frozenset[str],
+            str,
+            frozenset[str] | None,
+            frozenset[str] | None,
+        ],
+        ...,
+    ] = (
+        (
+            "suspended",
+            frozenset({"fixture_research"}),
+            "source_entitlement_suspended",
+            None,
+            None,
+        ),
+        (
+            "expired",
+            frozenset({"fixture_research"}),
+            "source_entitlement_expired",
+            None,
+            None,
+        ),
+        (
+            "revoked",
+            frozenset({"fixture_research"}),
+            "source_entitlement_revoked",
+            None,
+            None,
+        ),
+        ("active", frozenset(), "source_entitlement_purpose_denied", None, None),
+        (
+            "active",
+            frozenset({"fixture_research"}),
+            "action_grant_missing",
+            frozenset(),
+            None,
+        ),
+        (
+            "active",
+            frozenset({"fixture_research"}),
+            "source_policy_unknown",
+            None,
+            frozenset({"XNAS"}),
+        ),
+    )
+    matrix_results: dict[str, bool] = {}
+    matrix_audits: list[dict[str, Any]] = []
+    denied_traces: list[str] = []
+    revoked_application: Application | None = None
+    for status, purposes, expected_reason, grant_actions, policy_markets in matrix_cases:
+        candidate = policy_application(
+            status=status,
+            purposes=purposes,
+            grant_actions=grant_actions,
+            policy_markets=policy_markets,
+        )
+        if status == "revoked":
+            revoked_application = candidate
+        trace_id = f"trace-p1-trace-auth-01-{expected_reason}"
+        denied_traces.append(trace_id)
+        try:
+            candidate.run_fixture_eod(
+                FixtureEodCommand(
+                    information_cutoff=information_cutoff,
+                    trace_id=trace_id,
+                    idempotency_key=trace_id,
+                    market="XTAI",
+                )
+            )
+        except AuthorizationDenied as error:
+            event = candidate.security_audit.list_events(trace_id=trace_id)[0]
+            matrix_audits.append(event)
+            matrix_results[expected_reason] = (
+                error.public_code == "authorization_denied"
+                and error.correlation_id == trace_id
+                and event["reason_code"] == expected_reason
+            )
+        else:
+            matrix_results[expected_reason] = False
+    assert revoked_application is not None
+
+    query_trace = "trace-p1-trace-auth-01-existing-projection-denied"
+    existing_projection_denied = False
+    try:
+        revoked_application.research_query.get_listing_research(
+            listing_id=active_outcomes["XTAI"].listing_id,
+            information_cutoff=information_cutoff,
+            trace_id=query_trace,
+        )
+    except AuthorizationDenied:
+        existing_projection_denied = True
+    restored_record = active_application.research_query.get_listing_research(
+        listing_id=active_outcomes["XTAI"].listing_id,
+        information_cutoff=information_cutoff,
+        trace_id="trace-p1-trace-auth-01-existing-projection-restored",
+    )
+
+    authorization_headers = {
+        "Authorization": active_application.local_identity.credential.authorization_header()
+    }
+    client: HttpClient = (
+        TestClient(
+            create_web_app(revoked_application),
+            headers=authorization_headers,
+            client=("127.0.0.1", 50000),
+        )
+        if denied_base_url is None
+        else Client(base_url=denied_base_url, timeout=10.0, headers=authorization_headers)
+    )
+    cutoff_text = information_cutoff.isoformat().replace("+00:00", "Z")
+    rest_trace = "trace-p1-trace-auth-01-rest-denied"
+    rest_response = client.get(
+        f"/api/v1/research/listings/{active_outcomes['XTAI'].listing_id}",
+        params={"information_cutoff": cutoff_text},
+        headers={**authorization_headers, "X-Trace-Id": rest_trace},
+    )
+    ui_trace = "trace-p1-trace-auth-01-ui-denied"
+    ui_response = client.get(
+        "/research",
+        params={"information_cutoff": cutoff_text},
+        headers={**authorization_headers, "X-Trace-Id": ui_trace},
+    )
+    client.close()
+
+    dagster_trace = "trace-p1-trace-auth-01-dagster-denied"
+    dagster_materialization = materialize(
+        [xtai_fixture_eod_asset],
+        resources={
+            "fixture_runner": ResourceDefinition.hardcoded_resource(
+                FixtureRunner(
+                    revoked_application,
+                    FixtureEodCommand(
+                        information_cutoff=information_cutoff,
+                        trace_id=dagster_trace,
+                        idempotency_key=dagster_trace,
+                        market="XTAI",
+                    ),
+                )
+            )
+        },
+        raise_on_error=False,
+    )
+    dagster_audit = revoked_application.security_audit.list_events(trace_id=dagster_trace)
+    active_audits = [
+        active_application.security_audit.list_events(trace_id=command.trace_id)[0]
+        for command in active_commands.values()
+    ]
+    object_files_after_denial = {path for path in object_root.rglob("*") if path.is_file()}
+    denial_prediction_count = sum(
+        len(revoked_application.state_store.list_prediction_records(trace_id=trace_id))
+        for trace_id in denied_traces + [dagster_trace]
+    )
+    rest_payload = rest_response.json()
+    ui_payload = ui_response.json()
+    checks = {
+        "shared_security_context": all(
+            audit["principal_id"] == active_application.security_context.principal_id
+            for audit in active_audits + matrix_audits
+        ),
+        "active_entitlements_allow": all(
+            outcome.status == "succeeded" for outcome in active_outcomes.values()
+        )
+        and all(audit["outcome"] == "allowed" for audit in active_audits),
+        "same_grant_denial": (
+            active_application.authorization_policy.action_grants[0].version_id
+            == revoked_application.authorization_policy.action_grants[0].version_id
+            and all(
+                audit["grant_version_id"]
+                == active_application.authorization_policy.action_grants[0].version_id
+                for audit in matrix_audits
+                if str(audit["reason_code"]).startswith("source_entitlement_")
+            )
+        ),
+        "decision_matrix_fail_closed": all(matrix_results.values())
+        and set(matrix_results) == {case[2] for case in matrix_cases},
+        "denial_before_persistence": object_files_after_denial == object_files_after_allow
+        and denial_prediction_count == 0,
+        "existing_projection_blocked_not_deleted": existing_projection_denied
+        and restored_record["identity"]["listing_id"] == active_outcomes["XTAI"].listing_id,
+        "rest_problem_redacted": rest_response.status_code == 403
+        and rest_payload["code"] == "authorization_denied"
+        and rest_payload["trace_id"] == rest_trace
+        and "source_entitlement" not in rest_response.text,
+        "ui_problem_redacted": ui_response.status_code == 403
+        and ui_payload["code"] == "authorization_denied"
+        and active_outcomes["XTAI"].listing_id not in ui_response.text
+        and "source_entitlement" not in ui_response.text,
+        "dagster_denial": not dagster_materialization.success
+        and len(dagster_audit) == 1
+        and dagster_audit[0]["reason_code"] == "source_entitlement_revoked",
+        "audit_decision_evidence": all(
+            event.get("decision_id")
+            and event.get("correlation_id")
+            and event.get("grant_version_id")
+            and event.get("source_entitlement_version_id")
+            and (
+                (
+                    event.get("source_policy_version_id") is None
+                    and event.get("data_protection_class") is None
+                    and event.get("reason_code") == "source_policy_unknown"
+                )
+                or (
+                    event.get("source_policy_version_id")
+                    and event.get("data_protection_class") == "internal"
+                )
+            )
+            for event in active_audits + matrix_audits + dagster_audit
+        ),
+    }
+    if dagster_url is not None:
+        checks["dagster_denial"] = checks["dagster_denial"] and (
+            inspect_dagster_deployment(dagster_url).ready
+        )
+    return {
+        "status": "passed" if all(checks.values()) else "failed",
+        "trace_ids": ["P1-TRACE-AUTH-01"],
+        "execution_purpose": "fixture",
+        "formal_source_qualified": False,
+        "formal_prediction": False,
         "checks": checks,
     }

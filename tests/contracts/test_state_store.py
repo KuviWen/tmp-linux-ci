@@ -86,11 +86,10 @@ def test_work_health_and_audit_evidence_survive_application_restart(tmp_path: Pa
             "affected_attempts": 1,
         }
     ]
-    assert restarted.security_audit.list_events(trace_id=trace_id) == [
-        {
-            "action": "fixture_eod_publication",
-            "outcome": "allowed",
-            "reason_code": "fixture_policy_active",
-            "trace_id": trace_id,
-        }
-    ]
+    audit = restarted.security_audit.list_events(trace_id=trace_id)
+    assert len(audit) == 1
+    assert audit[0]["action"] == "fixture_pipeline.execute"
+    assert audit[0]["outcome"] == "allowed"
+    assert audit[0]["reason_code"] == "authorized"
+    assert audit[0]["trace_id"] == trace_id
+    assert audit[0]["source_policy_version_id"] == outcome.source_policy_version_id

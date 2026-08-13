@@ -1,4 +1,4 @@
-name: stock-forecasting-ticket-03
+name: stock-forecasting-ticket-04
 
 x-fixture-information-cutoff: &fixture-information-cutoff '2026-08-12T22:00:00Z'
 x-fixture-collection-observed-at: &fixture-collection-observed-at '2026-08-12T21:55:00Z'
@@ -9,13 +9,18 @@ x-application-environment: &application-environment
   FIXTURE_INFORMATION_CUTOFF: *fixture-information-cutoff
   FIXTURE_COLLECTION_OBSERVED_AT: *fixture-collection-observed-at
   DAGSTER_HOME: /var/lib/dagster
+  RUNTIME_ENVIRONMENT: development
+  PUBLIC_BIND_HOST: 127.0.0.1
+  LOCAL_API_KEY_MODE: enabled
+  LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
 
 x-application: &application
-  image: stock-forecasting-ticket-03-app:0.1.0
+  image: stock-forecasting-ticket-04-app:0.1.0
   environment: *application-environment
   volumes:
     - fixture-objects:/var/lib/stock-forecasting/objects
     - dagster-home:/var/lib/dagster
+    - local-api-key:/run/stock-forecasting
 
 services:
   postgres:
@@ -41,6 +46,51 @@ services:
       postgres:
         condition: service_healthy
 
+  local-key-init:
+    <<: *application
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - local-key
+      - init
+      - --path
+      - /run/stock-forecasting/local-api-key.json
+      - --owner
+      - local-researcher
+      - --environment
+      - development
+      - --scope
+      - fixture_pipeline.execute
+      - --scope
+      - research_prediction.read
+      - --issued-at
+      - '2026-08-12T21:54:00Z'
+      - --expires-at
+      - '2026-09-11T21:54:00Z'
+
+  denied-api:
+    <<: *application
+    profiles: ["acceptance"]
+    environment:
+      <<: *application-environment
+      XTAI_SOURCE_ENTITLEMENT_STATUS: revoked
+    command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "0.0.0.0", "--port", "8001"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      local-key-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/readyz', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   api:
     <<: *application
     build:
@@ -50,6 +100,8 @@ services:
       - '127.0.0.1:8000:8000'
     depends_on:
       migration:
+        condition: service_completed_successfully
+      local-key-init:
         condition: service_completed_successfully
     healthcheck:
       test:
@@ -84,6 +136,8 @@ services:
       migration:
         condition: service_completed_successfully
       dagster-init:
+        condition: service_completed_successfully
+      local-key-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "dagster", "api", "grpc-health-check", "-h", "127.0.0.1", "-p", "4000"]
@@ -144,6 +198,8 @@ services:
     depends_on:
       migration:
         condition: service_completed_successfully
+      local-key-init:
+        condition: service_completed_successfully
 
   acceptance:
     <<: *application
@@ -153,7 +209,7 @@ services:
       - -m
       - stock_forecasting.cli
       - acceptance
-      - ticket-03
+      - ticket-04
       - --database-url
       - postgresql+psycopg://stock@postgres:5432/stock_forecasting
       - --object-root
@@ -166,6 +222,8 @@ services:
       - http://api:8000
       - --dagster-url
       - http://dagster-webserver:3000/graphql
+      - --denied-base-url
+      - http://denied-api:8001
     depends_on:
       api:
         condition: service_healthy
@@ -175,8 +233,13 @@ services:
         condition: service_healthy
       dagster-daemon:
         condition: service_healthy
+      local-key-init:
+        condition: service_completed_successfully
+      denied-api:
+        condition: service_healthy
 
 volumes:
   postgres-data:
   fixture-objects:
   dagster-home:
+  local-api-key:

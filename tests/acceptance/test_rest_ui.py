@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
+import yaml
 from fastapi.testclient import TestClient
 
 from stock_forecasting.adapters.rest import create_web_app
@@ -20,7 +22,12 @@ def _client_with_fixture() -> tuple[TestClient, str, str]:
             idempotency_key="ticket-01-rest",
         )
     )
-    return TestClient(create_web_app(application)), outcome.listing_id, "2026-08-12T07:00:00Z"
+    client = TestClient(
+        create_web_app(application),
+        headers={"Authorization": application.local_identity.credential.authorization_header()},
+        client=("127.0.0.1", 50000),
+    )
+    return client, outcome.listing_id, "2026-08-12T07:00:00Z"
 
 
 def test_rest_matrix_and_listing_detail_expose_fixture_lineage() -> None:
@@ -75,7 +82,11 @@ def test_rest_and_traditional_chinese_matrix_show_both_markets_at_one_cutoff() -
                 market=market,
             )
         )
-    client = TestClient(create_web_app(application))
+    client = TestClient(
+        create_web_app(application),
+        headers={"Authorization": application.local_identity.credential.authorization_header()},
+        client=("127.0.0.1", 50000),
+    )
 
     matrix_response = client.get(
         "/api/v1/research/predictions",
@@ -266,3 +277,24 @@ def test_versioned_openapi_source_is_served_without_a_generated_shadow_contract(
     assert source.headers["content-type"].startswith("application/yaml")
     assert source.text.startswith("openapi: 3.2.0\n")
     assert client.get("/openapi.json").status_code == 404
+
+
+def test_openapi_declares_local_key_authentication_and_stable_denial_responses() -> None:
+    contract = yaml.safe_load(
+        (Path(__file__).parents[2] / "openapi" / "openapi.yaml").read_text(encoding="utf-8")
+    )
+
+    assert contract["components"]["securitySchemes"]["LocalApiKey"] == {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization",
+        "description": "Loopback local/development ApiKey credential.",
+    }
+    for path in (
+        "/api/v1/research/predictions",
+        "/api/v1/research/listings/{listing_id}",
+    ):
+        operation = contract["paths"][path]["get"]
+        assert operation["security"] == [{"LocalApiKey": []}]
+        assert operation["responses"]["401"] == {"$ref": "#/components/responses/ProblemResponse"}
+        assert operation["responses"]["403"] == {"$ref": "#/components/responses/ProblemResponse"}
