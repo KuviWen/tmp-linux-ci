@@ -42,6 +42,11 @@ docker compose --profile acceptance up --build --wait postgres api api-ingress d
 docker compose --profile acceptance run --rm acceptance
 ```
 
+When this runs from a Codex task on Windows, the workspace sandbox can reject Docker Desktop's
+per-user executable even when it is on `PATH`. Follow `docs/agents/docker-acceptance.md`: resolve
+the CLI's absolute path and run the same Compose commands through approved shell escalation. WSL
+is not required for this repository's acceptance seam.
+
 Success is exit code zero and one JSON document with `status` equal to `passed`. The runner
 verifies active allow for both fixture markets, suspended/expired/revoked/purpose-removal
 denials, missing action grant, unknown source policy, no raw/prediction persistence on denial,

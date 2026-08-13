@@ -54,7 +54,7 @@ mutation MaterializeAcceptanceAsset(
       selector: {
         repositoryLocationName: $locationName,
         repositoryName: "__repository__",
-        pipelineName: "__ASSET_JOB__",
+        pipelineName: "__ASSET_JOB",
         assetSelection: [{path: [$assetName]}]
       },
       runConfigData: {}

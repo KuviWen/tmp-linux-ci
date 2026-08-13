@@ -13,7 +13,7 @@ Status: ready-for-agent
 - [x] 相同行動權限配合 active entitlement 時，擷取、FeatureSnapshot、fixture 預測、projection 與授權允許的研究查詢能完整成功。
 - [x] 將 entitlement 改為 suspended／expired／revoked 或移除指定用途後，新的擷取、推論、projection 及展示均在一致位置 fail closed，且不回傳受限 payload。
 - [x] REST 對 caller 只回穩定 problem code 與 correlation ID；受控 audit 保存真實 decision、reason、policy／grant／entitlement version 與 trace。
-- [ ] Dagster、CLI、REST handler、資料庫角色或 platform-admin 身分都不能產生與 AuthorizationPolicy 相反的 allow 結果。
+- [x] Dagster、CLI、REST handler、資料庫角色或 platform-admin 身分都不能產生與 AuthorizationPolicy 相反的 allow 結果。
 - [x] 端到端 decision-matrix 測試同時涵蓋有權限無資格、有資格無權限、未知政策、到期資格與正常 allow，並驗證 workflow、REST、projection 與 audit 一致。
 
 ## Implementation notes
@@ -37,9 +37,13 @@ Status: ready-for-agent
 - Compose 將 migration 與 policy bootstrap 留給 `postgres` 管理角色；執行中服務使用
   non-superuser `stock`，且對 `authorization_policy_sets` 僅有讀取權。部署 acceptance 會查詢
   PostgreSQL 的實際 role privilege。
-- 驗證：`python -m pytest -q`（110 passed、1 個需外部 PostgreSQL 的 integration test
-  skipped）、`python -m mypy src tests`、`python -m ruff check .`、
-  `python -m ruff format --check .`、ticket-04 acceptance runner，以及 Alembic upgrade 均通過。
-- 本機沒有 Docker executable，因此本次未執行 Compose clean-container／PostgreSQL acceptance；
-  Compose 契約測試已通過，但不得將其描述為實際容器執行證據。上方包含資料庫角色的
-  acceptance criterion 因缺少這項外部部署證據而維持未勾選。
+- 驗證：以 `TEST_DATABASE_URL` 連接 `127.0.0.1:55432` 執行 `python -m pytest -q`
+  （111 passed，包含真實 PostgreSQL integration）、`python -m mypy src tests`、
+  `python -m ruff check .` 與 `python -m ruff format --check .` 均通過。
+- 2026-08-14 以 Docker Compose v5.3.1 執行 `docker compose config --quiet`，接著刪除
+  ticket-04 的 disposable volumes，從零啟動 acceptance profile 並執行 runner。結果 exit 0、
+  `status: passed`，12 項檢查全為 `true`，包含真實 REST、Dagster GraphQL、CLI、
+  platform-admin denial 與 PostgreSQL `stock` role least-privilege 證據。
+- 首次 deployed runner 揭露 Dagster GraphQL selector 使用不存在的 `__ASSET_JOB__`；實際
+  repository job 為 `__ASSET_JOB`。以回歸測試固定 selector 後修正，clean-container 重建與
+  deployed runner 隨即通過。

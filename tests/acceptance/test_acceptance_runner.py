@@ -49,11 +49,15 @@ def _dagster_graphql(payload: Any) -> Iterator[str]:
 
 
 @contextmanager
-def _dagster_graphql_sequence(payloads: list[Any]) -> Iterator[str]:
+def _dagster_graphql_sequence(
+    payloads: list[Any], *, requests: list[dict[str, Any]] | None = None
+) -> Iterator[str]:
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             content_length = int(self.headers.get("Content-Length", "0"))
-            json.loads(self.rfile.read(content_length))
+            request = json.loads(self.rfile.read(content_length))
+            if requests is not None:
+                requests.append(request)
             body = json.dumps(payloads.pop(0)).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -110,7 +114,8 @@ def test_deployed_dagster_asset_is_launched_and_observed_to_success() -> None:
         },
     ]
 
-    with _dagster_graphql_sequence(payloads) as dagster_url:
+    requests: list[dict[str, Any]] = []
+    with _dagster_graphql_sequence(payloads, requests=requests) as dagster_url:
         succeeded = materialize_deployed_asset(
             dagster_url,
             location_name="stock_forecasting_denied",
@@ -120,6 +125,8 @@ def test_deployed_dagster_asset_is_launched_and_observed_to_success() -> None:
 
     assert succeeded is True
     assert payloads == []
+    assert 'pipelineName: "__ASSET_JOB"' in requests[0]["query"]
+    assert 'pipelineName: "__ASSET_JOB__"' not in requests[0]["query"]
 
 
 def test_acceptance_rejects_partial_deployment_mode(tmp_path: Path) -> None:
