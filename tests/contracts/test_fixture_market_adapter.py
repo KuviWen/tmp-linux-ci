@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -183,3 +184,30 @@ def test_provider_market_mismatch_fails_closed(tmp_path: Path) -> None:
                 market="XNAS",
             )
         )
+
+
+def test_provider_batch_rejects_a_calendar_for_another_market() -> None:
+    batch = XnasFixtureMarketAdapter().load(datetime(2026, 8, 12, 22, tzinfo=UTC))
+
+    with pytest.raises(ValueError, match="fixture_calendar_market_mismatch"):
+        replace(batch, calendar=replace(batch.calendar, exchange="XTAI"))
+
+
+def test_company_action_payload_and_adjustment_share_one_typed_spec() -> None:
+    batch = XnasFixtureMarketAdapter().load(datetime(2026, 8, 12, 22, tzinfo=UTC))
+    changed = replace(
+        batch,
+        company_action=replace(batch.company_action, value=Decimal("3.00")),
+    )
+
+    assert changed.company_action_payload["split_ratio"] == "3.00"
+    adjusted = changed.adjustment_rule.apply(
+        [
+            {"session_id": "XNAS:2026-01-30", "close": "300.00"},
+            {"session_id": "XNAS:2026-02-02", "close": "100.00"},
+        ]
+    )
+    assert adjusted == [
+        {"session_id": "XNAS:2026-01-30", "adjusted_close": "100.00"},
+        {"session_id": "XNAS:2026-02-02", "adjusted_close": "100.00"},
+    ]
