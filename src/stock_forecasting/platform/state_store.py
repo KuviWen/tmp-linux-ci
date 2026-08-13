@@ -17,6 +17,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.pool import StaticPool
 
+from stock_forecasting.contracts import PublicationDisposition
+
 metadata = MetaData()
 
 research_records = Table(
@@ -141,11 +143,7 @@ class StateStore:
         idempotency_key: str,
         health_assessment_id: str,
         audit_event_id: str,
-        work_status: str,
-        health_scope: str,
-        health_status: str,
-        health_reason_code: str,
-        audit_reason_code: str,
+        operations: PublicationDisposition,
         artifacts: list[dict[str, Any]],
         fixture_predictions: list[dict[str, Any]],
     ) -> None:
@@ -180,7 +178,7 @@ class StateStore:
                     work_attempts.insert().values(
                         work_id=work_id,
                         operation="fixture_eod",
-                        status=work_status,
+                        status=operations.work_status,
                         execution_purpose="fixture",
                         trace_id=trace_id,
                         idempotency_key=idempotency_key,
@@ -190,9 +188,9 @@ class StateStore:
                 connection.execute(
                     health_assessments.insert().values(
                         assessment_id=health_assessment_id,
-                        scope=health_scope,
-                        status=health_status,
-                        reason_code=health_reason_code,
+                        scope=operations.health_scope,
+                        status=operations.health_status,
+                        reason_code=operations.health_reason_code,
                         trace_id=trace_id,
                     )
                 )
@@ -201,7 +199,7 @@ class StateStore:
                         event_id=audit_event_id,
                         action="fixture_eod_publication",
                         outcome="allowed",
-                        reason_code=audit_reason_code,
+                        reason_code=operations.audit_reason_code,
                         trace_id=trace_id,
                     )
                 )

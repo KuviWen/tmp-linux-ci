@@ -3,30 +3,22 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import BytesIO
-from typing import Any, Literal
+from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
-from stock_forecasting.contracts import UnavailableCode
 from stock_forecasting.fixture_dataset import (
     CALENDAR_CLOSURES,
     CALENDAR_REVISION_ID,
     XtaiFixtureDataset,
 )
+from stock_forecasting.fixture_scenarios import FixtureScenario, scenario_policy
 from stock_forecasting.forecasting import FeatureSnapshot, FixtureTrendForecaster, TrendForecaster
+from stock_forecasting.identity import ListingIdentity, TickerAssertion
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository, ObjectRef
 from stock_forecasting.platform.state_store import StateStore
-
-FixtureScenario = Literal[
-    "normal",
-    "late",
-    "duplicate",
-    "correction",
-    "missing",
-    "withdrawal",
-]
 
 
 def _fixture_id(kind: str) -> str:
@@ -96,19 +88,33 @@ class FixtureEodWorkflow:
 
     def execute(self, command: FixtureEodCommand) -> FixtureEodOutcome:
         observed_at = self._observed_at or datetime.now(UTC)
+        policy = scenario_policy(command.fixture_scenario)
         issuer_id = _fixture_id("issuer")
         security_id = _fixture_id("security")
         listing_id = _fixture_id("listing")
-        identity_assertion_id = _fixture_id("identity-assertion-ticker-2330-v1")
         cutoff_text = _instant(command.information_cutoff)
+        identity_timeline = ListingIdentity(
+            listing_id=listing_id,
+            ticker_assertions=(
+                TickerAssertion(
+                    listing_id=listing_id,
+                    ticker="1234",
+                    valid_from=date(2024, 1, 1),
+                    valid_to=date(2025, 8, 12),
+                ),
+                TickerAssertion(
+                    listing_id=listing_id,
+                    ticker="2330",
+                    valid_from=date(2025, 8, 13),
+                    valid_to=None,
+                ),
+            ),
+        )
+        display_ticker = identity_timeline.ticker_at(command.information_cutoff.date())
 
         selection = self._fixture_dataset.select(command.information_cutoff)
         base_records: list[dict[str, object]] = [dict(record) for record in selection.records]
-        raw_records = [dict(record) for record in base_records]
-        if command.fixture_scenario == "correction":
-            raw_records[-1]["close"] = "607.50"
-        elif command.fixture_scenario == "missing":
-            raw_records[-1].pop("close")
+        raw_records = policy.mutate_records(base_records)
         raw_payload = {
             "exchange": "XTAI",
             "listing_id": listing_id,
@@ -131,9 +137,10 @@ class FixtureEodWorkflow:
             "issuer_id": issuer_id,
             "security_id": security_id,
             "listing_id": listing_id,
-            "display_ticker": "2330",
+            "display_ticker": display_ticker,
             "ticker_valid_from": "2025-08-13",
             "ticker_valid_to": None,
+            "ticker_assertions": identity_timeline.assertions_payload(),
         }
         source_policy_payload = {
             "execution_purpose": "fixture",
@@ -156,7 +163,7 @@ class FixtureEodWorkflow:
         }
         base_raw_content = _canonical_bytes(base_raw_payload)
         base_raw_checksum = hashlib.sha256(base_raw_content).hexdigest()
-        if command.fixture_scenario in ("correction", "withdrawal"):
+        if policy.related_base_required:
             self._object_repository.put_verified(
                 BytesIO(base_raw_content),
                 expected_checksum=base_raw_checksum,
@@ -182,29 +189,17 @@ class FixtureEodWorkflow:
         base_source_record_version_id = _version_id(
             "source-record-version", base_source_record_payload
         )
-        source_record_payload = {
+        current_source_record_payload = {
             "raw_artifact_id": raw_artifact_id,
             "source_policy_version_id": source_policy_version_id,
             "record_count": len(selection.sessions),
         }
-        if command.fixture_scenario == "correction":
-            source_record_payload.update(
-                {
-                    "supersedes": base_source_record_version_id,
-                    "revision_number": 2,
-                }
-            )
-        elif command.fixture_scenario == "withdrawal":
-            source_record_payload.update(
-                {
-                    "withdraws": base_source_record_version_id,
-                    "availability": "withdrawn",
-                }
-            )
+        source_record_payload = policy.source_record_payload(
+            current_payload=current_source_record_payload,
+            base_payload=base_source_record_payload,
+            base_version_id=base_source_record_version_id,
+        )
         source_record_version_id = _version_id("source-record-version", source_record_payload)
-        if command.fixture_scenario == "duplicate":
-            source_record_version_id = base_source_record_version_id
-            source_record_payload = base_source_record_payload
         normalized_record_payload = {
             "source_record_version_id": source_record_version_id,
             "schema_version": "xtai-eod-normalized-v1",
@@ -220,20 +215,11 @@ class FixtureEodWorkflow:
             "fixture_scenario": command.fixture_scenario,
         }
         retrieval_receipt_id = _version_id("retrieval-receipt", retrieval_receipt_payload)
-        coverage_status = (
-            "withdrawn"
-            if command.fixture_scenario == "withdrawal"
-            else "incomplete"
-            if command.fixture_scenario == "missing"
-            else "completed"
-        )
         coverage_payload = {
-            "status": coverage_status,
+            "status": policy.coverage_status,
             "expected_partitions": 1,
             "received_partitions": 1,
-            "missing_partitions": (
-                ["anchor_close"] if command.fixture_scenario == "missing" else []
-            ),
+            "missing_partitions": list(policy.missing_partitions),
             "session_count": len(selection.sessions),
             "first_session_id": selection.session_ids[0],
             "last_session_id": selection.session_ids[-1],
@@ -266,13 +252,10 @@ class FixtureEodWorkflow:
             for record in raw_records
             if "close" in record
         ]
-        unavailable_reason: UnavailableCode | None = None
-        if observed_at > command.information_cutoff:
-            unavailable_reason = "post_cutoff_evidence"
-        elif command.fixture_scenario == "withdrawal":
-            unavailable_reason = "source_withdrawn"
-        elif command.fixture_scenario == "missing":
-            unavailable_reason = "missing_anchor_price"
+        unavailable_reason = policy.unavailable_reason(
+            observed_at=observed_at,
+            information_cutoff=command.information_cutoff,
+        )
         adjustment_payload = {
             "input_raw_artifact_id": raw_artifact_id,
             "company_action_version_id": company_action_version_id,
@@ -399,27 +382,7 @@ class FixtureEodWorkflow:
                 },
                 "coverage": coverage_payload,
                 "committed_checkpoint": "xtai-fixture-page:1",
-                **(
-                    {
-                        "duplicate_of": base_source_record_version_id,
-                        "deduplicated": True,
-                    }
-                    if command.fixture_scenario == "duplicate"
-                    else {}
-                ),
-                **(
-                    {
-                        "supersedes": base_source_record_version_id,
-                        "revision_number": 2,
-                    }
-                    if command.fixture_scenario == "correction"
-                    else {}
-                ),
-                **(
-                    {"withdraws": base_source_record_version_id}
-                    if command.fixture_scenario == "withdrawal"
-                    else {}
-                ),
+                **policy.source_evidence(base_source_record_version_id),
             },
             "lineage": {
                 "data_selection_id": data_selection_id,
@@ -433,7 +396,7 @@ class FixtureEodWorkflow:
             "observed_at": _instant(observed_at),
         }
         related_artifacts: list[dict[str, Any]] = []
-        if command.fixture_scenario in ("correction", "withdrawal"):
+        if policy.related_base_required:
             if base_raw_artifact_id != raw_artifact_id:
                 related_artifacts.append(
                     {
@@ -449,37 +412,7 @@ class FixtureEodWorkflow:
                     "payload": base_source_record_payload,
                 }
             )
-        health_scope = (
-            "xtai_fixture_source"
-            if command.fixture_scenario == "normal"
-            else f"xtai_fixture_source/{command.fixture_scenario}"
-        )
-        work_status: str
-        health_status: str
-        health_reason_code: str
-        audit_reason_code: str
-        if unavailable_reason is not None:
-            work_status = "blocked"
-            health_status = "blocked" if unavailable_reason == "source_withdrawn" else "degraded"
-            health_reason_code = (
-                "coverage_incomplete"
-                if unavailable_reason == "missing_anchor_price"
-                else unavailable_reason
-            )
-            audit_reason_code = health_reason_code
-        else:
-            work_status = "succeeded"
-            health_status = "ready"
-            health_reason_code = {
-                "normal": "coverage_complete",
-                "duplicate": "duplicate_deduplicated",
-                "correction": "correction_applied",
-            }.get(command.fixture_scenario, "coverage_complete")
-            audit_reason_code = (
-                "fixture_policy_active"
-                if command.fixture_scenario == "normal"
-                else health_reason_code
-            )
+        disposition = policy.publication_disposition(unavailable_reason)
         artifacts: list[dict[str, Any]] = [
             {"artifact_id": issuer_id, "artifact_kind": "issuer", "payload": {}},
             {
@@ -492,11 +425,14 @@ class FixtureEodWorkflow:
                 "artifact_kind": "listing",
                 "payload": {"security_id": security_id, "exchange": "XTAI"},
             },
-            {
-                "artifact_id": identity_assertion_id,
-                "artifact_kind": "identity_assertion",
-                "payload": {"listing_id": listing_id, "ticker": "2330"},
-            },
+            *[
+                {
+                    "artifact_id": _version_id("identity-assertion", assertion),
+                    "artifact_kind": "identity_assertion",
+                    "payload": assertion,
+                }
+                for assertion in identity_timeline.assertions_payload()
+            ],
             {
                 "artifact_id": source_policy_version_id,
                 "artifact_kind": "source_policy_version",
@@ -578,11 +514,7 @@ class FixtureEodWorkflow:
             idempotency_key=command.idempotency_key,
             health_assessment_id=_fixture_id(f"source-health/{command.idempotency_key}"),
             audit_event_id=_fixture_id(f"audit/{command.idempotency_key}"),
-            work_status=work_status,
-            health_scope=health_scope,
-            health_status=health_status,
-            health_reason_code=health_reason_code,
-            audit_reason_code=audit_reason_code,
+            operations=disposition,
             artifacts=artifacts,
             fixture_predictions=[
                 {
@@ -601,12 +533,12 @@ class FixtureEodWorkflow:
         )
 
         return FixtureEodOutcome(
-            status=work_status,
+            status=disposition.work_status,
             execution_purpose="fixture",
             issuer_id=issuer_id,
             security_id=security_id,
             listing_id=listing_id,
-            display_ticker="2330",
+            display_ticker=display_ticker,
             calendar_version_id=calendar_version_id,
             adjustment_version_id=adjustment_version_id,
             source_policy_version_id=source_policy_version_id,

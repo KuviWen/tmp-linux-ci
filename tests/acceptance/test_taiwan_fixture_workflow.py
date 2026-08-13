@@ -9,7 +9,9 @@ from uuid import UUID
 import pytest
 
 from stock_forecasting.application import build_test_application
-from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureScenario
+from stock_forecasting.fixture_scenarios import FixtureScenario
+from stock_forecasting.identity import ListingIdentity
+from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand
 
 
@@ -42,6 +44,26 @@ def test_xtai_fixture_identity_calendar_and_adjustment_are_visible_after_eod() -
         "display_ticker": "2330",
         "ticker_valid_from": "2025-08-13",
         "ticker_valid_to": None,
+        "ticker_assertions": [
+            {
+                "listing_id": outcome.listing_id,
+                "ticker": "1234",
+                "valid_from": "2024-01-01",
+                "valid_to": "2025-08-12",
+            },
+            {
+                "listing_id": outcome.listing_id,
+                "ticker": "2330",
+                "valid_from": "2025-08-13",
+                "valid_to": None,
+            },
+        ],
+    }
+    identity = ListingIdentity.from_payload(research["identity"])
+    assert identity.ticker_at(datetime(2025, 8, 12, tzinfo=UTC).date()) == "1234"
+    assert identity.ticker_at(datetime(2025, 8, 13, tzinfo=UTC).date()) == "2330"
+    assert {assertion.listing_id for assertion in identity.ticker_assertions} == {
+        outcome.listing_id
     }
     calendar = research["calendar"]
     assert calendar["exchange"] == "XTAI"
@@ -237,7 +259,7 @@ def test_adversarial_collection_versions_traverse_the_same_vertical_path(
         "reason_code": "source_withdrawn",
         "affected_attempts": 1,
     }
-    assert operations["withdrawal"]["audit"][0]["reason_code"] == "source_withdrawn"
+    assert operations["withdrawal"]["audit"][0]["reason_code"] == "fixture_policy_active"
 
 
 @pytest.mark.parametrize(

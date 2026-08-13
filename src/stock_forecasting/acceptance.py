@@ -12,7 +12,8 @@ from httpx import Client
 from stock_forecasting.adapters.dagster import FixtureRunner, xtai_fixture_eod_asset
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import build_application, build_test_application
-from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureScenario
+from stock_forecasting.fixture_scenarios import FixtureScenario
+from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand, FixtureUseTarget
 
 
@@ -196,9 +197,12 @@ def run_ticket_01(
             and scenario_operations["late"]["work"]["status"] == "blocked"
             and scenario_operations["missing"]["health"]["reason_code"] == "coverage_incomplete"
             and scenario_operations["withdrawal"]["health"]["status"] == "blocked"
-            and scenario_operations["withdrawal"]["audit"]["reason_code"] == "source_withdrawn"
+            and scenario_operations["withdrawal"]["audit"]["reason_code"] == "fixture_policy_active"
         ),
-        "immutable_identity": outcome.listing_id != outcome.display_ticker,
+        "immutable_identity": outcome.listing_id != outcome.display_ticker
+        and len(research["identity"]["ticker_assertions"]) == 2
+        and {assertion["listing_id"] for assertion in research["identity"]["ticker_assertions"]}
+        == {outcome.listing_id},
         "xtai_253_sessions": research["calendar"]["session_count"] == 253,
         "raw_evidence_durable": object_stat["checksum"] == outcome.raw_object_ref.checksum,
         "checkpoint_committed": research["source_evidence"]["committed_checkpoint"]

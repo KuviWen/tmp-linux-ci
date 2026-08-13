@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Literal, TypedDict
 
 UnavailableCode = Literal[
@@ -5,6 +6,15 @@ UnavailableCode = Literal[
     "post_cutoff_evidence",
     "source_withdrawn",
 ]
+
+
+@dataclass(frozen=True)
+class PublicationDisposition:
+    work_status: Literal["succeeded", "blocked"]
+    health_scope: str
+    health_status: Literal["ready", "degraded", "blocked"]
+    health_reason_code: str
+    audit_reason_code: str = "fixture_policy_active"
 
 
 class ProbabilityVector(TypedDict):
