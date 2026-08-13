@@ -4,13 +4,7 @@ from dataclasses import dataclass
 from math import log
 from typing import Literal, Protocol
 
-from stock_forecasting.contracts import PredictionPayload, ProbabilityVector
-
-UnavailableCode = Literal[
-    "missing_anchor_price",
-    "post_cutoff_evidence",
-    "source_withdrawn",
-]
+from stock_forecasting.contracts import PredictionPayload, ProbabilityVector, UnavailableCode
 
 
 @dataclass(frozen=True)

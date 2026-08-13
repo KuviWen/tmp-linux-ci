@@ -1,5 +1,11 @@
 from typing import Literal, TypedDict
 
+UnavailableCode = Literal[
+    "missing_anchor_price",
+    "post_cutoff_evidence",
+    "source_withdrawn",
+]
+
 
 class ProbabilityVector(TypedDict):
     up: float
@@ -12,11 +18,7 @@ class DataSupport(TypedDict):
 
 
 class UnavailableReason(TypedDict):
-    code: Literal[
-        "missing_anchor_price",
-        "post_cutoff_evidence",
-        "source_withdrawn",
-    ]
+    code: UnavailableCode
 
 
 class AvailablePrediction(TypedDict):

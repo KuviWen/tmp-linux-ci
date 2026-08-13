@@ -141,6 +141,11 @@ class StateStore:
         idempotency_key: str,
         health_assessment_id: str,
         audit_event_id: str,
+        work_status: str,
+        health_scope: str,
+        health_status: str,
+        health_reason_code: str,
+        audit_reason_code: str,
         artifacts: list[dict[str, Any]],
         fixture_predictions: list[dict[str, Any]],
     ) -> None:
@@ -175,7 +180,7 @@ class StateStore:
                     work_attempts.insert().values(
                         work_id=work_id,
                         operation="fixture_eod",
-                        status="succeeded",
+                        status=work_status,
                         execution_purpose="fixture",
                         trace_id=trace_id,
                         idempotency_key=idempotency_key,
@@ -185,9 +190,9 @@ class StateStore:
                 connection.execute(
                     health_assessments.insert().values(
                         assessment_id=health_assessment_id,
-                        scope="xtai_fixture_source",
-                        status="ready",
-                        reason_code="coverage_complete",
+                        scope=health_scope,
+                        status=health_status,
+                        reason_code=health_reason_code,
                         trace_id=trace_id,
                     )
                 )
@@ -196,7 +201,7 @@ class StateStore:
                         event_id=audit_event_id,
                         action="fixture_eod_publication",
                         outcome="allowed",
-                        reason_code="fixture_policy_active",
+                        reason_code=audit_reason_code,
                         trace_id=trace_id,
                     )
                 )
@@ -418,6 +423,7 @@ class StateStore:
         return {
             "execution_purpose": artifacts[0]["execution_purpose"],
             "artifact_kinds": [artifact["artifact_kind"] for artifact in artifacts],
+            "artifact_ids": [artifact["artifact_id"] for artifact in artifacts],
             "lineage_ids": {
                 lineage_kinds[artifact["artifact_kind"]]: artifact["artifact_id"]
                 for artifact in artifacts

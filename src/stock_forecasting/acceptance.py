@@ -71,6 +71,7 @@ def run_ticket_01(
         "withdrawal": observed_at + timedelta(minutes=4),
     }
     scenario_records: dict[str, dict[str, Any]] = {}
+    scenario_operations: dict[str, dict[str, Any]] = {}
     for scenario, scenario_time in scenario_observed_at.items():
         if base_url is None:
             scenario_application = build_test_application(
@@ -97,6 +98,15 @@ def run_ticket_01(
             information_cutoff=information_cutoff,
             fixture_scenario=scenario,
         )
+        scenario_operations[scenario] = {
+            "work": scenario_application.operations_control.get_work(scenario_outcome.work_id),
+            "health": scenario_application.operations_control.list_health(
+                scope=f"xtai_fixture_source/{scenario}"
+            )[0],
+            "audit": scenario_application.security_audit.list_events(
+                trace_id=f"trace-p1-trace-tw-01-{scenario}"
+            )[0],
+        }
     research = application.research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=information_cutoff,
@@ -183,6 +193,10 @@ def run_ticket_01(
             == "missing_anchor_price"
             and scenario_records["withdrawal"]["predictions"][0]["unavailable_reason"]["code"]
             == "source_withdrawn"
+            and scenario_operations["late"]["work"]["status"] == "blocked"
+            and scenario_operations["missing"]["health"]["reason_code"] == "coverage_incomplete"
+            and scenario_operations["withdrawal"]["health"]["status"] == "blocked"
+            and scenario_operations["withdrawal"]["audit"]["reason_code"] == "source_withdrawn"
         ),
         "immutable_identity": outcome.listing_id != outcome.display_ticker,
         "xtai_253_sessions": research["calendar"]["session_count"] == 253,

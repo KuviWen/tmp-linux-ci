@@ -9,6 +9,7 @@ from io import BytesIO
 from typing import Any, Literal
 from uuid import NAMESPACE_URL, uuid5
 
+from stock_forecasting.contracts import UnavailableCode
 from stock_forecasting.fixture_dataset import (
     CALENDAR_CLOSURES,
     CALENDAR_REVISION_ID,
@@ -85,13 +86,12 @@ class FixtureEodWorkflow:
         *,
         observed_at: datetime | None,
         object_repository: FilesystemObjectRepository,
-        fixture_dataset: XtaiFixtureDataset | None = None,
         forecaster: TrendForecaster | None = None,
     ) -> None:
         self._state_store = state_store
         self._observed_at = observed_at
         self._object_repository = object_repository
-        self._fixture_dataset = fixture_dataset or XtaiFixtureDataset.load()
+        self._fixture_dataset = XtaiFixtureDataset.load()
         self._forecaster = forecaster or FixtureTrendForecaster()
 
     def execute(self, command: FixtureEodCommand) -> FixtureEodOutcome:
@@ -154,14 +154,25 @@ class FixtureEodWorkflow:
             "records": base_records,
             "price_kind": "unadjusted",
         }
-        base_raw_checksum = hashlib.sha256(_canonical_bytes(base_raw_payload)).hexdigest()
+        base_raw_content = _canonical_bytes(base_raw_payload)
+        base_raw_checksum = hashlib.sha256(base_raw_content).hexdigest()
+        if command.fixture_scenario in ("correction", "withdrawal"):
+            self._object_repository.put_verified(
+                BytesIO(base_raw_content),
+                expected_checksum=base_raw_checksum,
+                metadata={
+                    "media_type": "application/json",
+                    "source": "xtai-fixture",
+                },
+            )
+        base_raw_artifact_payload = {
+            "checksum": base_raw_checksum,
+            "object_id": f"sha256:{base_raw_checksum}",
+            "price_kind": "unadjusted",
+        }
         base_raw_artifact_id = _version_id(
             "raw-artifact",
-            {
-                "checksum": base_raw_checksum,
-                "object_id": f"sha256:{base_raw_checksum}",
-                "price_kind": "unadjusted",
-            },
+            base_raw_artifact_payload,
         )
         base_source_record_payload = {
             "raw_artifact_id": base_raw_artifact_id,
@@ -255,14 +266,7 @@ class FixtureEodWorkflow:
             for record in raw_records
             if "close" in record
         ]
-        unavailable_reason: (
-            Literal[
-                "missing_anchor_price",
-                "post_cutoff_evidence",
-                "source_withdrawn",
-            ]
-            | None
-        ) = None
+        unavailable_reason: UnavailableCode | None = None
         if observed_at > command.information_cutoff:
             unavailable_reason = "post_cutoff_evidence"
         elif command.fixture_scenario == "withdrawal":
@@ -428,6 +432,54 @@ class FixtureEodWorkflow:
             "predictions": predictions,
             "observed_at": _instant(observed_at),
         }
+        related_artifacts: list[dict[str, Any]] = []
+        if command.fixture_scenario in ("correction", "withdrawal"):
+            if base_raw_artifact_id != raw_artifact_id:
+                related_artifacts.append(
+                    {
+                        "artifact_id": base_raw_artifact_id,
+                        "artifact_kind": "raw_artifact",
+                        "payload": base_raw_artifact_payload,
+                    }
+                )
+            related_artifacts.append(
+                {
+                    "artifact_id": base_source_record_version_id,
+                    "artifact_kind": "source_record_version",
+                    "payload": base_source_record_payload,
+                }
+            )
+        health_scope = (
+            "xtai_fixture_source"
+            if command.fixture_scenario == "normal"
+            else f"xtai_fixture_source/{command.fixture_scenario}"
+        )
+        work_status: str
+        health_status: str
+        health_reason_code: str
+        audit_reason_code: str
+        if unavailable_reason is not None:
+            work_status = "blocked"
+            health_status = "blocked" if unavailable_reason == "source_withdrawn" else "degraded"
+            health_reason_code = (
+                "coverage_incomplete"
+                if unavailable_reason == "missing_anchor_price"
+                else unavailable_reason
+            )
+            audit_reason_code = health_reason_code
+        else:
+            work_status = "succeeded"
+            health_status = "ready"
+            health_reason_code = {
+                "normal": "coverage_complete",
+                "duplicate": "duplicate_deduplicated",
+                "correction": "correction_applied",
+            }.get(command.fixture_scenario, "coverage_complete")
+            audit_reason_code = (
+                "fixture_policy_active"
+                if command.fixture_scenario == "normal"
+                else health_reason_code
+            )
         artifacts: list[dict[str, Any]] = [
             {"artifact_id": issuer_id, "artifact_kind": "issuer", "payload": {}},
             {
@@ -450,6 +502,7 @@ class FixtureEodWorkflow:
                 "artifact_kind": "source_policy_version",
                 "payload": source_policy_payload,
             },
+            *related_artifacts,
             {
                 "artifact_id": raw_artifact_id,
                 "artifact_kind": "raw_artifact",
@@ -525,6 +578,11 @@ class FixtureEodWorkflow:
             idempotency_key=command.idempotency_key,
             health_assessment_id=_fixture_id(f"source-health/{command.idempotency_key}"),
             audit_event_id=_fixture_id(f"audit/{command.idempotency_key}"),
+            work_status=work_status,
+            health_scope=health_scope,
+            health_status=health_status,
+            health_reason_code=health_reason_code,
+            audit_reason_code=audit_reason_code,
             artifacts=artifacts,
             fixture_predictions=[
                 {
@@ -543,7 +601,7 @@ class FixtureEodWorkflow:
         )
 
         return FixtureEodOutcome(
-            status="succeeded",
+            status=work_status,
             execution_purpose="fixture",
             issuer_id=issuer_id,
             security_id=security_id,

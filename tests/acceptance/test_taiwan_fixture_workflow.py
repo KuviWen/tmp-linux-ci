@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import UUID
+
+import pytest
 
 from stock_forecasting.application import build_test_application
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureScenario
@@ -169,6 +172,7 @@ def test_adversarial_collection_versions_traverse_the_same_vertical_path(
         "withdrawal": datetime(2026, 8, 12, 6, 54, tzinfo=UTC),
     }
     records = {}
+    operations: dict[FixtureScenario, dict[str, Any]] = {}
     for scenario, observed_at in observed_times.items():
         application = build_test_application(
             observed_at=observed_at,
@@ -188,6 +192,17 @@ def test_adversarial_collection_versions_traverse_the_same_vertical_path(
             information_cutoff=cutoff,
             fixture_scenario=scenario,
         )
+        operations[scenario] = {
+            "work": application.operations_control.get_work(outcome.work_id),
+            "health": application.operations_control.list_health(
+                scope=(
+                    "xtai_fixture_source"
+                    if scenario == "normal"
+                    else f"xtai_fixture_source/{scenario}"
+                )
+            ),
+            "audit": application.security_audit.list_events(trace_id=f"trace-ticket-01-{scenario}"),
+        }
 
     normal_source = records["normal"]["source_evidence"]["source_record_version_id"]
     assert records["normal"]["predictions"][0]["prediction_status"] == "full"
@@ -210,6 +225,50 @@ def test_adversarial_collection_versions_traverse_the_same_vertical_path(
         "source_withdrawn"
     )
     assert records["withdrawal"]["source_evidence"]["withdraws"] == normal_source
+    assert operations["normal"]["work"]["status"] == "succeeded"
+    assert operations["duplicate"]["health"][0]["reason_code"] == "duplicate_deduplicated"
+    assert operations["correction"]["health"][0]["reason_code"] == "correction_applied"
+    assert operations["late"]["work"]["status"] == "blocked"
+    assert operations["late"]["health"][0]["reason_code"] == "post_cutoff_evidence"
+    assert operations["missing"]["health"][0]["reason_code"] == "coverage_incomplete"
+    assert operations["withdrawal"]["health"][0] == {
+        "scope": "xtai_fixture_source/withdrawal",
+        "status": "blocked",
+        "reason_code": "source_withdrawn",
+        "affected_attempts": 1,
+    }
+    assert operations["withdrawal"]["audit"][0]["reason_code"] == "source_withdrawn"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "reference_field"),
+    [("correction", "supersedes"), ("withdrawal", "withdraws")],
+)
+def test_standalone_revision_publishes_the_version_it_references(
+    scenario: FixtureScenario,
+    reference_field: str,
+) -> None:
+    cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+    trace_id = f"trace-ticket-01-standalone-{scenario}"
+    application = build_test_application(observed_at=cutoff)
+
+    outcome = application.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=cutoff,
+            trace_id=trace_id,
+            idempotency_key=f"ticket-01-standalone-{scenario}",
+            fixture_scenario=scenario,
+        )
+    )
+
+    record = application.research_query.get_listing_research(
+        listing_id=outcome.listing_id,
+        information_cutoff=cutoff,
+        fixture_scenario=scenario,
+    )
+    trace_evidence = application.operations_control.get_trace_evidence(trace_id)
+    assert record["source_evidence"][reference_field] in trace_evidence["artifact_ids"]
+    assert trace_evidence["artifact_kinds"].count("source_record_version") == 2
 
 
 def test_fixture_eod_pins_lineage_and_publishes_three_horizon_probabilities() -> None:
