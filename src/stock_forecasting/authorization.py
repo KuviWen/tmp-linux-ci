@@ -16,24 +16,18 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 RuntimeEnvironment = Literal["local", "development", "test", "staging", "production"]
 EntitlementStatus = Literal["draft", "under_review", "active", "suspended", "expired", "revoked"]
 DataProtectionClass = Literal["public_source", "internal", "licensed", "restricted", "secret"]
+AuthorizationAction = Literal["fixture_pipeline.execute", "research_prediction.read"]
+AuthorizationPurpose = Literal["fixture_research"]
+AuthorizationResourceState = Literal["active"]
 
 _LOCAL_KEY_ENVIRONMENTS = frozenset({"local", "development"})
-_TRUST_PROOF = object()
+_CONTEXT_ISSUER = object()
 
 
 class IdentityVerificationError(RuntimeError):
     def __init__(self, reason_code: str) -> None:
         super().__init__(reason_code)
         self.reason_code = reason_code
-
-
-class AuthorizationDenied(RuntimeError):
-    public_code = "authorization_denied"
-
-    def __init__(self, decision: AuthorizationDecision) -> None:
-        super().__init__(self.public_code)
-        self.decision_id = decision.decision_id
-        self.correlation_id = decision.correlation_id
 
 
 @dataclass(frozen=True)
@@ -48,22 +42,47 @@ class LocalApiKeyCredential:
         return f"LocalApiKeyCredential(key_id={self.key_id!r}, secret=<redacted>)"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class SecurityContext:
     principal_id: str
     credential_id: str
     owner: str
     environment: RuntimeEnvironment
-    scopes: frozenset[str]
+    scopes: frozenset[AuthorizationAction]
     data_protection_classes: frozenset[DataProtectionClass]
     issued_at: datetime
     expires_at: datetime
     authentication_method: Literal["local_api_key"]
-    _proof: object
+
+    def __init__(
+        self,
+        *,
+        principal_id: str,
+        credential_id: str,
+        owner: str,
+        environment: RuntimeEnvironment,
+        scopes: frozenset[AuthorizationAction],
+        data_protection_classes: frozenset[DataProtectionClass],
+        issued_at: datetime,
+        expires_at: datetime,
+        authentication_method: Literal["local_api_key"],
+        _issuer: object | None = None,
+    ) -> None:
+        if _issuer is not _CONTEXT_ISSUER:
+            raise TypeError("trusted_security_context_factory_required")
+        object.__setattr__(self, "principal_id", principal_id)
+        object.__setattr__(self, "credential_id", credential_id)
+        object.__setattr__(self, "owner", owner)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "scopes", scopes)
+        object.__setattr__(self, "data_protection_classes", data_protection_classes)
+        object.__setattr__(self, "issued_at", issued_at)
+        object.__setattr__(self, "expires_at", expires_at)
+        object.__setattr__(self, "authentication_method", authentication_method)
 
     @property
     def trusted(self) -> bool:
-        return self._proof is _TRUST_PROOF
+        return True
 
 
 @dataclass(frozen=True)
@@ -72,7 +91,7 @@ class LocalApiKeyVerifier:
     principal_id: str
     owner: str
     environment: RuntimeEnvironment
-    scopes: frozenset[str]
+    scopes: frozenset[AuthorizationAction]
     data_protection_classes: frozenset[DataProtectionClass]
     issued_at: datetime
     expires_at: datetime
@@ -86,7 +105,7 @@ class LocalApiKeyVerifier:
         *,
         owner: str,
         environment: RuntimeEnvironment,
-        scopes: set[str],
+        scopes: set[AuthorizationAction],
         issued_at: datetime,
         expires_at: datetime,
         data_protection_classes: set[DataProtectionClass] | None = None,
@@ -104,7 +123,7 @@ class LocalApiKeyVerifier:
         if expires_at - issued_at > timedelta(days=30):
             raise ValueError("local_api_key_lifetime_exceeded")
         key_id = str(uuid4())
-        principal_id = str(uuid5(NAMESPACE_URL, f"stock-forecasting/local-key/{owner}/{key_id}"))
+        principal_id = str(uuid5(NAMESPACE_URL, f"stock-forecasting/local-principal/{owner}"))
         secret = secrets.token_urlsafe(32)
         pepper = secrets.token_bytes(32)
         digest = hmac.new(pepper, secret.encode("utf-8"), hashlib.sha256).digest()
@@ -170,7 +189,7 @@ class LocalApiKeyVerifier:
             issued_at=self.issued_at,
             expires_at=self.expires_at,
             authentication_method="local_api_key",
-            _proof=_TRUST_PROOF,
+            _issuer=_CONTEXT_ISSUER,
         )
 
 
@@ -186,7 +205,7 @@ class LocalApiKeyIdentity:
         *,
         owner: str,
         environment: RuntimeEnvironment,
-        scopes: set[str],
+        scopes: set[AuthorizationAction],
         issued_at: datetime,
         expires_at: datetime,
         data_protection_classes: set[DataProtectionClass] | None = None,
@@ -248,7 +267,10 @@ class LocalApiKeyIdentity:
                 or environment not in _LOCAL_KEY_ENVIRONMENTS
                 or not isinstance(scopes, list)
                 or not scopes
-                or not all(isinstance(scope, str) for scope in scopes)
+                or not all(
+                    scope in {"fixture_pipeline.execute", "research_prediction.read"}
+                    for scope in scopes
+                )
                 or not isinstance(data_protection_classes, list)
                 or not data_protection_classes
                 or not all(
@@ -269,10 +291,10 @@ class LocalApiKeyIdentity:
         pepper = secrets.token_bytes(32)
         verifier = LocalApiKeyVerifier(
             key_id=key_id,
-            principal_id=str(uuid5(NAMESPACE_URL, f"stock-forecasting/local-key/{owner}/{key_id}")),
+            principal_id=str(uuid5(NAMESPACE_URL, f"stock-forecasting/local-principal/{owner}")),
             owner=owner,
             environment=cast(RuntimeEnvironment, environment),
-            scopes=frozenset(cast(list[str], scopes)),
+            scopes=frozenset(cast(list[AuthorizationAction], scopes)),
             data_protection_classes=frozenset(
                 cast(list[DataProtectionClass], data_protection_classes)
             ),
@@ -299,7 +321,7 @@ class LocalApiKeyIdentity:
 class ActionGrant:
     version_id: str
     principal_id: str
-    actions: frozenset[str]
+    actions: frozenset[AuthorizationAction]
     environment: RuntimeEnvironment
     valid_from: datetime
     valid_to: datetime
@@ -309,11 +331,11 @@ class ActionGrant:
 class SourcePolicyVersion:
     version_id: str
     dataset_id: str
-    allowed_actions: frozenset[str]
-    purposes: frozenset[str]
-    environments: frozenset[str]
+    allowed_actions: frozenset[AuthorizationAction]
+    purposes: frozenset[AuthorizationPurpose]
+    environments: frozenset[RuntimeEnvironment]
     data_protection_class: DataProtectionClass
-    resource_states: frozenset[str]
+    resource_states: frozenset[AuthorizationResourceState]
 
 
 @dataclass(frozen=True)
@@ -322,20 +344,20 @@ class SourceEntitlement:
     principal_id: str
     dataset_id: str
     status: EntitlementStatus
-    allowed_actions: frozenset[str]
-    purposes: frozenset[str]
-    environments: frozenset[str]
+    allowed_actions: frozenset[AuthorizationAction]
+    purposes: frozenset[AuthorizationPurpose]
+    environments: frozenset[RuntimeEnvironment]
     valid_from: datetime
     valid_to: datetime
 
 
 @dataclass(frozen=True)
 class OperationIntent:
-    action: str
+    action: AuthorizationAction
     dataset_id: str
-    purpose: str
+    purpose: AuthorizationPurpose
     environment: RuntimeEnvironment
-    resource_state: str
+    resource_state: AuthorizationResourceState
     evaluated_at: datetime
     trace_id: str
     correlation_id: str
@@ -343,13 +365,16 @@ class OperationIntent:
 
 @dataclass(frozen=True)
 class AuthorizationDecision:
+    evaluation_id: str
     decision_id: str
     allowed: bool
     reason_code: str
     principal_id: str
-    action: str
+    credential_id: str
+    authentication_method: Literal["local_api_key"]
+    action: AuthorizationAction
     dataset_id: str
-    purpose: str
+    purpose: AuthorizationPurpose
     environment: RuntimeEnvironment
     grant_version_id: str | None
     source_policy_version_id: str | None
@@ -361,11 +386,34 @@ class AuthorizationDecision:
     valid_until: datetime
 
 
+@dataclass(frozen=True)
+class PolicyDeniedOutcome:
+    decision_id: str
+    correlation_id: str
+    status: Literal["policy_denied"] = field(default="policy_denied", init=False)
+    code: Literal["authorization_denied"] = field(default="authorization_denied", init=False)
+
+    @classmethod
+    def from_decision(cls, decision: AuthorizationDecision) -> PolicyDeniedOutcome:
+        return cls(
+            decision_id=decision.decision_id,
+            correlation_id=decision.correlation_id,
+        )
+
+
+def _instant(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
 def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, str | None]:
     return {
+        "evaluation_id": decision.evaluation_id,
         "decision_id": decision.decision_id,
         "correlation_id": decision.correlation_id,
         "principal_id": decision.principal_id,
+        "credential_id": decision.credential_id,
+        "authentication_method": decision.authentication_method,
+        "dataset_id": decision.dataset_id,
         "purpose": decision.purpose,
         "environment": decision.environment,
         "grant_version_id": decision.grant_version_id,
@@ -374,6 +422,8 @@ def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, st
         "data_protection_class": decision.data_protection_class,
         "action": decision.action,
         "reason_code": decision.reason_code,
+        "evaluated_at": _instant(decision.evaluated_at),
+        "valid_until": _instant(decision.valid_until),
     }
 
 
@@ -473,10 +523,13 @@ class AuthorizationPolicy:
         if allowed and grant is not None and entitlement is not None:
             valid_until = min(context.expires_at, grant.valid_to, entitlement.valid_to)
         return AuthorizationDecision(
+            evaluation_id=str(uuid4()),
             decision_id=str(uuid5(NAMESPACE_URL, f"stock-forecasting/authz/{decision_identity}")),
             allowed=allowed,
             reason_code=reason_code,
             principal_id=context.principal_id,
+            credential_id=context.credential_id,
+            authentication_method=context.authentication_method,
             action=intent.action,
             dataset_id=intent.dataset_id,
             purpose=intent.purpose,
@@ -509,6 +562,16 @@ def fixture_dataset_id(market: str) -> str:
         raise ValueError("unknown_fixture_market") from error
 
 
+def _contract_version_id(kind: str, payload: Mapping[str, object]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return str(uuid5(NAMESPACE_URL, f"stock-forecasting/{kind}/{canonical}"))
+
+
 def build_fixture_authorization_policy(
     context: SecurityContext,
     *,
@@ -520,17 +583,25 @@ def build_fixture_authorization_policy(
     states = entitlement_states or {}
     purposes = entitlement_purposes or {}
     known_markets = policy_markets or frozenset({"XTAI", "XNAS"})
-    actions = frozenset({"fixture_pipeline.execute", "research_prediction.read"})
-    resolved_grant_actions = actions if grant_actions is None else grant_actions
+    actions: frozenset[AuthorizationAction] = frozenset(
+        {"fixture_pipeline.execute", "research_prediction.read"}
+    )
+    if grant_actions is not None and not grant_actions <= actions:
+        raise ValueError("unknown_authorization_action")
+    resolved_grant_actions = (
+        actions
+        if grant_actions is None
+        else frozenset(cast(frozenset[AuthorizationAction], grant_actions))
+    )
+    grant_payload: dict[str, object] = {
+        "principal_id": context.principal_id,
+        "actions": sorted(resolved_grant_actions),
+        "environment": context.environment,
+        "valid_from": _instant(context.issued_at),
+        "valid_to": _instant(context.expires_at),
+    }
     grant = ActionGrant(
-        version_id=str(
-            uuid5(
-                NAMESPACE_URL,
-                "stock-forecasting/action-grant/"
-                f"{context.principal_id}/fixture-research/"
-                f"{'-'.join(sorted(resolved_grant_actions)) or 'no-actions'}",
-            )
-        ),
+        version_id=_contract_version_id("action-grant", grant_payload),
         principal_id=context.principal_id,
         actions=resolved_grant_actions,
         environment=context.environment,
@@ -543,14 +614,17 @@ def build_fixture_authorization_policy(
         dataset_id = fixture_dataset_id(market)
         namespace = market.lower()
         if market in known_markets:
+            policy_payload: dict[str, object] = {
+                "dataset_id": dataset_id,
+                "allowed_actions": sorted(actions),
+                "purposes": ["fixture_research"],
+                "environments": [context.environment],
+                "data_protection_class": "internal",
+                "resource_states": ["active"],
+            }
             source_policies.append(
                 SourcePolicyVersion(
-                    version_id=str(
-                        uuid5(
-                            NAMESPACE_URL,
-                            f"stock-forecasting/{namespace}/source-policy/fixture-research-v1",
-                        )
-                    ),
+                    version_id=_contract_version_id(f"{namespace}/source-policy", policy_payload),
                     dataset_id=dataset_id,
                     allowed_actions=actions,
                     purposes=frozenset({"fixture_research"}),
@@ -560,16 +634,24 @@ def build_fixture_authorization_policy(
                 )
             )
         state = states.get(market, "active")
-        allowed_purposes = purposes.get(market, frozenset({"fixture_research"}))
+        configured_purposes = purposes.get(market, frozenset({"fixture_research"}))
+        if not configured_purposes <= {"fixture_research"}:
+            raise ValueError("unknown_authorization_purpose")
+        allowed_purposes = frozenset(cast(frozenset[AuthorizationPurpose], configured_purposes))
+        entitlement_payload: dict[str, object] = {
+            "principal_id": context.principal_id,
+            "dataset_id": dataset_id,
+            "status": state,
+            "allowed_actions": sorted(actions),
+            "purposes": sorted(allowed_purposes),
+            "environments": [context.environment],
+            "valid_from": _instant(context.issued_at),
+            "valid_to": _instant(context.expires_at),
+        }
         source_entitlements.append(
             SourceEntitlement(
-                version_id=str(
-                    uuid5(
-                        NAMESPACE_URL,
-                        "stock-forecasting/"
-                        f"{namespace}/source-entitlement/{context.principal_id}/"
-                        f"{state}/{'-'.join(sorted(allowed_purposes)) or 'no-purpose'}",
-                    )
+                version_id=_contract_version_id(
+                    f"{namespace}/source-entitlement", entitlement_payload
                 ),
                 principal_id=context.principal_id,
                 dataset_id=dataset_id,

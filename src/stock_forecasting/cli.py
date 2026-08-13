@@ -4,7 +4,7 @@ import argparse
 import json
 from collections.abc import Sequence
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from stock_forecasting.acceptance import (
@@ -51,9 +51,14 @@ def _parser() -> argparse.ArgumentParser:
         choices=["local", "development"],
         required=True,
     )
-    local_key_init.add_argument("--scope", action="append", required=True)
-    local_key_init.add_argument("--issued-at", type=_instant, required=True)
-    local_key_init.add_argument("--expires-at", type=_instant, required=True)
+    local_key_init.add_argument(
+        "--scope",
+        action="append",
+        choices=["fixture_pipeline.execute", "research_prediction.read"],
+        required=True,
+    )
+    local_key_init.add_argument("--issued-at", type=_instant)
+    local_key_init.add_argument("--expires-at", type=_instant)
     return parser
 
 
@@ -99,15 +104,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(asdict(outcome), ensure_ascii=False, sort_keys=True))
         return 1 if outcome.status in {"failed", "deferred", "isolated"} else 0
     if arguments.command == "local-key" and arguments.local_key_command == "init":
+        if (arguments.issued_at is None) != (arguments.expires_at is None):
+            parser.error("--issued-at and --expires-at must be provided together")
+        generated_at = datetime.now(UTC)
+        issued_at = arguments.issued_at or generated_at
+        expires_at = arguments.expires_at or generated_at + timedelta(hours=24)
         status = "initialized"
         if arguments.path.exists():
             identity = LocalApiKeyIdentity.load(arguments.path)
+            explicit_times_conflict = arguments.issued_at is not None and (
+                identity.context.issued_at != issued_at or identity.context.expires_at != expires_at
+            )
             if (
                 identity.context.owner != arguments.owner
                 or identity.context.environment != arguments.environment
                 or identity.context.scopes != frozenset(arguments.scope)
-                or identity.context.issued_at != arguments.issued_at
-                or identity.context.expires_at != arguments.expires_at
+                or explicit_times_conflict
+                or identity.context.expires_at <= generated_at
             ):
                 raise RuntimeError("local_api_key_file_conflict")
             status = "existing"
@@ -116,8 +129,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 owner=arguments.owner,
                 environment=arguments.environment,
                 scopes=set(arguments.scope),
-                issued_at=arguments.issued_at,
-                expires_at=arguments.expires_at,
+                issued_at=issued_at,
+                expires_at=expires_at,
             )
             identity.save(arguments.path)
         print(json.dumps({"status": status}, sort_keys=True))

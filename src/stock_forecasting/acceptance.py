@@ -22,11 +22,14 @@ from stock_forecasting.adapters.dagster import (
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import Application, build_application, build_test_application
 from stock_forecasting.authorization import (
-    AuthorizationDenied,
     EntitlementStatus,
     LocalApiKeyIdentity,
+    PolicyDeniedOutcome,
 )
-from stock_forecasting.dagster_deployment import inspect_dagster_deployment
+from stock_forecasting.dagster_deployment import (
+    inspect_dagster_deployment,
+    materialize_deployed_asset,
+)
 from stock_forecasting.fixture_market import FixtureMarket, default_fixture_market_adapters
 from stock_forecasting.fixture_scenarios import FixtureScenario
 from stock_forecasting.outbox import RelayFault, RelayOutcome
@@ -116,7 +119,7 @@ def _capture_fixture_scenarios(
             deployed=deployed,
         )
         trace_id = f"{trace_prefix}-{scenario}"
-        outcome = application.run_fixture_eod(
+        outcome = application.require_fixture_eod_success(
             FixtureEodCommand(
                 information_cutoff=information_cutoff,
                 trace_id=trace_id,
@@ -125,7 +128,7 @@ def _capture_fixture_scenarios(
                 fixture_scenario=scenario,
             )
         )
-        records[scenario] = application.research_query.get_listing_research(
+        records[scenario] = application.research_query.require_listing_research(
             listing_id=outcome.listing_id,
             information_cutoff=information_cutoff,
             fixture_scenario=scenario,
@@ -216,7 +219,7 @@ def run_ticket_01(
         trace_id="trace-p1-trace-tw-01",
         idempotency_key="p1-trace-tw-01",
     )
-    outcome = application.run_fixture_eod(command)
+    outcome = application.require_fixture_eod_success(command)
     materialization = materialize(
         [xtai_fixture_eod_asset],
         resources={
@@ -241,7 +244,7 @@ def run_ticket_01(
         market="XTAI",
         scenario_times=scenario_observed_at,
     )
-    research = application.research_query.get_listing_research(
+    research = application.research_query.require_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=information_cutoff,
     )
@@ -340,7 +343,10 @@ def run_ticket_01(
             "affected_attempts"
         ]
         == 4,
-        "audit_evidence": len(publication_audit) == 1 and len(denial_audit) == 4,
+        "audit_evidence": len(publication_audit) == 2
+        and publication_audit[0]["decision_id"] == publication_audit[1]["decision_id"]
+        and publication_audit[0]["evaluation_id"] != publication_audit[1]["evaluation_id"]
+        and len(denial_audit) == 4,
         "no_production_prediction_records": trace_evidence["production_prediction_record_count"]
         == 0,
     }
@@ -388,10 +394,11 @@ def run_ticket_02(
         ),
     }
     outcomes = {
-        market: application.run_fixture_eod(command) for market, command in commands.items()
+        market: application.require_fixture_eod_success(command)
+        for market, command in commands.items()
     }
     research = {
-        market: application.research_query.get_listing_research(
+        market: application.research_query.require_listing_research(
             listing_id=outcome.listing_id,
             information_cutoff=information_cutoff,
         )
@@ -665,7 +672,7 @@ def run_ticket_03(
         trace_id="trace-p1-trace-outbox-01-relay-crash",
         idempotency_key="p1-trace-outbox-01-relay-crash",
     )
-    first = application.run_fixture_eod(first_command)
+    first = application.require_fixture_eod_success(first_command)
     event_before = application.operations_control.get_outbox_event(first.outbox_event_id)
     predictions_before = application.operations_control.list_prediction_records(
         trace_id=first_command.trace_id
@@ -744,7 +751,7 @@ def run_ticket_03(
         deployed=deployed,
         relay_fault=_CrashOperationsProjection(),
     )
-    second = crashing_consumer.run_fixture_eod(
+    second = crashing_consumer.require_fixture_eod_success(
         FixtureEodCommand(
             information_cutoff=second_cutoff,
             trace_id="trace-p1-trace-outbox-01-consumer-crash",
@@ -763,14 +770,14 @@ def run_ticket_03(
         second.outbox_event_id
     )
 
-    third = consumer_restarted.run_fixture_eod(
+    third = consumer_restarted.require_fixture_eod_success(
         FixtureEodCommand(
             information_cutoff=information_cutoff + timedelta(days=2),
             trace_id="trace-p1-trace-outbox-01-ordering-3",
             idempotency_key="p1-trace-outbox-01-ordering-3",
         )
     )
-    fourth = consumer_restarted.run_fixture_eod(
+    fourth = consumer_restarted.require_fixture_eod_success(
         FixtureEodCommand(
             information_cutoff=information_cutoff + timedelta(days=3),
             trace_id="trace-p1-trace-outbox-01-ordering-4",
@@ -921,7 +928,7 @@ def run_ticket_04(
         for market in markets
     }
     active_outcomes = {
-        market: active_application.run_fixture_eod(command)
+        market: active_application.require_fixture_eod_success(command)
         for market, command in active_commands.items()
     }
     object_files_after_allow = {path for path in object_root.rglob("*") if path.is_file()}
@@ -1017,38 +1024,71 @@ def run_ticket_04(
             revoked_application = candidate
         trace_id = f"trace-p1-trace-auth-01-{expected_reason}"
         denied_traces.append(trace_id)
-        try:
-            candidate.run_fixture_eod(
-                FixtureEodCommand(
-                    information_cutoff=information_cutoff,
-                    trace_id=trace_id,
-                    idempotency_key=trace_id,
-                    market="XTAI",
-                )
+        outcome = candidate.run_fixture_eod(
+            FixtureEodCommand(
+                information_cutoff=information_cutoff,
+                trace_id=trace_id,
+                idempotency_key=trace_id,
+                market="XTAI",
             )
-        except AuthorizationDenied as error:
+        )
+        if isinstance(outcome, PolicyDeniedOutcome):
             event = candidate.security_audit.list_events(trace_id=trace_id)[0]
             matrix_audits.append(event)
             matrix_results[expected_reason] = (
-                error.public_code == "authorization_denied"
-                and error.correlation_id == trace_id
+                outcome.code == "authorization_denied"
+                and outcome.correlation_id == trace_id
                 and event["reason_code"] == expected_reason
             )
         else:
             matrix_results[expected_reason] = False
     assert revoked_application is not None
 
-    query_trace = "trace-p1-trace-auth-01-existing-projection-denied"
-    existing_projection_denied = False
-    try:
-        revoked_application.research_query.get_listing_research(
-            listing_id=active_outcomes["XTAI"].listing_id,
-            information_cutoff=information_cutoff,
-            trace_id=query_trace,
+    administrative_identity = LocalApiKeyIdentity.issue(
+        owner="platform-admin",
+        environment=active_application.security_context.environment,
+        scopes={"fixture_pipeline.execute", "research_prediction.read"},
+        issued_at=active_application.security_context.issued_at,
+        expires_at=active_application.security_context.expires_at,
+    )
+    administrative_application = (
+        build_application(
+            observed_at=observed_at,
+            object_root=object_root,
+            database_url=database_url,
+            local_identity=administrative_identity,
+            entitlement_states={"XTAI": "revoked"},
         )
-    except AuthorizationDenied:
-        existing_projection_denied = True
-    restored_record = active_application.research_query.get_listing_research(
+        if deployed
+        else build_test_application(
+            observed_at=observed_at,
+            object_root=object_root,
+            database_url=database_url,
+            local_identity=administrative_identity,
+            entitlement_states={"XTAI": "revoked"},
+        )
+    )
+    administrative_trace = "trace-p1-trace-auth-01-platform-admin-denied"
+    administrative_outcome = administrative_application.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=information_cutoff,
+            trace_id=administrative_trace,
+            idempotency_key=administrative_trace,
+            market="XTAI",
+        )
+    )
+    administrative_audit = administrative_application.security_audit.list_events(
+        trace_id=administrative_trace
+    )
+
+    query_trace = "trace-p1-trace-auth-01-existing-projection-denied"
+    query_outcome = revoked_application.research_query.get_listing_research(
+        listing_id=active_outcomes["XTAI"].listing_id,
+        information_cutoff=information_cutoff,
+        trace_id=query_trace,
+    )
+    existing_projection_denied = isinstance(query_outcome, PolicyDeniedOutcome)
+    restored_record = active_application.research_query.require_listing_research(
         listing_id=active_outcomes["XTAI"].listing_id,
         information_cutoff=information_cutoff,
         trace_id="trace-p1-trace-auth-01-existing-projection-restored",
@@ -1132,6 +1172,10 @@ def run_ticket_04(
         ),
         "decision_matrix_fail_closed": all(matrix_results.values())
         and set(matrix_results) == {case[2] for case in matrix_cases},
+        "administrative_identity_denied": isinstance(administrative_outcome, PolicyDeniedOutcome)
+        and len(administrative_audit) == 1
+        and administrative_audit[0]["outcome"] == "denied"
+        and administrative_audit[0]["reason_code"] == "source_entitlement_revoked",
         "denial_before_persistence": object_files_after_denial == object_files_after_allow
         and denial_prediction_count == 0,
         "existing_projection_blocked_not_deleted": existing_projection_denied
@@ -1144,12 +1188,19 @@ def run_ticket_04(
         and ui_payload["code"] == "authorization_denied"
         and active_outcomes["XTAI"].listing_id not in ui_response.text
         and "source_entitlement" not in ui_response.text,
-        "dagster_denial": not dagster_materialization.success
+        "dagster_denial": dagster_materialization.success
+        and dagster_materialization.output_for_node("xtai_fixture_eod")["status"] == "policy_denied"
         and len(dagster_audit) == 1
         and dagster_audit[0]["reason_code"] == "source_entitlement_revoked",
         "audit_decision_evidence": all(
-            event.get("decision_id")
+            event.get("evaluation_id")
+            and event.get("decision_id")
             and event.get("correlation_id")
+            and event.get("credential_id")
+            and event.get("authentication_method") == "local_api_key"
+            and event.get("dataset_id") in {"xtai-fixture-eod", "xnas-fixture-eod"}
+            and event.get("evaluated_at")
+            and event.get("valid_until")
             and event.get("grant_version_id")
             and event.get("source_entitlement_version_id")
             and (
@@ -1167,8 +1218,22 @@ def run_ticket_04(
         ),
     }
     if dagster_url is not None:
-        checks["dagster_denial"] = checks["dagster_denial"] and (
-            inspect_dagster_deployment(dagster_url).ready
+        deployed_dagster_trace = "trace-p1-trace-auth-01-deployed-dagster-denied"
+        deployed_materialization = materialize_deployed_asset(
+            dagster_url,
+            location_name="stock_forecasting_denied",
+            asset_name="xtai_fixture_eod",
+        )
+        deployed_dagster_audit = revoked_application.security_audit.list_events(
+            trace_id=deployed_dagster_trace
+        )
+        checks["dagster_denial"] = (
+            checks["dagster_denial"]
+            and inspect_dagster_deployment(dagster_url).ready
+            and deployed_materialization
+            and len(deployed_dagster_audit) == 1
+            and deployed_dagster_audit[0]["outcome"] == "denied"
+            and deployed_dagster_audit[0]["reason_code"] == "source_entitlement_revoked"
         )
     return {
         "status": "passed" if all(checks.values()) else "failed",

@@ -10,6 +10,7 @@ from stock_forecasting.authorization import (
     AuthorizationPolicy,
     EntitlementStatus,
     LocalApiKeyIdentity,
+    PolicyDeniedOutcome,
     SecurityContext,
     build_fixture_authorization_policy,
 )
@@ -83,8 +84,16 @@ class Application:
             state_store=self.state_store,
         )
 
-    def run_fixture_eod(self, command: FixtureEodCommand) -> FixtureEodOutcome:
+    def run_fixture_eod(
+        self, command: FixtureEodCommand
+    ) -> FixtureEodOutcome | PolicyDeniedOutcome:
         return self._fixture_eod.execute(command)
+
+    def require_fixture_eod_success(self, command: FixtureEodCommand) -> FixtureEodOutcome:
+        outcome = self.run_fixture_eod(command)
+        if isinstance(outcome, PolicyDeniedOutcome):
+            raise RuntimeError("policy_denied_outcome_requires_handling")
+        return outcome
 
     def authenticate_local_request(
         self,
@@ -169,21 +178,13 @@ def build_application(
     event_compatibility: EventCompatibility | None = None,
     relay_clock: RelayClock | None = None,
     relay_worker_id: str | None = None,
-    local_identity: LocalApiKeyIdentity | None = None,
+    local_identity: LocalApiKeyIdentity,
     entitlement_states: Mapping[str, EntitlementStatus] | None = None,
     entitlement_purposes: Mapping[str, frozenset[str]] | None = None,
     public_bind_host: str = "127.0.0.1",
     grant_actions: frozenset[str] | None = None,
     policy_markets: frozenset[str] | None = None,
 ) -> Application:
-    identity_time = datetime.now(UTC)
-    resolved_identity = local_identity or LocalApiKeyIdentity.issue(
-        owner="local-researcher",
-        environment="development",
-        scopes={"fixture_pipeline.execute", "research_prediction.read"},
-        issued_at=identity_time - timedelta(minutes=1),
-        expires_at=identity_time + timedelta(hours=24),
-    )
     return Application(
         observed_at=observed_at,
         object_root=object_root,
@@ -193,9 +194,9 @@ def build_application(
         event_compatibility=event_compatibility,
         relay_clock=relay_clock,
         relay_worker_id=relay_worker_id,
-        local_identity=resolved_identity,
+        local_identity=local_identity,
         authorization_policy=build_fixture_authorization_policy(
-            resolved_identity.context,
+            local_identity.context,
             entitlement_states=entitlement_states,
             entitlement_purposes=entitlement_purposes,
             grant_actions=grant_actions,

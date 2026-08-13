@@ -4,6 +4,7 @@ from typing import cast
 from dagster import AssetExecutionContext, asset
 
 from stock_forecasting.application import Application
+from stock_forecasting.authorization import PolicyDeniedOutcome
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodOutcome
 
 
@@ -12,13 +13,22 @@ class FixtureRunner:
     application: Application
     command: FixtureEodCommand
 
-    def run(self) -> FixtureEodOutcome:
+    def run(self) -> FixtureEodOutcome | PolicyDeniedOutcome:
         return self.application.run_fixture_eod(self.command)
 
 
 def _run_fixture(context: AssetExecutionContext, resource_key: str) -> dict[str, str]:
     runner = cast(FixtureRunner, getattr(context.resources, resource_key))
     outcome = runner.run()
+    if isinstance(outcome, PolicyDeniedOutcome):
+        result = {
+            "status": outcome.status,
+            "code": outcome.code,
+            "correlation_id": outcome.correlation_id,
+            "decision_id": outcome.decision_id,
+        }
+        context.add_output_metadata(result)
+        return result
     result = {
         "status": outcome.status,
         "execution_purpose": outcome.execution_purpose,

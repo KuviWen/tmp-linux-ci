@@ -14,8 +14,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from stock_forecasting.application import Application
 from stock_forecasting.authorization import (
-    AuthorizationDenied,
     IdentityVerificationError,
+    PolicyDeniedOutcome,
     SecurityContext,
 )
 from stock_forecasting.contracts import PredictionPayload
@@ -166,10 +166,9 @@ def create_web_app(application: Application) -> FastAPI:
             media_type="application/problem+json",
         )
 
-    @app.exception_handler(AuthorizationDenied)
-    async def authorization_denied(
+    def authorization_denied(
         request: Request,
-        error: AuthorizationDenied,
+        outcome: PolicyDeniedOutcome,
     ) -> JSONResponse:
         return JSONResponse(
             {
@@ -178,8 +177,8 @@ def create_web_app(application: Application) -> FastAPI:
                 "status": 403,
                 "detail": "The requested operation is not authorized.",
                 "instance": request.url.path,
-                "trace_id": error.correlation_id,
-                "code": error.public_code,
+                "trace_id": outcome.correlation_id,
+                "code": outcome.code,
             },
             status_code=403,
             media_type="application/problem+json",
@@ -227,14 +226,15 @@ def create_web_app(application: Application) -> FastAPI:
         security_context: SecurityContext = research_authentication,
     ) -> dict[str, object] | Response:
         trace_id = request.headers.get("X-Trace-Id", f"trace-{uuid4()}")
+        query_outcome = application.research_query.list_predictions(
+            execution_purpose="fixture",
+            trace_id=trace_id,
+            security_context=security_context,
+        )
+        if isinstance(query_outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, query_outcome)
         records = [
-            record
-            for record in application.research_query.list_predictions(
-                execution_purpose="fixture",
-                trace_id=trace_id,
-                security_context=security_context,
-            )
-            if record["information_cutoff"] == information_cutoff
+            record for record in query_outcome if record["information_cutoff"] == information_cutoff
         ]
         items = [
             {
@@ -259,15 +259,15 @@ def create_web_app(application: Application) -> FastAPI:
         response.headers["ETag"] = tag
         return payload
 
-    @app.get("/api/v1/research/listings/{listing_id}")
+    @app.get("/api/v1/research/listings/{listing_id}", response_model=None)
     def get_listing_research(
         request: Request,
         listing_id: str,
         information_cutoff: str = Query(...),
         security_context: SecurityContext = research_authentication,
-    ) -> dict[str, object]:
+    ) -> dict[str, object] | Response:
         try:
-            return application.research_query.get_listing_research(
+            query_outcome = application.research_query.get_listing_research(
                 listing_id=listing_id,
                 information_cutoff=_parse_instant(information_cutoff),
                 trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
@@ -275,8 +275,11 @@ def create_web_app(application: Application) -> FastAPI:
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="listing_not_found") from error
+        if isinstance(query_outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, query_outcome)
+        return query_outcome
 
-    @app.get("/research", response_class=HTMLResponse)
+    @app.get("/research", response_class=HTMLResponse, response_model=None)
     def research_matrix(
         request: Request,
         information_cutoff: str = Query(...),
@@ -285,15 +288,18 @@ def create_web_app(application: Application) -> FastAPI:
         support: str = Query("full"),
         sort: str = Query("confidence_desc"),
         security_context: SecurityContext = research_authentication,
-    ) -> str:
+    ) -> str | Response:
         trace_id = request.headers.get("X-Trace-Id", f"trace-{uuid4()}")
+        query_outcome = application.research_query.list_predictions(
+            execution_purpose="fixture",
+            trace_id=trace_id,
+            security_context=security_context,
+        )
+        if isinstance(query_outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, query_outcome)
         records = [
             record
-            for record in application.research_query.list_predictions(
-                execution_purpose="fixture",
-                trace_id=trace_id,
-                security_context=security_context,
-            )
+            for record in query_outcome
             if record["information_cutoff"] == information_cutoff
             and (market == "all" or record["calendar"]["exchange"] == market)
         ]
@@ -355,7 +361,11 @@ def create_web_app(application: Application) -> FastAPI:
         )
         return _page("比較矩陣", body)
 
-    @app.get("/research/listings/{listing_id}", response_class=HTMLResponse)
+    @app.get(
+        "/research/listings/{listing_id}",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
     def listing_research_page(
         request: Request,
         listing_id: str,
@@ -366,9 +376,9 @@ def create_web_app(application: Application) -> FastAPI:
         sort: str = Query("confidence_desc"),
         tab: str = Query("forecast"),
         security_context: SecurityContext = research_authentication,
-    ) -> str:
+    ) -> str | Response:
         try:
-            record = application.research_query.get_listing_research(
+            query_outcome = application.research_query.get_listing_research(
                 listing_id=listing_id,
                 information_cutoff=_parse_instant(information_cutoff),
                 trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
@@ -376,6 +386,9 @@ def create_web_app(application: Application) -> FastAPI:
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="listing_not_found") from error
+        if isinstance(query_outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, query_outcome)
+        record = query_outcome
 
         tab_names = {"forecast": "預測", "lineage": "版本追溯"}
         tab_links: list[str] = []

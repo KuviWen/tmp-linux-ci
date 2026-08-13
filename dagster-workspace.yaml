@@ -3,3 +3,7 @@ load_from:
       host: dagster-code
       port: 4000
       location_name: stock_forecasting
+  - grpc_server:
+      host: denied-dagster-code
+      port: 4000
+      location_name: stock_forecasting_denied

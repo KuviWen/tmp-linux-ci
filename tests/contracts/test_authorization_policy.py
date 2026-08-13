@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -41,6 +42,23 @@ def test_loopback_development_key_creates_a_trusted_security_context() -> None:
     assert context.scopes == frozenset({"fixture_pipeline.execute", "research_prediction.read"})
     assert context.expires_at == issued_at + timedelta(hours=24)
     assert context.authentication_method == "local_api_key"
+
+
+def test_trusted_security_context_cannot_be_copied_with_forged_claims() -> None:
+    issued_at = datetime(2026, 8, 14, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="local-researcher",
+        environment="development",
+        scopes={"research_prediction.read"},
+        issued_at=issued_at,
+        expires_at=issued_at + timedelta(hours=24),
+    )
+
+    with pytest.raises(TypeError, match="trusted_security_context_factory_required"):
+        replace(
+            identity.context,
+            scopes=frozenset({"fixture_pipeline.execute", "research_prediction.read"}),
+        )
 
 
 def test_local_api_key_rejects_a_non_loopback_client() -> None:
@@ -111,47 +129,29 @@ def test_local_key_cli_initializes_ephemeral_secret_file_without_printing_creden
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     key_file = tmp_path / "run" / "local-api-key.json"
+    issued_at = datetime.now(UTC)
+    expires_at = issued_at + timedelta(hours=24)
+    arguments = [
+        "local-key",
+        "init",
+        "--path",
+        str(key_file),
+        "--owner",
+        "local-researcher",
+        "--environment",
+        "development",
+        "--scope",
+        "fixture_pipeline.execute",
+        "--scope",
+        "research_prediction.read",
+        "--issued-at",
+        issued_at.isoformat(),
+        "--expires-at",
+        expires_at.isoformat(),
+    ]
 
-    return_code = main(
-        [
-            "local-key",
-            "init",
-            "--path",
-            str(key_file),
-            "--owner",
-            "local-researcher",
-            "--environment",
-            "development",
-            "--scope",
-            "fixture_pipeline.execute",
-            "--scope",
-            "research_prediction.read",
-            "--issued-at",
-            "2026-08-12T21:54:00Z",
-            "--expires-at",
-            "2026-08-13T21:54:00Z",
-        ]
-    )
-    reused_return_code = main(
-        [
-            "local-key",
-            "init",
-            "--path",
-            str(key_file),
-            "--owner",
-            "local-researcher",
-            "--environment",
-            "development",
-            "--scope",
-            "fixture_pipeline.execute",
-            "--scope",
-            "research_prediction.read",
-            "--issued-at",
-            "2026-08-12T21:54:00Z",
-            "--expires-at",
-            "2026-08-13T21:54:00Z",
-        ]
-    )
+    return_code = main(arguments)
+    reused_return_code = main(arguments)
 
     identity = LocalApiKeyIdentity.load(key_file)
     output = capsys.readouterr().out
@@ -162,6 +162,42 @@ def test_local_key_cli_initializes_ephemeral_secret_file_without_printing_creden
         '{"status": "existing"}',
     ]
     assert identity.credential.authorization_header() not in output
+
+
+def test_local_key_cli_defaults_to_a_fresh_short_lived_key(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    key_file = tmp_path / "run" / "local-api-key.json"
+    before = datetime.now(UTC)
+    arguments = [
+        "local-key",
+        "init",
+        "--path",
+        str(key_file),
+        "--owner",
+        "local-researcher",
+        "--environment",
+        "development",
+        "--scope",
+        "fixture_pipeline.execute",
+        "--scope",
+        "research_prediction.read",
+    ]
+
+    return_code = main(arguments)
+    reused_return_code = main(arguments)
+    after = datetime.now(UTC)
+    identity = LocalApiKeyIdentity.load(key_file)
+
+    assert return_code == 0
+    assert reused_return_code == 0
+    assert before <= identity.context.issued_at <= after
+    assert identity.context.expires_at - identity.context.issued_at == timedelta(hours=24)
+    assert capsys.readouterr().out.splitlines() == [
+        '{"status": "initialized"}',
+        '{"status": "existing"}',
+    ]
 
 
 def test_active_grant_entitlement_and_policy_allow_fixture_pipeline() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -39,6 +40,37 @@ query Ticket02DeploymentHealth {
         lastHeartbeatTime
       }
     }
+  }
+}
+"""
+
+DAGSTER_LAUNCH_ASSET_MUTATION = """
+mutation MaterializeAcceptanceAsset(
+  $locationName: String!,
+  $assetName: String!
+) {
+  launchPipelineExecution(
+    executionParams: {
+      selector: {
+        repositoryLocationName: $locationName,
+        repositoryName: "__repository__",
+        pipelineName: "__ASSET_JOB__",
+        assetSelection: [{path: [$assetName]}]
+      },
+      runConfigData: {}
+    }
+  ) {
+    __typename
+    ... on LaunchRunSuccess { run { runId } }
+  }
+}
+"""
+
+DAGSTER_RUN_STATUS_QUERY = """
+query AcceptanceRunStatus($runId: ID!) {
+  pipelineRunOrError(runId: $runId) {
+    __typename
+    ... on Run { status }
   }
 }
 """
@@ -104,6 +136,59 @@ def inspect_dagster_deployment(url: str) -> DagsterDeploymentStatus:
         )
     except (AttributeError, HTTPError, KeyError, TypeError, ValueError):
         return DagsterDeploymentStatus(False, False)
+
+
+def materialize_deployed_asset(
+    url: str,
+    *,
+    location_name: str,
+    asset_name: str,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 0.25,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        with Client(timeout=10.0) as client:
+            response = client.post(
+                url,
+                json={
+                    "query": DAGSTER_LAUNCH_ASSET_MUTATION,
+                    "variables": {
+                        "locationName": location_name,
+                        "assetName": asset_name,
+                    },
+                },
+            )
+            response.raise_for_status()
+            launch_payload = response.json()
+            launch = launch_payload.get("data", {}).get("launchPipelineExecution", {})
+            if launch.get("__typename") != "LaunchRunSuccess":
+                return False
+            run_id = launch.get("run", {}).get("runId")
+            if not isinstance(run_id, str) or not run_id:
+                return False
+            while time.monotonic() <= deadline:
+                response = client.post(
+                    url,
+                    json={
+                        "query": DAGSTER_RUN_STATUS_QUERY,
+                        "variables": {"runId": run_id},
+                    },
+                )
+                response.raise_for_status()
+                status_payload = response.json()
+                run = status_payload.get("data", {}).get("pipelineRunOrError", {})
+                if run.get("__typename") != "Run":
+                    return False
+                status = run.get("status")
+                if status == "SUCCESS":
+                    return True
+                if status in {"FAILURE", "CANCELED"}:
+                    return False
+                time.sleep(poll_interval_seconds)
+    except (AttributeError, HTTPError, KeyError, TypeError, ValueError):
+        return False
+    return False
 
 
 def _parser() -> argparse.ArgumentParser:

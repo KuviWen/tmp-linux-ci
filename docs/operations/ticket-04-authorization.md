@@ -11,11 +11,14 @@ the API, Dagster code location, relay, or acceptance runner starts. The key is o
 `local-researcher`, limited to the fixture pipeline and research-read scopes, valid only in the
 development environment, and expires within 30 days. The command prints only an initialization
 status; it never prints the credential. No key value is stored in Git, Compose YAML, or `.env`.
+Clean startup issues the key for 24 hours from initialization time, so the verification does not
+depend on a date embedded in Compose. An existing unexpired named-volume key is reused; an expired
+or conflicting file fails closed and the disposable volume must be recreated deliberately.
 
-The normal API loads active XTAI and XNAS source entitlements. The acceptance-only `denied-api`
-loads the same key and action grant but a revoked XTAI entitlement. Both adapters call the same
-`AuthorizationPolicy`; the denied service cannot substitute an admin or database role for an
-allow decision.
+The normal API and `dagster-code` location load active XTAI and XNAS source entitlements. The
+acceptance-only `denied-api` and `stock_forecasting_denied` Dagster code location load the same key
+and action grant but a revoked XTAI entitlement. All adapters call the same `AuthorizationPolicy`;
+the denied services cannot substitute an admin or database role for an allow decision.
 
 ## Verify the deployed seam
 
@@ -24,15 +27,16 @@ and 8000. From the repository root:
 
 ```console
 docker compose config --quiet
-docker compose --profile acceptance up --build --wait postgres api denied-api dagster-code dagster-webserver dagster-daemon
+docker compose --profile acceptance up --build --wait postgres api denied-api dagster-code denied-dagster-code dagster-webserver dagster-daemon
 docker compose --profile acceptance run --rm acceptance
 ```
 
 Success is exit code zero and one JSON document with `status` equal to `passed`. The runner
 verifies active allow for both fixture markets, suspended/expired/revoked/purpose-removal
 denials, missing action grant, unknown source policy, no raw/prediction persistence on denial,
-existing projection blocking without deletion, redacted REST/UI problem details, Dagster
-denial, and full controlled audit evidence.
+existing projection blocking without deletion, redacted REST/UI problem details, an actual
+GraphQL-launched run in the revoked Dagster code location, platform-admin denial, and full
+controlled audit evidence for every evaluation.
 
 The API exposes only `authentication_required` or `authorization_denied` plus the request trace
 ID. The underlying reason and policy/grant/entitlement version identifiers remain in the

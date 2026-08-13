@@ -80,12 +80,10 @@ class StateStore:
         trace_id: str,
         idempotency_key: str,
         health_assessment_id: str,
-        audit_event_id: str,
         outbox_event_id: str,
         operations: PublicationDisposition,
         artifacts: list[dict[str, Any]],
         fixture_predictions: list[dict[str, Any]],
-        authorization_decision: dict[str, Any],
     ) -> dict[str, Any]:
         identity = payload["identity"]
         with self.engine.begin() as connection:
@@ -202,16 +200,6 @@ class StateStore:
                         trace_id=trace_id,
                     )
                 )
-                connection.execute(
-                    security_audit_events.insert().values(
-                        event_id=audit_event_id,
-                        action=authorization_decision["action"],
-                        outcome="allowed",
-                        reason_code=authorization_decision["reason_code"],
-                        trace_id=trace_id,
-                        authorization=authorization_decision,
-                    )
-                )
                 for artifact in artifacts:
                     existing_artifact = (
                         connection.execute(
@@ -320,7 +308,9 @@ class StateStore:
         outcome: str,
         trace_id: str,
     ) -> None:
-        event_id = authorization["decision_id"]
+        event_id = authorization["evaluation_id"]
+        if event_id is None:
+            raise ValueError("authorization_evaluation_id_required")
         with self.engine.begin() as connection:
             exists = connection.execute(
                 select(security_audit_events.c.event_id).where(
@@ -328,7 +318,7 @@ class StateStore:
                 )
             ).scalar_one_or_none()
             if exists is not None:
-                return
+                raise ImmutableStateConflict("immutable_authorization_evaluation_conflict")
             connection.execute(
                 security_audit_events.insert().values(
                     event_id=event_id,

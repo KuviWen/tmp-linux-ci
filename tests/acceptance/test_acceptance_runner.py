@@ -15,7 +15,10 @@ from typing import Any
 import pytest
 
 from stock_forecasting.acceptance import run_ticket_01, run_ticket_02, run_ticket_04
-from stock_forecasting.dagster_deployment import inspect_dagster_deployment
+from stock_forecasting.dagster_deployment import (
+    inspect_dagster_deployment,
+    materialize_deployed_asset,
+)
 
 
 @contextmanager
@@ -45,11 +48,78 @@ def _dagster_graphql(payload: Any) -> Iterator[str]:
         server.server_close()
 
 
+@contextmanager
+def _dagster_graphql_sequence(payloads: list[Any]) -> Iterator[str]:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            json.loads(self.rfile.read(content_length))
+            body = json.dumps(payloads.pop(0)).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/graphql"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
 def test_deployed_dagster_health_fails_closed_on_malformed_payload() -> None:
     with _dagster_graphql([]) as dagster_url:
         status = inspect_dagster_deployment(dagster_url)
 
     assert status.ready is False
+
+
+def test_deployed_dagster_asset_is_launched_and_observed_to_success() -> None:
+    payloads = [
+        {
+            "data": {
+                "launchPipelineExecution": {
+                    "__typename": "LaunchRunSuccess",
+                    "run": {"runId": "run-ticket-04-denied"},
+                }
+            }
+        },
+        {
+            "data": {
+                "pipelineRunOrError": {
+                    "__typename": "Run",
+                    "status": "STARTED",
+                }
+            }
+        },
+        {
+            "data": {
+                "pipelineRunOrError": {
+                    "__typename": "Run",
+                    "status": "SUCCESS",
+                }
+            }
+        },
+    ]
+
+    with _dagster_graphql_sequence(payloads) as dagster_url:
+        succeeded = materialize_deployed_asset(
+            dagster_url,
+            location_name="stock_forecasting_denied",
+            asset_name="xtai_fixture_eod",
+            poll_interval_seconds=0.0,
+        )
+
+    assert succeeded is True
+    assert payloads == []
 
 
 def test_acceptance_rejects_partial_deployment_mode(tmp_path: Path) -> None:
@@ -349,6 +419,7 @@ def test_ticket_04_acceptance_runner_verifies_authorization_denial_path(
         "active_entitlements_allow",
         "same_grant_denial",
         "decision_matrix_fail_closed",
+        "administrative_identity_denied",
         "denial_before_persistence",
         "existing_projection_blocked_not_deleted",
         "rest_problem_redacted",

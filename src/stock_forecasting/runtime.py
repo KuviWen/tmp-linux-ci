@@ -100,15 +100,10 @@ class RuntimeSettings:
     def build_application(self, *, relay_fault: RelayFault | None = None) -> Application:
         if self.local_api_key_mode != "enabled":
             raise RuntimeError("trusted_identity_provider_required")
-        local_identity = (
-            LocalApiKeyIdentity.load(self.local_api_key_file)
-            if self.local_api_key_mode == "enabled" and self.local_api_key_file is not None
-            else None
-        )
-        if (
-            local_identity is not None
-            and local_identity.context.environment != self.runtime_environment
-        ):
+        if self.local_api_key_file is None:
+            raise RuntimeError("local_api_key_file_required")
+        local_identity = LocalApiKeyIdentity.load(self.local_api_key_file)
+        if local_identity.context.environment != self.runtime_environment:
             raise RuntimeError("local_api_key_environment_mismatch")
         return build_application(
             database_url=self.database_url,

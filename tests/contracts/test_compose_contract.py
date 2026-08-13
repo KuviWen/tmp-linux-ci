@@ -18,6 +18,7 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "api",
         "dagster-init",
         "dagster-code",
+        "denied-dagster-code",
         "dagster-webserver",
         "dagster-daemon",
         "outbox-relay",
@@ -41,6 +42,7 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "api",
         "dagster-init",
         "dagster-code",
+        "denied-dagster-code",
         "dagster-webserver",
         "dagster-daemon",
         "outbox-relay",
@@ -71,11 +73,19 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
     ]
     assert "--owner" in services["local-key-init"]["command"]
     assert services["local-key-init"]["command"].count("--scope") == 2
+    assert "--issued-at" not in services["local-key-init"]["command"]
+    assert "--expires-at" not in services["local-key-init"]["command"]
     assert services["denied-api"]["environment"]["XTAI_SOURCE_ENTITLEMENT_STATUS"] == ("revoked")
     assert services["denied-api"]["profiles"] == ["acceptance"]
     assert "--denied-base-url" in services["acceptance"]["command"]
     assert services["acceptance"]["depends_on"]["denied-api"]["condition"] == ("service_healthy")
-    for name in ("api", "dagster-code", "outbox-relay", "acceptance"):
+    for name in (
+        "api",
+        "dagster-code",
+        "denied-dagster-code",
+        "outbox-relay",
+        "acceptance",
+    ):
         assert services[name]["depends_on"]["local-key-init"]["condition"] == (
             "service_completed_successfully"
         )
@@ -90,11 +100,25 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "-p",
         "4000",
     ]
-    for name in ("dagster-code", "dagster-webserver", "dagster-daemon"):
+    assert services["denied-dagster-code"]["environment"] == services["dagster-code"][
+        "environment"
+    ] | {
+        "XTAI_SOURCE_ENTITLEMENT_STATUS": "revoked",
+        "AUTHORIZATION_ACCEPTANCE_MODE": "denied",
+    }
+    for name in (
+        "dagster-code",
+        "denied-dagster-code",
+        "dagster-webserver",
+        "dagster-daemon",
+    ):
         assert services[name]["depends_on"]["dagster-init"]["condition"] == (
             "service_completed_successfully"
         )
     assert services["dagster-webserver"]["depends_on"]["dagster-code"]["condition"] == (
+        "service_healthy"
+    )
+    assert services["dagster-webserver"]["depends_on"]["denied-dagster-code"]["condition"] == (
         "service_healthy"
     )
     assert (
@@ -107,7 +131,12 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
     )
     assert "daemons" in services["dagster-daemon"]["healthcheck"]["test"]
     assert "--dagster-url" in services["acceptance"]["command"]
-    for name in ("dagster-code", "dagster-webserver", "dagster-daemon"):
+    for name in (
+        "dagster-code",
+        "denied-dagster-code",
+        "dagster-webserver",
+        "dagster-daemon",
+    ):
         assert services["acceptance"]["depends_on"][name]["condition"] == "service_healthy"
     assert compose["x-application-environment"]["FIXTURE_COLLECTION_OBSERVED_AT"] == (
         "2026-08-12T21:55:00Z"
@@ -152,3 +181,18 @@ def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
     assert "/run/stock-forecasting" in dockerfile
     assert "USER app" in dockerfile
     assert (REPOSITORY_ROOT / "requirements.lock").is_file()
+
+
+def test_dagster_workspace_exposes_a_separate_revoked_entitlement_location() -> None:
+    workspace = yaml.safe_load(
+        (REPOSITORY_ROOT / "dagster-workspace.yaml").read_text(encoding="utf-8")
+    )
+
+    locations = {
+        entry["grpc_server"]["location_name"]: entry["grpc_server"]["host"]
+        for entry in workspace["load_from"]
+    }
+    assert locations == {
+        "stock_forecasting": "dagster-code",
+        "stock_forecasting_denied": "denied-dagster-code",
+    }

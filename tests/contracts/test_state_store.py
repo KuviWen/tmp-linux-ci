@@ -18,14 +18,14 @@ def test_fixture_research_state_survives_application_restart(tmp_path: Path) -> 
         database_url=database_url,
     )
 
-    outcome = first_application.run_fixture_eod(
+    outcome = first_application.require_fixture_eod_success(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-persistence",
             idempotency_key="ticket-01-persistence",
         )
     )
-    before_restart = first_application.research_query.get_listing_research(
+    before_restart = first_application.research_query.require_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -35,7 +35,7 @@ def test_fixture_research_state_survives_application_restart(tmp_path: Path) -> 
         object_root=object_root,
         database_url=database_url,
     )
-    after_restart = restarted_application.research_query.get_listing_research(
+    after_restart = restarted_application.research_query.require_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
     )
@@ -56,7 +56,7 @@ def test_work_health_and_audit_evidence_survive_application_restart(tmp_path: Pa
         database_url=database_url,
     )
 
-    outcome = application.run_fixture_eod(
+    outcome = application.require_fixture_eod_success(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id=trace_id,

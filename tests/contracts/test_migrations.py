@@ -3,13 +3,14 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
 from sqlalchemy import create_engine, inspect, select
 
 from stock_forecasting.application import build_application
+from stock_forecasting.authorization import LocalApiKeyIdentity
 from stock_forecasting.platform.database_schema import metadata, research_records
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -82,12 +83,20 @@ def test_ticket_03_upgrade_backfills_existing_research_projection_status(tmp_pat
         "evidence_projection_version": 0,
         "stale": False,
     }
+    identity_time = datetime(2026, 8, 13, tzinfo=UTC)
     application = build_application(
         database_url=database_url,
         object_root=tmp_path / "objects",
-        observed_at=datetime(2026, 8, 13, tzinfo=UTC),
+        observed_at=identity_time,
+        local_identity=LocalApiKeyIdentity.issue(
+            owner="migration-contract",
+            environment="development",
+            scopes={"fixture_pipeline.execute", "research_prediction.read"},
+            issued_at=identity_time - timedelta(minutes=1),
+            expires_at=identity_time + timedelta(hours=24),
+        ),
     )
-    records = application.research_query.list_predictions(execution_purpose="fixture")
+    records = application.research_query.require_predictions(execution_purpose="fixture")
     migrated_projection = records[0]["projection"]
     assert migrated_projection == {
         "core_projection_version": 0,

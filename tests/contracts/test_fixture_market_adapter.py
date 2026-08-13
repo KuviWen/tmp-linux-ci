@@ -25,7 +25,11 @@ from stock_forecasting.fixture_market import (
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
-from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodWorkflow
+from stock_forecasting.workflows.fixture_eod import (
+    FixtureEodCommand,
+    FixtureEodOutcome,
+    FixtureEodWorkflow,
+)
 
 
 def _authorized_security(at: datetime) -> tuple[SecurityContext, AuthorizationPolicy]:
@@ -74,7 +78,7 @@ def test_xtai_and_xnas_adapters_share_the_provider_and_module_contract() -> None
     market_cases: tuple[tuple[FixtureMarket, str], ...] = (("XTAI", "tw"), ("XNAS", "us"))
     for market, suffix in market_cases:
         trace_id = f"trace-ticket-02-contract-{suffix}"
-        outcome = application.run_fixture_eod(
+        outcome = application.require_fixture_eod_success(
             FixtureEodCommand(
                 information_cutoff=cutoff,
                 trace_id=trace_id,
@@ -82,7 +86,7 @@ def test_xtai_and_xnas_adapters_share_the_provider_and_module_contract() -> None
                 market=market,
             )
         )
-        research = application.research_query.get_listing_research(
+        research = application.research_query.require_listing_research(
             listing_id=outcome.listing_id,
             information_cutoff=cutoff,
         )
@@ -163,6 +167,7 @@ def test_workflow_uses_the_adapter_market_date_for_identity_and_selection(
         )
     )
 
+    assert isinstance(outcome, FixtureEodOutcome)
     assert outcome.display_ticker == "USF1"
 
 

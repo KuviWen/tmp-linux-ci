@@ -64,10 +64,6 @@ services:
       - fixture_pipeline.execute
       - --scope
       - research_prediction.read
-      - --issued-at
-      - '2026-08-12T21:54:00Z'
-      - --expires-at
-      - '2026-09-11T21:54:00Z'
 
   denied-api:
     <<: *application
@@ -145,6 +141,35 @@ services:
       timeout: 3s
       retries: 30
 
+  denied-dagster-code:
+    <<: *application
+    environment:
+      <<: *application-environment
+      XTAI_SOURCE_ENTITLEMENT_STATUS: revoked
+      AUTHORIZATION_ACCEPTANCE_MODE: denied
+    command:
+      - dagster
+      - api
+      - grpc
+      - -m
+      - stock_forecasting.dagster_definitions
+      - -h
+      - 0.0.0.0
+      - -p
+      - '4000'
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      dagster-init:
+        condition: service_completed_successfully
+      local-key-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "dagster", "api", "grpc-health-check", "-h", "127.0.0.1", "-p", "4000"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   dagster-webserver:
     <<: *application
     command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "dagster-workspace.yaml"]
@@ -152,6 +177,8 @@ services:
       - '127.0.0.1:3000:3000'
     depends_on:
       dagster-code:
+        condition: service_healthy
+      denied-dagster-code:
         condition: service_healthy
       dagster-init:
         condition: service_completed_successfully
@@ -174,6 +201,8 @@ services:
     command: ["dagster-daemon", "run", "-w", "dagster-workspace.yaml"]
     depends_on:
       dagster-code:
+        condition: service_healthy
+      denied-dagster-code:
         condition: service_healthy
       dagster-init:
         condition: service_completed_successfully
@@ -228,6 +257,8 @@ services:
       api:
         condition: service_healthy
       dagster-code:
+        condition: service_healthy
+      denied-dagster-code:
         condition: service_healthy
       dagster-webserver:
         condition: service_healthy

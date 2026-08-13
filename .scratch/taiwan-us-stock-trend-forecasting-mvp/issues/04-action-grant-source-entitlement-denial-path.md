@@ -23,9 +23,13 @@ Status: ready-for-agent
   `AuthorizationPolicy.evaluate(...) -> AuthorizationDecision`。Workflow、ResearchQuery、
   REST／UI、Dagster 與 CLI 都使用同一 policy，受控 audit 保存完整 decision evidence。
 - Compose 使用不進 Git 的 named-volume ephemeral key file；active API 與 revoked-entitlement
-  API 使用同一身分與 action grant。部署驗證步驟記錄於
+  API／Dagster code location 使用同一身分與 action grant；金鑰在 clean startup 時建立 24
+  小時效期，不依賴固定日期。部署驗證步驟記錄於
   `docs/operations/ticket-04-authorization.md`。
-- 驗證：`python -m pytest -q`（97 passed、1 個需外部 PostgreSQL 的 integration test
+- Policy 拒絕以穩定 `policy_denied` outcome 回傳；每次評估有獨立 `evaluation_id`，同一
+  semantic decision 可保留共同 `decision_id`，且完整 credential、dataset、時間與版本證據
+  逐次 append，不因重試去重。
+- 驗證：`python -m pytest -q`（103 passed、1 個需外部 PostgreSQL 的 integration test
   skipped）、`python -m mypy src tests`、`python -m ruff check .`、
   `python -m ruff format --check .`、ticket-04 acceptance runner，以及 Alembic upgrade 均通過。
 - 本機沒有 Docker executable，因此本次未執行 Compose clean-container／PostgreSQL acceptance；

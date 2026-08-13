@@ -7,9 +7,9 @@ from fastapi.testclient import TestClient
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import build_test_application
 from stock_forecasting.authorization import (
-    AuthorizationDenied,
     EntitlementStatus,
     LocalApiKeyIdentity,
+    PolicyDeniedOutcome,
 )
 from stock_forecasting.fixture_market import FixtureMarket
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
@@ -21,7 +21,7 @@ def test_active_entitlements_allow_both_fixture_sources_through_the_public_workf
 
     markets: tuple[FixtureMarket, ...] = ("XTAI", "XNAS")
     outcomes = {
-        market: application.run_fixture_eod(
+        market: application.require_fixture_eod_success(
             FixtureEodCommand(
                 information_cutoff=cutoff,
                 trace_id=f"trace-ticket-04-active-{market.lower()}",
@@ -34,7 +34,7 @@ def test_active_entitlements_allow_both_fixture_sources_through_the_public_workf
 
     for market, outcome in outcomes.items():
         assert outcome.status == "succeeded"
-        research = application.research_query.get_listing_research(
+        research = application.research_query.require_listing_research(
             listing_id=outcome.listing_id,
             information_cutoff=cutoff,
         )
@@ -48,21 +48,28 @@ def test_active_entitlements_allow_both_fixture_sources_through_the_public_workf
         audit = application.security_audit.list_events(
             trace_id=f"trace-ticket-04-active-{market.lower()}"
         )
+        evaluation_id = audit[0]["evaluation_id"]
         assert audit == [
             {
                 "action": "fixture_pipeline.execute",
                 "outcome": "allowed",
                 "reason_code": "authorized",
                 "trace_id": f"trace-ticket-04-active-{market.lower()}",
+                "evaluation_id": evaluation_id,
                 "decision_id": authorization["decision_id"],
                 "correlation_id": f"trace-ticket-04-active-{market.lower()}",
                 "principal_id": application.security_context.principal_id,
+                "credential_id": application.security_context.credential_id,
+                "authentication_method": "local_api_key",
+                "dataset_id": f"{market.lower()}-fixture-eod",
                 "purpose": "fixture_research",
                 "environment": "development",
                 "grant_version_id": authorization["grant_version_id"],
                 "source_policy_version_id": authorization["source_policy_version_id"],
                 "source_entitlement_version_id": authorization["source_entitlement_version_id"],
                 "data_protection_class": "internal",
+                "evaluated_at": "2026-08-12T22:00:00Z",
+                "valid_until": "2026-08-13T22:00:00Z",
             }
         ]
 
@@ -83,7 +90,7 @@ def test_authorization_uses_execution_clock_not_historical_fixture_observation()
         local_identity=identity,
     )
 
-    outcome = application.run_fixture_eod(
+    outcome = application.require_fixture_eod_success(
         FixtureEodCommand(
             information_cutoff=observed_at,
             trace_id="trace-ticket-04-security-clock",
@@ -119,32 +126,36 @@ def test_inactive_entitlement_denies_before_raw_persistence_and_audits_true_reas
     )
     trace_id = f"trace-ticket-04-denied-{audit_reason}"
 
-    with pytest.raises(AuthorizationDenied) as captured:
-        application.run_fixture_eod(
-            FixtureEodCommand(
-                information_cutoff=cutoff,
-                trace_id=trace_id,
-                idempotency_key=trace_id,
-                market="XTAI",
-            )
+    outcome = application.run_fixture_eod(
+        FixtureEodCommand(
+            information_cutoff=cutoff,
+            trace_id=trace_id,
+            idempotency_key=trace_id,
+            market="XTAI",
         )
+    )
 
-    assert captured.value.public_code == "authorization_denied"
-    assert captured.value.correlation_id == trace_id
-    assert str(captured.value) == "authorization_denied"
+    assert isinstance(outcome, PolicyDeniedOutcome)
+    assert outcome.code == "authorization_denied"
+    assert outcome.correlation_id == trace_id
     assert list(object_root.rglob("*")) == []
     assert application.state_store.list_prediction_records(trace_id=trace_id) == []
     with pytest.raises(KeyError):
         application.operations_control.get_trace_evidence(trace_id)
+    audit = application.security_audit.list_events(trace_id=trace_id)[0]
     assert application.security_audit.list_events(trace_id=trace_id) == [
         {
             "action": "fixture_pipeline.execute",
             "outcome": "denied",
             "reason_code": audit_reason,
             "trace_id": trace_id,
-            "decision_id": captured.value.decision_id,
+            "evaluation_id": audit["evaluation_id"],
+            "decision_id": outcome.decision_id,
             "correlation_id": trace_id,
             "principal_id": application.security_context.principal_id,
+            "credential_id": application.security_context.credential_id,
+            "authentication_method": "local_api_key",
+            "dataset_id": "xtai-fixture-eod",
             "purpose": "fixture_research",
             "environment": "development",
             "grant_version_id": application.authorization_policy.action_grants[0].version_id,
@@ -155,6 +166,8 @@ def test_inactive_entitlement_denies_before_raw_persistence_and_audits_true_reas
                 0
             ].version_id,
             "data_protection_class": "internal",
+            "evaluated_at": "2026-08-12T22:00:00Z",
+            "valid_until": "2026-08-12T22:00:00Z",
         }
     ]
 
@@ -169,7 +182,7 @@ def test_revoked_entitlement_blocks_an_existing_projection_without_deleting_it(
         object_root=tmp_path / "objects",
         database_url=database_url,
     )
-    outcome = active_application.run_fixture_eod(
+    outcome = active_application.require_fixture_eod_success(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-04-existing-active",
@@ -186,22 +199,27 @@ def test_revoked_entitlement_blocks_an_existing_projection_without_deleting_it(
     )
     trace_id = "trace-ticket-04-existing-denied"
 
-    with pytest.raises(AuthorizationDenied) as captured:
-        denied_application.research_query.get_listing_research(
-            listing_id=outcome.listing_id,
-            information_cutoff=cutoff,
-            trace_id=trace_id,
-        )
+    denial = denied_application.research_query.get_listing_research(
+        listing_id=outcome.listing_id,
+        information_cutoff=cutoff,
+        trace_id=trace_id,
+    )
 
-    assert captured.value.public_code == "authorization_denied"
-    assert denied_application.security_audit.list_events(trace_id=trace_id)[0] == {
+    assert isinstance(denial, PolicyDeniedOutcome)
+    assert denial.code == "authorization_denied"
+    audit = denied_application.security_audit.list_events(trace_id=trace_id)[0]
+    assert audit == {
         "action": "research_prediction.read",
         "outcome": "denied",
         "reason_code": "source_entitlement_revoked",
         "trace_id": trace_id,
-        "decision_id": captured.value.decision_id,
+        "evaluation_id": audit["evaluation_id"],
+        "decision_id": denial.decision_id,
         "correlation_id": trace_id,
         "principal_id": denied_application.security_context.principal_id,
+        "credential_id": denied_application.security_context.credential_id,
+        "authentication_method": "local_api_key",
+        "dataset_id": "xtai-fixture-eod",
         "purpose": "fixture_research",
         "environment": "development",
         "grant_version_id": denied_application.authorization_policy.action_grants[0].version_id,
@@ -212,13 +230,39 @@ def test_revoked_entitlement_blocks_an_existing_projection_without_deleting_it(
             denied_application.authorization_policy.source_entitlements[0].version_id
         ),
         "data_protection_class": "internal",
+        "evaluated_at": "2026-08-12T22:00:00Z",
+        "valid_until": "2026-08-12T22:00:00Z",
     }
-    restored = active_application.research_query.get_listing_research(
+    restored = active_application.research_query.require_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
         trace_id="trace-ticket-04-existing-restored",
     )
     assert restored["identity"]["listing_id"] == outcome.listing_id
+
+
+def test_repeated_authorization_evaluations_are_append_only_not_deduplicated() -> None:
+    cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
+    application = build_test_application(
+        observed_at=cutoff,
+        entitlement_states={"XTAI": "revoked"},
+    )
+    command = FixtureEodCommand(
+        information_cutoff=cutoff,
+        trace_id="trace-ticket-04-repeated-denial",
+        idempotency_key="ticket-04-repeated-denial",
+    )
+
+    first = application.run_fixture_eod(command)
+    second = application.run_fixture_eod(command)
+
+    assert isinstance(first, PolicyDeniedOutcome)
+    assert isinstance(second, PolicyDeniedOutcome)
+    assert first.decision_id == second.decision_id
+    events = application.security_audit.list_events(trace_id=command.trace_id)
+    assert len(events) == 2
+    assert events[0]["evaluation_id"] != events[1]["evaluation_id"]
+    assert {event["decision_id"] for event in events} == {first.decision_id}
 
 
 def test_rest_and_ui_return_only_stable_denial_problem_while_audit_keeps_reason(
@@ -232,7 +276,7 @@ def test_rest_and_ui_return_only_stable_denial_problem_while_audit_keeps_reason(
         object_root=tmp_path / "objects",
         database_url=database_url,
     )
-    outcome = active_application.run_fixture_eod(
+    outcome = active_application.require_fixture_eod_success(
         FixtureEodCommand(
             information_cutoff=cutoff,
             trace_id="trace-ticket-04-rest-active",

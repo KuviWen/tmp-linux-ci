@@ -11,9 +11,9 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from stock_forecasting.authorization import (
-    AuthorizationDenied,
     AuthorizationPolicy,
     OperationIntent,
+    PolicyDeniedOutcome,
     SecurityContext,
     authorization_audit_payload,
     fixture_dataset_id,
@@ -110,7 +110,7 @@ class FixtureEodWorkflow:
         self._authorization_time = authorization_time
         self._authorization_uses_system_clock = authorization_uses_system_clock
 
-    def execute(self, command: FixtureEodCommand) -> FixtureEodOutcome:
+    def execute(self, command: FixtureEodCommand) -> FixtureEodOutcome | PolicyDeniedOutcome:
         observed_at = self._observed_at or datetime.now(UTC)
         authorization_time = (
             datetime.now(UTC)
@@ -131,13 +131,13 @@ class FixtureEodWorkflow:
                 correlation_id=command.trace_id,
             ),
         )
+        self._state_store.record_authorization_decision(
+            authorization=authorization_audit_payload(authorization_decision),
+            outcome="allowed" if authorization_decision.allowed else "denied",
+            trace_id=command.trace_id,
+        )
         if not authorization_decision.allowed:
-            self._state_store.record_authorization_decision(
-                authorization=authorization_audit_payload(authorization_decision),
-                outcome="denied",
-                trace_id=command.trace_id,
-            )
-            raise AuthorizationDenied(authorization_decision)
+            return PolicyDeniedOutcome.from_decision(authorization_decision)
         source_policy = next(
             policy
             for policy in self._authorization_policy.source_policies
@@ -220,7 +220,6 @@ class FixtureEodWorkflow:
             "source_entitlement_version_id": (authorization_decision.source_entitlement_version_id),
             "data_protection_class": authorization_decision.data_protection_class,
         }
-        authorization_audit = authorization_audit_payload(authorization_decision)
         subject_ids = {
             "issuer": issuer_id,
             "security": security_id,
@@ -681,7 +680,6 @@ class FixtureEodWorkflow:
             trace_id=command.trace_id,
             idempotency_key=command.idempotency_key,
             health_assessment_id=fixture_id(f"source-health/{command.idempotency_key}"),
-            audit_event_id=fixture_id(f"audit/{command.idempotency_key}"),
             outbox_event_id=outbox_event_id,
             operations=disposition,
             artifacts=artifacts,
@@ -699,7 +697,6 @@ class FixtureEodWorkflow:
                 }
                 for prediction in predictions
             ],
-            authorization_decision=authorization_audit,
         )
 
         return FixtureEodOutcome(
