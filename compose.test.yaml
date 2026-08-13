@@ -1,0 +1,69 @@
+name: stock-forecasting-postgres-test
+
+x-postgres-image: &postgres-image postgres:17-alpine
+
+x-postgres-test-environment: &postgres-test-environment
+  POSTGRES_DB: postgres
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-postgres_test_admin_local_only}
+  POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+  POSTGRES_TEST_DB: ${POSTGRES_TEST_DB:-stock_forecasting_test}
+  POSTGRES_TEST_USER: ${POSTGRES_TEST_USER:-stock_test}
+  POSTGRES_TEST_PASSWORD: ${POSTGRES_TEST_PASSWORD:-stock_test_local_only}
+
+x-test-database-url: &test-database-url postgresql+psycopg://${POSTGRES_TEST_USER:-stock_test}:${POSTGRES_TEST_PASSWORD:-stock_test_local_only}@postgres:5432/${POSTGRES_TEST_DB:-stock_forecasting_test}
+
+services:
+  postgres:
+    image: *postgres-image
+    environment: *postgres-test-environment
+    ports:
+      - '127.0.0.1:${POSTGRES_TEST_PORT:-55432}:5432'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'pg_isready --username="$${POSTGRES_USER}" --dbname="$${POSTGRES_DB}"'
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 10s
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+      - type: bind
+        source: ./docker/postgres/init-test-database.sh
+        target: /docker-entrypoint-initdb.d/10-test-database.sh
+        read_only: true
+
+  migration:
+    image: stock-forecasting-postgres-test-app:0.1.0
+    build:
+      context: .
+    environment:
+      DATABASE_URL: *test-database-url
+    command: ["python", "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  db-check:
+    image: *postgres-image
+    profiles: ["verify"]
+    environment:
+      PGPASSWORD: ${POSTGRES_TEST_PASSWORD:-stock_test_local_only}
+    entrypoint: ["psql"]
+    command:
+      - --host=postgres
+      - --username=${POSTGRES_TEST_USER:-stock_test}
+      - --dbname=${POSTGRES_TEST_DB:-stock_forecasting_test}
+      - --set=ON_ERROR_STOP=1
+      - --command=SELECT current_database(), current_user, current_setting('server_version_num')::integer;
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-test-data:

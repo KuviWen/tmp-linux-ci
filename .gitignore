@@ -11,3 +11,4 @@ htmlcov/
 .ticket-01.db
 .ticket-02-objects/
 .ticket-02.db
+.env.test
