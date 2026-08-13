@@ -8,7 +8,7 @@
 
 Status: ready-for-agent
 
-- [ ] 乾淨環境能啟動完成此 tracer 所需的 Compose、PostgreSQL、filesystem ObjectRepository、Dagster workflow、REST 與繁中研究介面。
+- [x] 乾淨環境能啟動完成此 tracer 所需的 Compose、PostgreSQL、filesystem ObjectRepository、Dagster workflow、REST 與繁中研究介面。
 - [x] Fixture 以內部發行人、證券及掛牌身分表示，包含 ticker 有效期、XTAI 交易日曆、至少 253 個未調整 sessions、公司行動與內部調整版本。
 - [x] Fixture collection 產生原始資料物件、來源紀錄版本、正規化紀錄版本、擷取收據、涵蓋報告、真實平台控制的首次取得時間及 committed checkpoint。
 - [x] 日終 workflow 固定 `fixture` 執行用途、不可變資料選擇、FeatureSnapshot、FixtureTrendForecaster artifact 與 fixture 服務指派，並交易發布每個 1／5／20 期間的結果或機器可讀不可用原因。
@@ -21,4 +21,4 @@ Status: ready-for-agent
 
 - Seam：單一 acceptance CLI 編排公開 workflow／Dagster asset、REST／繁中 UI、filesystem object contract 與 PostgreSQL-compatible canonical ledgers；OpenAPI 3.2 YAML 是唯一服務契約來源。固定版 XTAI fixture dataset 提供 300 筆交易所 session facts，垂直 workflow 只選取截止點可見的 253 筆未調整 OHLCV。FixtureTrendForecaster 位於穩定 TrendForecaster contract 後，六種 collection scenarios 各自實際穿過同一垂直路徑。
 - 驗證：`python -m pytest -q`（32 passed）、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、fresh Alembic upgrade 與 `python -m stock_forecasting.cli acceptance ticket-01 ... --observed-at ...`（`status=passed`，含 adversarial scenarios 與 scenario-correct work／health／audit）。
-- 未勾選：目前主機沒有 Docker、Podman 或 Compose binary，故無法把靜態 Compose contract 當成乾淨容器／PostgreSQL 實際啟動證據。
+- 容器證據：Docker Desktop 4.84.0／Engine 29.6.2／Compose v5.3.1 以全新 ticket 專屬 volumes 執行 `docker compose up --build --wait ...`；PostgreSQL 17、API 與 Dagster webserver 皆 healthy，migration／Dagster init 正常完成，REST、繁中研究頁與 Dagster UI 回傳 HTTP 200。`docker compose --profile acceptance run --build --rm acceptance` 使用 PostgreSQL 與實際 HTTP API 回傳 `status=passed`，16 項 checks 全為 true。

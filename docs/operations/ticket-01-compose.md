@@ -15,6 +15,11 @@ docker compose up --build --wait postgres api dagster-code dagster-webserver dag
 ```
 
 The one-shot `migration` service must complete before the API and Dagster code location start.
+The one-shot `dagster-init` service then initializes the shared Dagster instance before the code
+server, webserver, and daemon start, preventing concurrent first-run storage migrations. All
+application services consume the same versioned image; `api` is the single owner of its build
+context, so Compose sends one build session even when the repository path contains non-ASCII
+characters.
 The local-only PostgreSQL trust configuration is acceptable solely because port 5432 is bound
 to `127.0.0.1`; it is not a production credential pattern.
 

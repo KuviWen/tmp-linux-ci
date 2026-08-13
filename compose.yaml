@@ -1,3 +1,5 @@
+name: stock-forecasting-ticket-01
+
 x-fixture-information-cutoff: &fixture-information-cutoff '2026-08-12T07:00:00Z'
 x-fixture-collection-observed-at: &fixture-collection-observed-at '2026-08-12T06:55:00Z'
 
@@ -9,8 +11,7 @@ x-application-environment: &application-environment
   DAGSTER_HOME: /var/lib/dagster
 
 x-application: &application
-  build:
-    context: .
+  image: stock-forecasting-ticket-01-app:0.1.0
   environment: *application-environment
   volumes:
     - fixture-objects:/var/lib/stock-forecasting/objects
@@ -42,6 +43,8 @@ services:
 
   api:
     <<: *application
+    build:
+      context: .
     command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - '127.0.0.1:8000:8000'
@@ -58,6 +61,13 @@ services:
       timeout: 3s
       retries: 30
 
+  dagster-init:
+    <<: *application
+    command: ["dagster", "instance", "migrate"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+
   dagster-code:
     <<: *application
     command:
@@ -73,6 +83,8 @@ services:
     depends_on:
       migration:
         condition: service_completed_successfully
+      dagster-init:
+        condition: service_completed_successfully
 
   dagster-webserver:
     <<: *application
@@ -82,6 +94,17 @@ services:
     depends_on:
       dagster-code:
         condition: service_started
+      dagster-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   dagster-daemon:
     <<: *application
@@ -89,6 +112,8 @@ services:
     depends_on:
       dagster-code:
         condition: service_started
+      dagster-init:
+        condition: service_completed_successfully
 
   acceptance:
     <<: *application
@@ -113,7 +138,7 @@ services:
       api:
         condition: service_healthy
       dagster-webserver:
-        condition: service_started
+        condition: service_healthy
       dagster-daemon:
         condition: service_started
 

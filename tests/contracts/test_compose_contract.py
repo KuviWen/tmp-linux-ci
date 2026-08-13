@@ -9,10 +9,12 @@ def test_compose_declares_the_deployable_ticket_01_runtime() -> None:
     compose = yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8"))
     services = compose["services"]
 
+    assert compose["name"] == "stock-forecasting-ticket-01"
     assert set(services) == {
         "postgres",
         "migration",
         "api",
+        "dagster-init",
         "dagster-code",
         "dagster-webserver",
         "dagster-daemon",
@@ -28,6 +30,26 @@ def test_compose_declares_the_deployable_ticket_01_runtime() -> None:
     assert services["acceptance"]["profiles"] == ["acceptance"]
     assert "--base-url" in services["acceptance"]["command"]
     assert "--observed-at" in services["acceptance"]["command"]
+    application_services = {
+        "migration",
+        "api",
+        "dagster-init",
+        "dagster-code",
+        "dagster-webserver",
+        "dagster-daemon",
+        "acceptance",
+    }
+    assert {services[name]["image"] for name in application_services} == {
+        "stock-forecasting-ticket-01-app:0.1.0"
+    }
+    assert services["api"]["build"] == {"context": "."}
+    assert all("build" not in services[name] for name in application_services if name != "api")
+    assert services["dagster-init"]["command"] == ["dagster", "instance", "migrate"]
+    for name in ("dagster-code", "dagster-webserver", "dagster-daemon"):
+        assert services[name]["depends_on"]["dagster-init"]["condition"] == (
+            "service_completed_successfully"
+        )
+    assert "healthcheck" in services["dagster-webserver"]
     assert compose["x-application-environment"]["FIXTURE_COLLECTION_OBSERVED_AT"] == (
         "2026-08-12T06:55:00Z"
     )
