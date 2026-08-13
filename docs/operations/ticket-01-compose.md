@@ -19,7 +19,8 @@ The one-shot `dagster-init` service then initializes the shared Dagster instance
 server, webserver, and daemon start, preventing concurrent first-run storage migrations. All
 application services consume the same versioned image; `api` is the single owner of its build
 context, so Compose sends one build session even when the repository path contains non-ASCII
-characters.
+characters. Compose readiness requires the code server's gRPC health check, a GraphQL workspace
+that has loaded `xtai_fixture_eod`, and healthy heartbeats from every required Dagster daemon.
 The local-only PostgreSQL trust configuration is acceptable solely because port 5432 is bound
 to `127.0.0.1`; it is not a production credential pattern.
 
@@ -39,8 +40,9 @@ docker compose --profile acceptance run --build --rm acceptance
 Success is exit code zero with one JSON document whose `status` is `passed`. Its checks cover
 the direct workflow and Dagster adapter, REST, Traditional Chinese matrix/detail reload,
 filesystem raw-object checksum, canonical lineage, source health, security audit, fixture-use
-denials, and the absence of production prediction records. The runner uses the migrated
-PostgreSQL schema and calls the separately running API over HTTP.
+denials, the absence of production prediction records, and the deployed Dagster workspace and
+daemon health. The runner uses the migrated PostgreSQL schema and calls the separately running API
+and Dagster GraphQL endpoints over HTTP.
 
 The durable engineering evidence is split deliberately:
 

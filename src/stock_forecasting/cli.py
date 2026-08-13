@@ -26,6 +26,7 @@ def _parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--information-cutoff", type=_instant, required=True)
     acceptance.add_argument("--observed-at", type=_instant, required=True)
     acceptance.add_argument("--base-url")
+    acceptance.add_argument("--dagster-url")
     return parser
 
 
@@ -38,6 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             information_cutoff=arguments.information_cutoff,
             observed_at=arguments.observed_at,
             base_url=arguments.base_url,
+            dagster_url=arguments.dagster_url,
         )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         return 0 if report["status"] == "passed" else 1

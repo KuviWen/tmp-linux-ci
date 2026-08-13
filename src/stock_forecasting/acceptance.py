@@ -12,6 +12,7 @@ from httpx import Client
 from stock_forecasting.adapters.dagster import FixtureRunner, xtai_fixture_eod_asset
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import build_application, build_test_application
+from stock_forecasting.dagster_deployment import inspect_dagster_deployment
 from stock_forecasting.fixture_scenarios import FixtureScenario
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand, FixtureUseTarget
@@ -36,6 +37,7 @@ def run_ticket_01(
     information_cutoff: datetime,
     observed_at: datetime,
     base_url: str | None = None,
+    dagster_url: str | None = None,
 ) -> dict[str, Any]:
     if base_url is None:
         application = build_test_application(
@@ -232,6 +234,8 @@ def run_ticket_01(
         "no_production_prediction_records": trace_evidence["production_prediction_record_count"]
         == 0,
     }
+    if dagster_url is not None:
+        checks["deployed_dagster_ready"] = inspect_dagster_deployment(dagster_url).ready
     return {
         "status": "passed" if all(checks.values()) else "failed",
         "trace_ids": ["P1-ENTRY-01", "P1-TRACE-TW-01"],

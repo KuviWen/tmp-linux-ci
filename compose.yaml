@@ -85,6 +85,11 @@ services:
         condition: service_completed_successfully
       dagster-init:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "dagster", "api", "grpc-health-check", "-h", "127.0.0.1", "-p", "4000"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   dagster-webserver:
     <<: *application
@@ -93,15 +98,19 @@ services:
       - '127.0.0.1:3000:3000'
     depends_on:
       dagster-code:
-        condition: service_started
+        condition: service_healthy
       dagster-init:
         condition: service_completed_successfully
     healthcheck:
       test:
         - CMD
         - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/', timeout=2)"
+        - -m
+        - stock_forecasting.dagster_deployment
+        - --url
+        - http://127.0.0.1:3000/graphql
+        - --require
+        - workspace
       interval: 2s
       timeout: 3s
       retries: 30
@@ -111,9 +120,22 @@ services:
     command: ["dagster-daemon", "run", "-w", "dagster-workspace.yaml"]
     depends_on:
       dagster-code:
-        condition: service_started
+        condition: service_healthy
       dagster-init:
         condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -m
+        - stock_forecasting.dagster_deployment
+        - --url
+        - http://dagster-webserver:3000/graphql
+        - --require
+        - daemons
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   acceptance:
     <<: *application
@@ -134,13 +156,17 @@ services:
       - *fixture-collection-observed-at
       - --base-url
       - http://api:8000
+      - --dagster-url
+      - http://dagster-webserver:3000/graphql
     depends_on:
       api:
+        condition: service_healthy
+      dagster-code:
         condition: service_healthy
       dagster-webserver:
         condition: service_healthy
       dagster-daemon:
-        condition: service_started
+        condition: service_healthy
 
 volumes:
   postgres-data:

@@ -45,11 +45,35 @@ def test_compose_declares_the_deployable_ticket_01_runtime() -> None:
     assert services["api"]["build"] == {"context": "."}
     assert all("build" not in services[name] for name in application_services if name != "api")
     assert services["dagster-init"]["command"] == ["dagster", "instance", "migrate"]
+    assert services["dagster-code"]["healthcheck"]["test"] == [
+        "CMD",
+        "dagster",
+        "api",
+        "grpc-health-check",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        "4000",
+    ]
     for name in ("dagster-code", "dagster-webserver", "dagster-daemon"):
         assert services[name]["depends_on"]["dagster-init"]["condition"] == (
             "service_completed_successfully"
         )
-    assert "healthcheck" in services["dagster-webserver"]
+    assert services["dagster-webserver"]["depends_on"]["dagster-code"]["condition"] == (
+        "service_healthy"
+    )
+    assert (
+        "stock_forecasting.dagster_deployment"
+        in services["dagster-webserver"]["healthcheck"]["test"]
+    )
+    assert "workspace" in services["dagster-webserver"]["healthcheck"]["test"]
+    assert (
+        "stock_forecasting.dagster_deployment" in services["dagster-daemon"]["healthcheck"]["test"]
+    )
+    assert "daemons" in services["dagster-daemon"]["healthcheck"]["test"]
+    assert "--dagster-url" in services["acceptance"]["command"]
+    for name in ("dagster-code", "dagster-webserver", "dagster-daemon"):
+        assert services["acceptance"]["depends_on"][name]["condition"] == "service_healthy"
     assert compose["x-application-environment"]["FIXTURE_COLLECTION_OBSERVED_AT"] == (
         "2026-08-12T06:55:00Z"
     )
