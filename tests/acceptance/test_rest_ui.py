@@ -77,6 +77,11 @@ def test_traditional_chinese_matrix_and_detail_preserve_url_state_on_reload() ->
     assert "盤整 28.0%" in matrix_response.text
     assert "下跌 17.0%" in matrix_response.text
     assert "完整" in matrix_response.text
+    assert "期間焦點 5" in matrix_response.text
+    assert "市場 XTAI" in matrix_response.text
+    assert "資料支援 full" in matrix_response.text
+    assert "排序 confidence_desc" in matrix_response.text
+    assert 'data-focused="true"><h3>5 個交易日後' in matrix_response.text
     assert f"/research/listings/{listing_id}?" in matrix_response.text
 
     detail_url = (
@@ -97,6 +102,20 @@ def test_traditional_chinese_matrix_and_detail_preserve_url_state_on_reload() ->
     assert "資料集版本" in first_load.text
     assert "原始資料物件" in first_load.text
     assert "資訊截止點 2026-08-12T07:00:00Z" in first_load.text
+    assert 'data-focused="true"><h3>5 個交易日後' in first_load.text
+
+    filtered = client.get(
+        "/research",
+        params={
+            "information_cutoff": cutoff,
+            "horizon": 5,
+            "market": "XTAI",
+            "support": "unavailable",
+            "sort": "confidence_desc",
+        },
+    )
+    assert "無符合條件的研究結果" in filtered.text
+    assert "Fixture／非正式預測" not in filtered.text
 
 
 def test_rest_matrix_etag_is_bound_to_the_same_snapshot() -> None:

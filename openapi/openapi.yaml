@@ -130,7 +130,9 @@ components:
           additionalProperties: false
           required: [code]
           properties:
-            code: {type: string, enum: [missing_anchor_price]}
+            code:
+              type: string
+              enum: [missing_anchor_price, post_cutoff_evidence, source_withdrawn]
         data_support: {$ref: '#/components/schemas/DataSupport'}
     PredictionResult:
       oneOf:

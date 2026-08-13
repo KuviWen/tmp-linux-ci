@@ -68,20 +68,29 @@ def _page(title: str, body: str) -> str:
 </html>"""
 
 
-def _horizon_cards(predictions: list[PredictionPayload]) -> str:
+def _horizon_cards(
+    predictions: list[PredictionPayload],
+    *,
+    focused_horizon: int | None = None,
+) -> str:
     cards: list[str] = []
-    for prediction in predictions:
+    ordered = sorted(
+        predictions,
+        key=lambda prediction: prediction["horizon_sessions"] != focused_horizon,
+    )
+    for prediction in ordered:
         horizon = prediction["horizon_sessions"]
+        focused = ' data-focused="true"' if horizon == focused_horizon else ""
         if prediction["prediction_status"] == "unavailable":
             reason = prediction["unavailable_reason"]["code"]
             cards.append(
-                f'<section class="horizon"><h3>{horizon} 個交易日</h3>'
+                f'<section class="horizon"{focused}><h3>{horizon} 個交易日後</h3>'
                 f'<p class="status">不可預測：{escape(str(reason))}</p></section>'
             )
             continue
         probabilities = prediction["probabilities"]
         cards.append(
-            f'<section class="horizon"><h3>{horizon} 個交易日</h3>'
+            f'<section class="horizon"{focused}><h3>{horizon} 個交易日後</h3>'
             f"<p>上漲 {probabilities['up'] * 100:.1f}%</p>"
             f"<p>盤整 {probabilities['flat'] * 100:.1f}%</p>"
             f"<p>下跌 {probabilities['down'] * 100:.1f}%</p>"
@@ -211,6 +220,28 @@ def create_web_app(application: Application) -> FastAPI:
             if record["information_cutoff"] == information_cutoff
             and record["calendar"]["exchange"] == market
         ]
+        records = [
+            record
+            for record in records
+            if support == "all"
+            or any(
+                prediction["horizon_sessions"] == horizon
+                and prediction["data_support"]["price_volume"] == support
+                for prediction in record["predictions"]
+            )
+        ]
+        if sort == "confidence_desc":
+            records.sort(
+                key=lambda record: next(
+                    (
+                        prediction.get("confidence_score", -1.0)
+                        for prediction in record["predictions"]
+                        if prediction["horizon_sessions"] == horizon
+                    ),
+                    -1.0,
+                ),
+                reverse=True,
+            )
         rows: list[str] = []
         for record in records:
             listing_id = str(record["identity"]["listing_id"])
@@ -229,14 +260,18 @@ def create_web_app(application: Application) -> FastAPI:
                 f'<p class="badge">{escape(str(record["fixture_badge"]))}</p>'
                 f"<h2>{escape(str(record['identity']['display_ticker']))} · XTAI</h2>"
                 f"<p>資訊截止點 {escape(information_cutoff)}</p>"
-                f'<div class="horizons">{_horizon_cards(record["predictions"])}</div>'
+                f'<div class="horizons">'
+                f"{_horizon_cards(record['predictions'], focused_horizon=horizon)}</div>"
                 f'<p><a href="/research/listings/{escape(listing_id)}?{detail_query}">'
                 "開啟標的研究頁</a></p></article>"
             )
         body = (
             "<main><header><p>研究決策支援系統</p><h1>比較矩陣</h1>"
             "<p>所有結果均為 fixture 工程證據，不是正式預測。</p></header>"
-            + "".join(rows)
+            f'<section aria-label="目前檢視條件"><p>期間焦點 {horizon}</p>'
+            f"<p>市場 {escape(market)}</p><p>資料支援 {escape(support)}</p>"
+            f"<p>排序 {escape(sort)}</p></section>"
+            + ("".join(rows) if rows else '<p class="panel">無符合條件的研究結果</p>')
             + "</main>"
         )
         return _page("比較矩陣", body)
@@ -286,7 +321,7 @@ def create_web_app(application: Application) -> FastAPI:
             f"<dt>原始資料物件</dt><dd>{escape(str(lineage['raw_artifact_id']))}</dd>"
             "</dl>"
         )
-        horizon_cards = _horizon_cards(record["predictions"])
+        horizon_cards = _horizon_cards(record["predictions"], focused_horizon=horizon)
         body = (
             '<main><p><a href="/research?'
             + urlencode(

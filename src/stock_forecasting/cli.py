@@ -24,6 +24,7 @@ def _parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--database-url", required=True)
     acceptance.add_argument("--object-root", type=Path, required=True)
     acceptance.add_argument("--information-cutoff", type=_instant, required=True)
+    acceptance.add_argument("--observed-at", type=_instant, required=True)
     acceptance.add_argument("--base-url")
     return parser
 
@@ -35,6 +36,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_url=arguments.database_url,
             object_root=arguments.object_root,
             information_cutoff=arguments.information_cutoff,
+            observed_at=arguments.observed_at,
             base_url=arguments.base_url,
         )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))

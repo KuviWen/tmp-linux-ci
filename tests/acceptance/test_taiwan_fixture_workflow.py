@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 from stock_forecasting.application import build_test_application
-from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureScenario
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand
 
 
@@ -124,26 +124,7 @@ def test_xtai_collection_publishes_point_in_time_evidence_and_checkpoint() -> No
         "last_session_id": "XTAI:2026-08-12",
     }
     assert evidence["committed_checkpoint"] == "xtai-fixture-page:1"
-    scenario_versions = evidence["scenario_versions"]
-    assert [version["scenario"] for version in scenario_versions] == [
-        "normal",
-        "late",
-        "duplicate",
-        "correction",
-        "missing",
-        "withdrawal",
-    ]
-    assert len({version["version_id"] for version in scenario_versions}) == 6
-    normal, late, duplicate, correction, missing, withdrawal = scenario_versions
-    assert late["late_relative_to"] == normal["version_id"]
-    assert duplicate["duplicate_of"] == normal["version_id"]
-    assert duplicate["deduplicated"] is True
-    assert correction["supersedes"] == normal["version_id"]
-    assert correction["revision_number"] == 2
-    assert missing["availability"] == "missing"
-    assert missing["source_record_version_id"] is None
-    assert withdrawal["withdraws"] == normal["version_id"]
-    assert withdrawal["availability"] == "withdrawn"
+    assert evidence["fixture_scenario"] == "normal"
 
 
 def test_default_collection_clock_owns_first_observation_instead_of_copying_cutoff() -> None:
@@ -169,6 +150,66 @@ def test_default_collection_clock_owns_first_observation_instead_of_copying_cuto
     )
     assert before <= first_observed_at <= after
     assert first_observed_at != cutoff
+    assert {prediction["unavailable_reason"]["code"] for prediction in research["predictions"]} == {
+        "post_cutoff_evidence"
+    }
+
+
+def test_adversarial_collection_versions_traverse_the_same_vertical_path(
+    tmp_path: Path,
+) -> None:
+    cutoff = datetime(2026, 8, 12, 7, 0, tzinfo=UTC)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'scenarios.db'}"
+    observed_times: dict[FixtureScenario, datetime] = {
+        "normal": datetime(2026, 8, 12, 6, 50, tzinfo=UTC),
+        "late": datetime(2026, 8, 12, 7, 5, tzinfo=UTC),
+        "duplicate": datetime(2026, 8, 12, 6, 51, tzinfo=UTC),
+        "correction": datetime(2026, 8, 12, 6, 52, tzinfo=UTC),
+        "missing": datetime(2026, 8, 12, 6, 53, tzinfo=UTC),
+        "withdrawal": datetime(2026, 8, 12, 6, 54, tzinfo=UTC),
+    }
+    records = {}
+    for scenario, observed_at in observed_times.items():
+        application = build_test_application(
+            observed_at=observed_at,
+            object_root=tmp_path / "objects",
+            database_url=database_url,
+        )
+        outcome = application.run_fixture_eod(
+            FixtureEodCommand(
+                information_cutoff=cutoff,
+                trace_id=f"trace-ticket-01-{scenario}",
+                idempotency_key=f"ticket-01-{scenario}",
+                fixture_scenario=scenario,
+            )
+        )
+        records[scenario] = application.research_query.get_listing_research(
+            listing_id=outcome.listing_id,
+            information_cutoff=cutoff,
+            fixture_scenario=scenario,
+        )
+
+    normal_source = records["normal"]["source_evidence"]["source_record_version_id"]
+    assert records["normal"]["predictions"][0]["prediction_status"] == "full"
+    assert records["late"]["predictions"][0]["unavailable_reason"]["code"] == (
+        "post_cutoff_evidence"
+    )
+    assert records["duplicate"]["source_evidence"]["duplicate_of"] == normal_source
+    assert records["duplicate"]["source_evidence"]["deduplicated"] is True
+    assert records["duplicate"]["predictions"][0]["prediction_status"] == "full"
+    assert records["correction"]["source_evidence"]["supersedes"] == normal_source
+    assert records["correction"]["source_evidence"]["revision_number"] == 2
+    assert (
+        records["correction"]["lineage"]["feature_snapshot_id"]
+        != records["normal"]["lineage"]["feature_snapshot_id"]
+    )
+    assert records["missing"]["predictions"][0]["unavailable_reason"]["code"] == (
+        "missing_anchor_price"
+    )
+    assert records["withdrawal"]["predictions"][0]["unavailable_reason"]["code"] == (
+        "source_withdrawn"
+    )
+    assert records["withdrawal"]["source_evidence"]["withdraws"] == normal_source
 
 
 def test_fixture_eod_pins_lineage_and_publishes_three_horizon_probabilities() -> None:
@@ -232,12 +273,13 @@ def test_missing_necessary_price_evidence_omits_probabilities() -> None:
             information_cutoff=cutoff,
             trace_id="trace-ticket-01-unavailable",
             idempotency_key="ticket-01-unavailable",
-            fixture_scenario="missing_anchor_price",
+            fixture_scenario="missing",
         )
     )
     research = application.research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=cutoff,
+        fixture_scenario="missing",
     )
 
     assert research["predictions"] == [
@@ -367,7 +409,7 @@ def test_canonical_trace_keeps_fixture_results_separate_from_production_records(
 
     evidence = application.operations_control.get_trace_evidence(trace_id)
     assert evidence["execution_purpose"] == "fixture"
-    assert evidence["artifact_kinds"] == [
+    assert set(evidence["artifact_kinds"]) == {
         "issuer",
         "security",
         "listing",
@@ -386,8 +428,7 @@ def test_canonical_trace_keeps_fixture_results_separate_from_production_records(
         "feature_snapshot",
         "model_artifact",
         "serving_assignment",
-        *(["collection_scenario_version"] * 6),
-    ]
+    }
     assert evidence["lineage_ids"] == {
         "dataset_version_id": outcome.dataset_version_id,
         "data_selection_id": outcome.data_selection_id,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlencode
@@ -12,7 +12,7 @@ from httpx import Client
 from stock_forecasting.adapters.dagster import FixtureRunner, xtai_fixture_eod_asset
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import build_application, build_test_application
-from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
+from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureScenario
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand, FixtureUseTarget
 
 
@@ -33,11 +33,12 @@ def run_ticket_01(
     database_url: str,
     object_root: Path,
     information_cutoff: datetime,
+    observed_at: datetime,
     base_url: str | None = None,
 ) -> dict[str, Any]:
     if base_url is None:
         application = build_test_application(
-            observed_at=information_cutoff,
+            observed_at=observed_at,
             object_root=object_root,
             database_url=database_url,
         )
@@ -45,6 +46,7 @@ def run_ticket_01(
         application = build_application(
             object_root=object_root,
             database_url=database_url,
+            observed_at=observed_at,
         )
     command = FixtureEodCommand(
         information_cutoff=information_cutoff,
@@ -61,6 +63,40 @@ def run_ticket_01(
         },
     )
     dagster_outcome = materialization.output_for_node("xtai_fixture_eod")
+    scenario_observed_at: dict[FixtureScenario, datetime] = {
+        "late": information_cutoff + timedelta(minutes=5),
+        "duplicate": observed_at + timedelta(minutes=1),
+        "correction": observed_at + timedelta(minutes=2),
+        "missing": observed_at + timedelta(minutes=3),
+        "withdrawal": observed_at + timedelta(minutes=4),
+    }
+    scenario_records: dict[str, dict[str, Any]] = {}
+    for scenario, scenario_time in scenario_observed_at.items():
+        if base_url is None:
+            scenario_application = build_test_application(
+                observed_at=scenario_time,
+                object_root=object_root,
+                database_url=database_url,
+            )
+        else:
+            scenario_application = build_application(
+                observed_at=scenario_time,
+                object_root=object_root,
+                database_url=database_url,
+            )
+        scenario_outcome = scenario_application.run_fixture_eod(
+            FixtureEodCommand(
+                information_cutoff=information_cutoff,
+                trace_id=f"trace-p1-trace-tw-01-{scenario}",
+                idempotency_key=f"p1-trace-tw-01-{scenario}",
+                fixture_scenario=scenario,
+            )
+        )
+        scenario_records[scenario] = scenario_application.research_query.get_listing_research(
+            listing_id=scenario_outcome.listing_id,
+            information_cutoff=information_cutoff,
+            fixture_scenario=scenario,
+        )
     research = application.research_query.get_listing_research(
         listing_id=outcome.listing_id,
         information_cutoff=information_cutoff,
@@ -137,6 +173,17 @@ def run_ticket_01(
         "dagster_parity": materialization.success
         and dagster_outcome["listing_id"] == outcome.listing_id
         and dagster_outcome["feature_snapshot_id"] == outcome.feature_snapshot_id,
+        "adversarial_scenarios": (
+            scenario_records["late"]["predictions"][0]["unavailable_reason"]["code"]
+            == "post_cutoff_evidence"
+            and scenario_records["duplicate"]["predictions"][0]["prediction_status"] == "full"
+            and scenario_records["correction"]["lineage"]["feature_snapshot_id"]
+            != research["lineage"]["feature_snapshot_id"]
+            and scenario_records["missing"]["predictions"][0]["unavailable_reason"]["code"]
+            == "missing_anchor_price"
+            and scenario_records["withdrawal"]["predictions"][0]["unavailable_reason"]["code"]
+            == "source_withdrawn"
+        ),
         "immutable_identity": outcome.listing_id != outcome.display_ticker,
         "xtai_253_sessions": research["calendar"]["session_count"] == 253,
         "raw_evidence_durable": object_stat["checksum"] == outcome.raw_object_ref.checksum,

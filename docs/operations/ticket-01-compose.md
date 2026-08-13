@@ -62,7 +62,8 @@ python -m alembic -c alembic.ini upgrade head
 python -m stock_forecasting.cli acceptance ticket-01 \
   --database-url sqlite+pysqlite:///ticket-01.db \
   --object-root .ticket-01-objects \
-  --information-cutoff 2026-08-12T07:00:00Z
+  --information-cutoff 2026-08-12T07:00:00Z \
+  --observed-at 2026-08-12T06:55:00Z
 ```
 
 The last command is a fast SQLite/filesystem developer check. It does not replace the Compose

@@ -67,7 +67,7 @@ def build_application(
     *,
     database_url: str,
     object_root: Path,
-    observed_at: datetime | None = None,
+    observed_at: datetime,
 ) -> Application:
     return Application(
         observed_at=observed_at,

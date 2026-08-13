@@ -21,6 +21,8 @@ def test_ticket_01_acceptance_runner_verifies_the_public_seams(tmp_path: Path) -
             str(tmp_path / "objects"),
             "--information-cutoff",
             "2026-08-12T07:00:00Z",
+            "--observed-at",
+            "2026-08-12T06:55:00Z",
         ],
         check=False,
         capture_output=True,
@@ -40,6 +42,7 @@ def test_ticket_01_acceptance_runner_verifies_the_public_seams(tmp_path: Path) -
     assert set(report["checks"]) == {
         "workflow_succeeded",
         "dagster_parity",
+        "adversarial_scenarios",
         "immutable_identity",
         "xtai_253_sessions",
         "raw_evidence_durable",

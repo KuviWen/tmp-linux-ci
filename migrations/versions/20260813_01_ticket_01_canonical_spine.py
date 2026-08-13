@@ -20,12 +20,14 @@ def upgrade() -> None:
         sa.Column("listing_id", sa.String(length=36), nullable=False),
         sa.Column("information_cutoff", sa.String(length=32), nullable=False),
         sa.Column("execution_purpose", sa.String(length=32), nullable=False),
+        sa.Column("fixture_scenario", sa.String(length=32), nullable=False),
         sa.Column("payload", sa.JSON(), nullable=False),
         sa.UniqueConstraint(
             "listing_id",
             "information_cutoff",
             "execution_purpose",
-            name="uq_research_record_listing_cutoff_purpose",
+            "fixture_scenario",
+            name="uq_research_record_listing_cutoff_purpose_scenario",
         ),
     )
     op.create_table(

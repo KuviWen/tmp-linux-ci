@@ -12,7 +12,11 @@ class DataSupport(TypedDict):
 
 
 class UnavailableReason(TypedDict):
-    code: Literal["missing_anchor_price"]
+    code: Literal[
+        "missing_anchor_price",
+        "post_cutoff_evidence",
+        "source_withdrawn",
+    ]
 
 
 class AvailablePrediction(TypedDict):

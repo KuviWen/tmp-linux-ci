@@ -15,11 +15,13 @@ class ResearchQuery:
         *,
         listing_id: str,
         information_cutoff: datetime,
+        fixture_scenario: str = "normal",
     ) -> dict[str, Any]:
         expected_cutoff = information_cutoff.isoformat().replace("+00:00", "Z")
         record = self._state_store.get_listing_research(
             listing_id=listing_id,
             information_cutoff=expected_cutoff,
+            fixture_scenario=fixture_scenario,
         )
         if record is None:
             raise KeyError(listing_id)

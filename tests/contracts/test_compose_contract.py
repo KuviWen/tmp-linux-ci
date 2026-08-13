@@ -27,6 +27,13 @@ def test_compose_declares_the_deployable_ticket_01_runtime() -> None:
     assert services["migration"]["command"][-2:] == ["upgrade", "head"]
     assert services["acceptance"]["profiles"] == ["acceptance"]
     assert "--base-url" in services["acceptance"]["command"]
+    assert "--observed-at" in services["acceptance"]["command"]
+    assert compose["x-application-environment"]["FIXTURE_COLLECTION_OBSERVED_AT"] == (
+        "2026-08-12T06:55:00Z"
+    )
+    assert compose["x-application-environment"]["FIXTURE_INFORMATION_CUTOFF"] == (
+        "2026-08-12T07:00:00Z"
+    )
 
     for name in ("postgres", "api", "dagster-webserver"):
         assert all(str(port).startswith("127.0.0.1:") for port in services[name]["ports"])

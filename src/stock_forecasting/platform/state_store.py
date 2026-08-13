@@ -26,12 +26,14 @@ research_records = Table(
     Column("listing_id", String(36), nullable=False),
     Column("information_cutoff", String(32), nullable=False),
     Column("execution_purpose", String(32), nullable=False),
+    Column("fixture_scenario", String(32), nullable=False),
     Column("payload", JSON, nullable=False),
     UniqueConstraint(
         "listing_id",
         "information_cutoff",
         "execution_purpose",
-        name="uq_research_record_listing_cutoff_purpose",
+        "fixture_scenario",
+        name="uq_research_record_listing_cutoff_purpose_scenario",
     ),
 )
 
@@ -148,6 +150,7 @@ class StateStore:
             "listing_id": identity["listing_id"],
             "information_cutoff": payload["information_cutoff"],
             "execution_purpose": payload["execution_purpose"],
+            "fixture_scenario": payload["source_evidence"]["fixture_scenario"],
             "payload": payload,
         }
         with self.engine.begin() as connection:
@@ -156,6 +159,7 @@ class StateStore:
                     research_records.c.listing_id == record_values["listing_id"],
                     research_records.c.information_cutoff == record_values["information_cutoff"],
                     research_records.c.execution_purpose == record_values["execution_purpose"],
+                    research_records.c.fixture_scenario == record_values["fixture_scenario"],
                 )
             ).scalar_one_or_none()
             if existing_record is None:
@@ -296,12 +300,14 @@ class StateStore:
         *,
         listing_id: str,
         information_cutoff: str,
+        fixture_scenario: str = "normal",
     ) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
             payload = connection.execute(
                 select(research_records.c.payload).where(
                     research_records.c.listing_id == listing_id,
                     research_records.c.information_cutoff == information_cutoff,
+                    research_records.c.fixture_scenario == fixture_scenario,
                 )
             ).scalar_one_or_none()
         return deepcopy(payload) if payload is not None else None
@@ -311,6 +317,7 @@ class StateStore:
             payloads = connection.execute(
                 select(research_records.c.payload)
                 .where(research_records.c.execution_purpose == execution_purpose)
+                .where(research_records.c.fixture_scenario == "normal")
                 .order_by(research_records.c.record_id)
             ).scalars()
             return [deepcopy(payload) for payload in payloads]
