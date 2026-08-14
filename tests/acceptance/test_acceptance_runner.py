@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -485,6 +486,7 @@ def test_ticket_05_runner_publishes_blocked_evidence_when_not_deployed(
     }
     assert set(report["scenario_results"]) == {
         "checksum_failure",
+        "correction",
         "duplicate_collection",
         "fixture_promotion_attempt",
         "late_data",
@@ -496,6 +498,7 @@ def test_ticket_05_runner_publishes_blocked_evidence_when_not_deployed(
         "outbox_redelivery",
         "outbox_restart",
         "stale_fencing",
+        "withdrawal",
     }
     assert all(result["status"] == "passed" for result in report["scenario_results"].values())
     assert report["bundle"]["object_id"].startswith("sha256:")
@@ -503,6 +506,16 @@ def test_ticket_05_runner_publishes_blocked_evidence_when_not_deployed(
     assert bundle["status"] == "blocked"
     assert bundle["previous_bundle_reference"] is None
     assert bundle["claims"]["scope"] == "engineering_spine_only"
+    assert all(
+        result["evidence_digest"].startswith("sha256:") for result in bundle["contracts"].values()
+    )
+    failure_evidence = {result["scenario"]: result for result in bundle["failure_evidence"]}
+    assert failure_evidence["withdrawal"]["reason"] == "source_withdrawn"
+    assert failure_evidence["withdrawal"]["owner"] == "data_owner"
+    assert failure_evidence["withdrawal"]["evidence_ids"]
+    assert all(
+        result["reason"] != "evidence_capture_failed" for result in failure_evidence.values()
+    )
     assert (
         bundle["provenance"]["git_commit"]
         == subprocess.run(
@@ -516,6 +529,7 @@ def test_ticket_05_runner_publishes_blocked_evidence_when_not_deployed(
 
 
 def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
+    export_directory = tmp_path / "exports"
     completed = subprocess.run(
         [
             sys.executable,
@@ -535,6 +549,8 @@ def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
             str(Path.cwd()),
             "--git-dir",
             str(Path.cwd() / ".git"),
+            "--evidence-export-dir",
+            str(export_directory),
         ],
         check=False,
         capture_output=True,
@@ -547,3 +563,39 @@ def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
     report = json.loads(completed.stdout)
     assert report["status"] == "blocked"
     assert report["bundle"]["object_id"].startswith("sha256:")
+    exported_bundle = export_directory / "p1-acceptance-bundle.json"
+    assert hashlib.sha256(exported_bundle.read_bytes()).hexdigest() == report["bundle"]["checksum"]
+    assert (export_directory / "p1-acceptance-bundle.json.sha256").read_text(
+        encoding="utf-8"
+    ) == f"{report['bundle']['checksum']}  p1-acceptance-bundle.json\n"
+
+
+def test_ticket_05_runner_publishes_fail_closed_bundle_when_a_stage_raises(
+    tmp_path: Path,
+) -> None:
+    report = run_ticket_05(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+        object_root=tmp_path / "objects",
+        information_cutoff=datetime(2026, 8, 12, 22, tzinfo=UTC),
+        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+        project_root=Path.cwd(),
+        git_dir=Path.cwd() / ".git",
+        base_url="http://api.invalid",
+        dagster_url="http://dagster.invalid/graphql",
+    )
+
+    assert report["status"] == "blocked"
+    bundle = json.loads(Path(report["bundle"]["uri"]).read_text(encoding="utf-8"))
+    assert bundle["failure_evidence"] == [
+        {
+            "owner": "platform_owner",
+            "reason": "evidence_capture_failed",
+            "scenario": "acceptance_runner",
+            "stage": "orchestration",
+            "status": "exception",
+        }
+    ]
+    assert bundle["previous_bundle_reference"] is None
+    assert bundle["reproduction_command"] == (
+        "docker compose --profile acceptance run --build --rm acceptance"
+    )

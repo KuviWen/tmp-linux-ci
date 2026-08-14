@@ -50,6 +50,27 @@ def test_rest_matrix_and_listing_detail_expose_fixture_lineage() -> None:
         5,
         20,
     ]
+    assert matrix["phase_boundaries"] == {
+        "documents": {
+            "status": "unavailable",
+            "reason": "phase_1_optional_modality_out_of_scope",
+        },
+        "fundamentals": {
+            "status": "unavailable",
+            "reason": "phase_1_optional_modality_out_of_scope",
+        },
+        "macro": {
+            "status": "unavailable",
+            "reason": "phase_1_optional_modality_out_of_scope",
+        },
+    }
+
+    matrix_html = client.get(
+        "/research",
+        params={"information_cutoff": cutoff, "support": "full"},
+    )
+    assert matrix_html.status_code == 200
+    assert "文件、基本面、總體模態：P1 尚未提供" in matrix_html.text
 
     detail_response = client.get(
         f"/api/v1/research/listings/{listing_id}",

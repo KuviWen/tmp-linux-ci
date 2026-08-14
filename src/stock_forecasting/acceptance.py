@@ -20,10 +20,13 @@ from httpx import Client
 from sqlalchemy import text
 
 from stock_forecasting.acceptance_bundle import (
+    P1_HARD_GATE_OWNERS,
     P1_TRACE_IDS,
     P1AcceptanceBundlePublisher,
     P1AcceptanceEvaluation,
     P1GateResult,
+    digest_required_paths,
+    is_sha256_reference,
 )
 from stock_forecasting.adapters.dagster import (
     FixtureRunner,
@@ -53,7 +56,10 @@ from stock_forecasting.dagster_deployment import (
 from stock_forecasting.fixture_market import FixtureMarket, default_fixture_market_adapters
 from stock_forecasting.fixture_scenarios import FixtureScenario
 from stock_forecasting.outbox import RelayFault, RelayOutcome
-from stock_forecasting.platform.object_repository import ObjectIntegrityError
+from stock_forecasting.platform.object_repository import (
+    FilesystemObjectRepository,
+    ObjectIntegrityError,
+)
 from stock_forecasting.research_query import ResearchQuery
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodOutcome
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand, FixtureUseTarget
@@ -574,6 +580,41 @@ def run_ticket_02(
         "missing_calendar": "calendar_unresolved",
         "withdrawal": "source_withdrawn",
     }
+    scenario_evidence: dict[str, dict[str, object]] = {}
+    for scenario, record in scenario_records.items():
+        source_evidence = record["source_evidence"]
+        evidence_ids = [
+            value
+            for key in (
+                "raw_artifact_id",
+                "source_record_version_id",
+                "supersedes",
+                "duplicate_of",
+            )
+            if isinstance((value := source_evidence.get(key)), str)
+        ]
+        observed_reason: str | None
+        if scenario == "duplicate":
+            verified = source_evidence["duplicate_of"] == xnas_source_version
+            observed_reason = "duplicate_source_record"
+        elif scenario == "correction":
+            verified = (
+                source_evidence["supersedes"] == xnas_source_version
+                and record["lineage"]["feature_snapshot_id"]
+                != research["XNAS"]["lineage"]["feature_snapshot_id"]
+            )
+            observed_reason = "correction_superseded"
+        else:
+            observed_reasons = {
+                prediction["unavailable_reason"]["code"] for prediction in record["predictions"]
+            }
+            observed_reason = next(iter(observed_reasons)) if len(observed_reasons) == 1 else None
+            verified = observed_reason == expected_unavailable[scenario]
+        scenario_evidence[scenario] = {
+            "evidence_ids": evidence_ids,
+            "observed_reason": observed_reason,
+            "verified": verified,
+        }
     trace_evidence = {
         market: application.operations_control.get_trace_evidence(command.trace_id)
         for market, command in commands.items()
@@ -681,6 +722,7 @@ def run_ticket_02(
         "formal_source_qualified": False,
         "formal_prediction": False,
         "listing_ids": {market: outcome.listing_id for market, outcome in outcomes.items()},
+        "scenario_evidence": scenario_evidence,
         "checks": checks,
     }
 
@@ -1372,27 +1414,42 @@ def _git_commit(git_dir: Path) -> str:
     raise RuntimeError("git_commit_unavailable")
 
 
-def _tree_digest(project_root: Path, relative_paths: tuple[str, ...]) -> str:
-    files: list[Path] = []
-    for relative_path in relative_paths:
-        candidate = project_root / relative_path
-        if candidate.is_file():
-            files.append(candidate)
-        elif candidate.is_dir():
-            files.extend(
-                path
-                for path in candidate.rglob("*")
-                if path.is_file()
-                and "__pycache__" not in path.parts
-                and path.suffix not in {".pyc", ".pyo"}
-            )
-    digest = hashlib.sha256()
-    for path in sorted(files, key=lambda item: item.relative_to(project_root).as_posix()):
-        digest.update(path.relative_to(project_root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return f"sha256:{digest.hexdigest()}"
+def _contract_result(checks: dict[str, bool]) -> dict[str, object]:
+    evidence = json.dumps(checks, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return {
+        "checks": checks,
+        "evidence_digest": f"sha256:{hashlib.sha256(evidence).hexdigest()}",
+        "status": "passed" if checks and all(checks.values()) else "failed",
+    }
+
+
+def _load_counterpart_platform_results(path: Path) -> dict[str, dict[str, object]]:
+    bundle = json.loads(path.read_text(encoding="utf-8"))
+    platform_runs = bundle.get("platform_runs")
+    if not isinstance(platform_runs, dict):
+        raise ValueError("counterpart_platform_evidence_missing")
+    results: dict[str, dict[str, object]] = {}
+    for platform, run in platform_runs.items():
+        if not isinstance(platform, str) or not isinstance(run, dict):
+            raise ValueError("counterpart_platform_evidence_invalid")
+        evidence = run.get("evidence")
+        reference = run.get("evidence_reference")
+        if not isinstance(evidence, dict) or not isinstance(reference, str):
+            raise ValueError("counterpart_platform_evidence_invalid")
+        evidence_content = json.dumps(
+            {
+                "evidence": evidence,
+                "platform": platform,
+                "schema_version": "p1-platform-run-v1",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if reference != f"sha256:{hashlib.sha256(evidence_content).hexdigest()}":
+            raise ValueError("counterpart_platform_evidence_checksum_mismatch")
+        results[platform] = evidence
+    return results
 
 
 def _p1_research_goldens(
@@ -1477,6 +1534,7 @@ def _p1_research_goldens(
     )
     return {
         "observable": observable,
+        "phase_boundaries": rest_payload.get("phase_boundaries", {}),
         "rest_digest": f"sha256:{hashlib.sha256(rest_response.content).hexdigest()}",
         "ui_digest": f"sha256:{hashlib.sha256(visible_text.encode('utf-8')).hexdigest()}",
     }
@@ -1560,7 +1618,7 @@ def _p1_stale_fencing_probe(
     )
 
 
-def run_ticket_05(
+def _run_ticket_05(
     *,
     database_url: str,
     object_root: Path,
@@ -1572,6 +1630,9 @@ def run_ticket_05(
     dagster_url: str | None = None,
     denied_base_url: str | None = None,
     previous_bundle_reference: str | None = None,
+    platform_name: str | None = None,
+    container_image_digest: str | None = None,
+    counterpart_bundle: Path | None = None,
 ) -> dict[str, Any]:
     _validate_deployment_endpoints(base_url, dagster_url)
     deployed = base_url is not None
@@ -1653,6 +1714,12 @@ def run_ticket_05(
         metadata={"media_type": "application/json", "source": "acceptance"},
     )
     object_round_trip = application.object_repository.open(smoke_reference).read() == smoke_content
+    duplicate_smoke_reference = application.object_repository.put_verified(
+        BytesIO(smoke_content),
+        expected_checksum=smoke_checksum,
+        metadata={"media_type": "application/json", "source": "acceptance"},
+    )
+    object_content_addressing = duplicate_smoke_reference == smoke_reference
     with application.state_store.engine.connect() as connection:
         database_ready = connection.execute(text("SELECT 1")).scalar_one() == 1
 
@@ -1663,13 +1730,10 @@ def run_ticket_05(
         listing_id=ticket_02["listing_ids"]["XNAS"],
     )
 
-    optional_modalities = {
-        modality: {
-            "status": "unavailable",
-            "reason": "phase_1_optional_modality_out_of_scope",
-        }
-        for modality in ("documents", "fundamentals", "macro")
-    }
+    observed_phase_boundaries = goldens["phase_boundaries"]
+    if not isinstance(observed_phase_boundaries, dict):
+        raise ValueError("phase_boundary_contract_invalid")
+    optional_modalities: dict[str, Any] = observed_phase_boundaries
     optional_absence_explicit = all(
         prediction["prediction_status"] == "full"
         and "probabilities" in prediction
@@ -1687,20 +1751,25 @@ def run_ticket_05(
 
     scenario_checks = {
         "checksum_failure": checksum_rejected,
-        "duplicate_collection": ticket_02["checks"]["adversarial_scenarios"],
+        "correction": ticket_02["scenario_evidence"]["correction"]["verified"],
+        "duplicate_collection": ticket_02["scenario_evidence"]["duplicate"]["verified"],
         "fixture_promotion_attempt": promotion_decision["code"] == "fixture_use_forbidden",
-        "late_data": ticket_02["checks"]["adversarial_scenarios"],
-        "missing_calendar": ticket_02["checks"]["adversarial_scenarios"],
-        "missing_company_action": ticket_02["checks"]["adversarial_scenarios"],
-        "necessary_modality_missing": ticket_02["checks"]["adversarial_scenarios"],
+        "late_data": ticket_02["scenario_evidence"]["late"]["verified"],
+        "missing_calendar": ticket_02["scenario_evidence"]["missing_calendar"]["verified"],
+        "missing_company_action": ticket_02["scenario_evidence"]["missing_company_action"][
+            "verified"
+        ],
+        "necessary_modality_missing": ticket_02["scenario_evidence"]["missing"]["verified"],
         "one_market_failure": ticket_02["checks"]["one_market_failure_isolated"],
         "optional_modalities_missing": optional_absence_explicit,
         "outbox_redelivery": ticket_03["checks"]["duplicate_delivery_idempotent"],
         "outbox_restart": ticket_03["checks"]["original_event_identity_recovered"],
         "stale_fencing": stale_fencing,
+        "withdrawal": ticket_02["scenario_evidence"]["withdrawal"]["verified"],
     }
     scenario_owners = {
         "checksum_failure": "data_owner",
+        "correction": "data_owner",
         "duplicate_collection": "data_owner",
         "fixture_promotion_attempt": "model_governor",
         "late_data": "data_owner",
@@ -1712,6 +1781,7 @@ def run_ticket_05(
         "outbox_redelivery": "operations_owner",
         "outbox_restart": "operations_owner",
         "stale_fencing": "operations_owner",
+        "withdrawal": "data_owner",
     }
     scenario_results = {
         scenario: {
@@ -1742,16 +1812,6 @@ def run_ticket_05(
         "GATE-DEPLOY-01": deploy_passed,
         "GATE-UX-01": bool(goldens["observable"]) and optional_absence_explicit,
     }
-    gate_owners = {
-        "GATE-POLICY-01": "source_steward",
-        "GATE-PIT-01": "data_owner",
-        "GATE-DATA-01": "data_owner",
-        "GATE-MODEL-01": "model_governor",
-        "GATE-SEC-01": "security_owner",
-        "GATE-OPS-01": "operations_owner",
-        "GATE-DEPLOY-01": "platform_owner",
-        "GATE-UX-01": "research_owner",
-    }
     gate_results = tuple(
         P1GateResult(
             trace_id=trace_id,
@@ -1765,7 +1825,7 @@ def run_ticket_05(
                 if trace_id == "GATE-DEPLOY-01" and not deployed
                 else f"{trace_id.lower()}_failed"
             ),
-            owner=gate_owners[trace_id],
+            owner=P1_HARD_GATE_OWNERS[trace_id],
         )
         for trace_id, passed in gate_conditions.items()
     )
@@ -1778,100 +1838,225 @@ def run_ticket_05(
         source_policy_ids.append(artifacts["source_policy_version"])
         manifest_id = evidence["lineage_ids"]["dataset_version_id"]
         manifest_ids.append(manifest_id)
-        fixture_digests[market] = f"sha256:{evidence['artifact_content_digests'][manifest_id]}"
+        raw_artifact_id = artifacts["raw_artifact"]
+        fixture_digests[market] = f"sha256:{evidence['artifact_content_digests'][raw_artifact_id]}"
 
-    failure_evidence = (
+    failure_outcomes: dict[str, tuple[bool, str, str, str, list[str]]] = {
+        "late_data": (
+            bool(scenario_checks["late_data"]),
+            "blocked",
+            "post_cutoff_evidence",
+            "data_owner",
+            list(ticket_02["scenario_evidence"]["late"]["evidence_ids"]),
+        ),
+        "necessary_modality_missing": (
+            bool(scenario_checks["necessary_modality_missing"]),
+            "blocked",
+            "missing_anchor_price",
+            "data_owner",
+            list(ticket_02["scenario_evidence"]["missing"]["evidence_ids"]),
+        ),
+        "optional_modalities_missing": (
+            bool(scenario_checks["optional_modalities_missing"]),
+            "degraded",
+            "phase_1_optional_modality_out_of_scope",
+            "research_owner",
+            [str(goldens["rest_digest"])],
+        ),
+        "missing_calendar": (
+            bool(scenario_checks["missing_calendar"]),
+            "blocked",
+            "calendar_unresolved",
+            "data_owner",
+            list(ticket_02["scenario_evidence"]["missing_calendar"]["evidence_ids"]),
+        ),
+        "missing_company_action": (
+            bool(scenario_checks["missing_company_action"]),
+            "blocked",
+            "missing_company_action",
+            "data_owner",
+            list(ticket_02["scenario_evidence"]["missing_company_action"]["evidence_ids"]),
+        ),
+        "withdrawal": (
+            bool(scenario_checks["withdrawal"]),
+            "blocked",
+            "source_withdrawn",
+            "data_owner",
+            list(ticket_02["scenario_evidence"]["withdrawal"]["evidence_ids"]),
+        ),
+        "checksum_failure": (
+            bool(scenario_checks["checksum_failure"]),
+            "blocked",
+            "checksum_mismatch",
+            "data_owner",
+            [smoke_reference.object_id],
+        ),
+        "stale_fencing": (
+            bool(scenario_checks["stale_fencing"]),
+            "blocked_then_recovered",
+            "relay_lease_superseded",
+            "operations_owner",
+            [ticket_03["event_id"]],
+        ),
+        "one_market_failure": (
+            bool(scenario_checks["one_market_failure"]),
+            "degraded",
+            "market_failure_isolated",
+            "operations_owner",
+            list(ticket_02["scenario_evidence"]["missing_calendar"]["evidence_ids"]),
+        ),
+        "fixture_promotion_attempt": (
+            bool(scenario_checks["fixture_promotion_attempt"]),
+            "policy_blocked",
+            "fixture_use_forbidden",
+            "model_governor",
+            [trace_evidence["XTAI"]["lineage_ids"]["model_artifact_id"]],
+        ),
+        "source_entitlement": (
+            bool(ticket_04["checks"]["same_grant_denial"]),
+            "policy_blocked",
+            "source_entitlement_revoked",
+            "source_steward",
+            source_policy_ids,
+        ),
+        "outbox_restart": (
+            bool(scenario_checks["outbox_restart"]),
+            "failed_then_recovered",
+            "injected_relay_crash",
+            "operations_owner",
+            [ticket_03["event_id"]],
+        ),
+    }
+    failure_evidence = tuple(
         {
-            "scenario": "late_data",
-            "status": "blocked",
-            "reason": "post_cutoff_evidence",
-            "owner": "data_owner",
-        },
-        {
-            "scenario": "necessary_modality_missing",
-            "status": "blocked",
-            "reason": "missing_anchor_price",
-            "owner": "data_owner",
-        },
-        {
-            "scenario": "optional_modalities_missing",
-            "status": "degraded",
-            "reason": "phase_1_optional_modality_out_of_scope",
-            "owner": "research_owner",
-        },
-        {
-            "scenario": "missing_calendar",
-            "status": "blocked",
-            "reason": "calendar_unresolved",
-            "owner": "data_owner",
-        },
-        {
-            "scenario": "missing_company_action",
-            "status": "blocked",
-            "reason": "missing_company_action",
-            "owner": "data_owner",
-        },
-        {
-            "scenario": "checksum_failure",
-            "status": "blocked",
-            "reason": "checksum_mismatch",
-            "owner": "data_owner",
-        },
-        {
-            "scenario": "stale_fencing",
-            "status": "blocked_then_recovered",
-            "reason": "relay_lease_superseded",
-            "owner": "operations_owner",
-        },
-        {
-            "scenario": "one_market_failure",
-            "status": "degraded",
-            "reason": "market_failure_isolated",
-            "owner": "operations_owner",
-        },
-        {
-            "scenario": "fixture_promotion_attempt",
-            "status": "policy_blocked",
-            "reason": "fixture_use_forbidden",
-            "owner": "model_governor",
-        },
-        {
-            "scenario": "source_entitlement",
-            "status": "policy_blocked",
-            "reason": "source_entitlement_revoked",
-            "owner": "source_steward",
-        },
-        {
-            "scenario": "outbox_restart",
-            "status": "failed_then_recovered",
-            "reason": "injected_relay_crash",
-            "owner": "operations_owner",
-        },
+            "evidence_ids": evidence_ids,
+            "scenario": scenario,
+            "status": expected_status if observed else "failed",
+            "reason": expected_reason if observed else "evidence_capture_failed",
+            "owner": owner,
+        }
+        for scenario, (
+            observed,
+            expected_status,
+            expected_reason,
+            owner,
+            evidence_ids,
+        ) in failure_outcomes.items()
     )
     reproduction_command = "docker compose --profile acceptance run --build --rm acceptance"
+    contract_results = {
+        "dagster_wrapper": _contract_result(
+            {
+                "direct_and_dagster_parity": bool(ticket_02["checks"]["dagster_parity"]),
+                "deployed_wrapper_ready": dagster_ready,
+            }
+        ),
+        "event": _contract_result(
+            {
+                "consumer_transaction_rollback": bool(
+                    ticket_03["checks"]["consumer_transaction_recovered"]
+                ),
+                "relay_crash_recovery": bool(
+                    ticket_03["checks"]["original_event_identity_recovered"]
+                ),
+                "single_consumer_effect": bool(
+                    ticket_03["checks"]["zero_lost_or_duplicate_effects"]
+                ),
+            }
+        ),
+        "filesystem_object_repository": _contract_result(
+            {
+                "checksum_rejected": checksum_rejected,
+                "content_addressed_duplicate": object_content_addressing,
+                "round_trip": object_round_trip,
+            }
+        ),
+        "fixture_market_provider": _contract_result(
+            {
+                "market_specific_adapter": bool(ticket_02["checks"]["market_specific_adapter"]),
+                "shared_contract": bool(ticket_02["checks"]["shared_domain_contract"]),
+            }
+        ),
+        "postgresql": _contract_result(
+            {
+                "authoritative_store": actual_postgresql,
+                "connection_ready": database_ready,
+                "lease_fencing": stale_fencing,
+                "transaction_rollback": bool(ticket_03["checks"]["consumer_transaction_recovered"]),
+            }
+        ),
+        "rest": _contract_result(
+            {
+                "phase_boundary_observed": optional_absence_explicit,
+                "schema_and_surfaces_observed": bool(goldens["observable"]),
+            }
+        ),
+    }
+    git_commit = _git_commit(git_dir)
+    application_payload_digest = digest_required_paths(
+        project_root,
+        ("src", "pyproject.toml", "requirements.lock", "openapi"),
+    )
+    deployment_digest = digest_required_paths(
+        project_root,
+        ("Dockerfile", "compose.yaml", "docker", ".github/workflows"),
+    )
+    migration_digest = digest_required_paths(project_root, ("alembic.ini", "migrations"))
+    restart_results = {
+        "outbox_recovered": ticket_03["checks"]["original_event_identity_recovered"],
+        "same_event_identity": ticket_03["checks"]["original_event_identity_recovered"],
+        "single_consumer_effect": ticket_03["checks"]["zero_lost_or_duplicate_effects"],
+    }
+    resource_smoke = {
+        "api_ready": bool(goldens["observable"]),
+        "dagster_ready": dagster_ready,
+        "filesystem_object_round_trip": object_round_trip,
+        "postgresql_ready": actual_postgresql,
+        "formal_capacity_claim": False,
+    }
+    platform_results = (
+        _load_counterpart_platform_results(counterpart_bundle)
+        if counterpart_bundle is not None
+        else {}
+    )
+    current_platform_passed = (
+        platform_name in {"windows_docker_desktop", "linux_ci"}
+        and deploy_passed
+        and all(result["status"] == "passed" for result in contract_results.values())
+        and all(result["status"] == "passed" for result in scenario_results.values())
+        and all(restart_results.values())
+        and all(
+            result is True
+            for name, result in resource_smoke.items()
+            if name != "formal_capacity_claim"
+        )
+        and is_sha256_reference(container_image_digest)
+    )
+    if platform_name is not None:
+        platform_results[platform_name] = {
+            "application_payload_digest": application_payload_digest,
+            "container_image_digest": container_image_digest,
+            "contract_results": contract_results,
+            "deployment_digest": deployment_digest,
+            "git_commit": git_commit,
+            "migration_digest": migration_digest,
+            "reproduction_command": reproduction_command,
+            "resource_smoke": resource_smoke,
+            "restart_results": restart_results,
+            "scenario_results": scenario_results,
+            "status": "passed" if current_platform_passed else "blocked",
+        }
     evaluation = P1AcceptanceEvaluation(
         attempt_id=f"p1-{uuid4()}",
         created_at=datetime.now(UTC),
-        git_commit=_git_commit(git_dir),
-        image_digest=_tree_digest(
-            project_root,
-            ("src", "pyproject.toml", "requirements.lock", "openapi"),
-        ),
-        deployment_digest=_tree_digest(
-            project_root,
-            ("Dockerfile", "compose.yaml", "docker", ".github/workflows"),
-        ),
-        migration_digest=_tree_digest(project_root, ("alembic.ini", "migrations")),
+        git_commit=git_commit,
+        image_digest=application_payload_digest,
+        deployment_digest=deployment_digest,
+        migration_digest=migration_digest,
         fixture_digests=fixture_digests,
         source_policy_ids=tuple(source_policy_ids),
         manifest_ids=tuple(manifest_ids),
-        contract_results={
-            "dagster_wrapper": "passed" if ticket_02["checks"]["dagster_parity"] else "failed",
-            "event": "passed" if ticket_03["status"] == "passed" else "failed",
-            "filesystem_object_repository": "passed" if object_round_trip else "failed",
-            "postgresql": "passed" if actual_postgresql else "blocked",
-            "rest": "passed" if goldens["observable"] else "failed",
-        },
+        contract_results=contract_results,
         end_to_end_ids=(
             "trace-p1-trace-tw-01",
             "trace-p1-trace-us-01",
@@ -1883,21 +2068,12 @@ def run_ticket_05(
         failure_evidence=failure_evidence,
         rest_golden_digest=str(goldens["rest_digest"]),
         ui_golden_digest=str(goldens["ui_digest"]),
-        restart_results={
-            "outbox_recovered": ticket_03["checks"]["original_event_identity_recovered"],
-            "same_event_identity": ticket_03["checks"]["original_event_identity_recovered"],
-            "single_consumer_effect": ticket_03["checks"]["zero_lost_or_duplicate_effects"],
-        },
-        resource_smoke={
-            "api_ready": bool(goldens["observable"]),
-            "dagster_ready": dagster_ready,
-            "filesystem_object_round_trip": object_round_trip,
-            "postgresql_ready": actual_postgresql,
-            "formal_capacity_claim": False,
-        },
+        restart_results=restart_results,
+        resource_smoke=resource_smoke,
         gate_results=gate_results,
         previous_bundle_reference=previous_bundle_reference,
         reproduction_command=reproduction_command,
+        platform_results=platform_results,
     )
     bundle_reference = P1AcceptanceBundlePublisher(application.object_repository).publish(
         evaluation
@@ -1905,6 +2081,7 @@ def run_ticket_05(
     bundle = json.loads(application.object_repository.open(bundle_reference).read())
     return {
         "status": bundle["status"],
+        "platform_run_status": "passed" if current_platform_passed else "blocked",
         "trace_ids": list(P1_TRACE_IDS),
         "hard_gates": bundle["hard_gates"],
         "scenario_results": scenario_results,
@@ -1915,3 +2092,93 @@ def run_ticket_05(
             "uri": bundle_reference.uri,
         },
     }
+
+
+def run_ticket_05(
+    *,
+    database_url: str,
+    object_root: Path,
+    information_cutoff: datetime,
+    observed_at: datetime,
+    project_root: Path,
+    git_dir: Path,
+    base_url: str | None = None,
+    dagster_url: str | None = None,
+    denied_base_url: str | None = None,
+    previous_bundle_reference: str | None = None,
+    platform_name: str | None = None,
+    container_image_digest: str | None = None,
+    counterpart_bundle: Path | None = None,
+) -> dict[str, Any]:
+    try:
+        return _run_ticket_05(
+            database_url=database_url,
+            object_root=object_root,
+            information_cutoff=information_cutoff,
+            observed_at=observed_at,
+            project_root=project_root,
+            git_dir=git_dir,
+            base_url=base_url,
+            dagster_url=dagster_url,
+            denied_base_url=denied_base_url,
+            previous_bundle_reference=previous_bundle_reference,
+            platform_name=platform_name,
+            container_image_digest=container_image_digest,
+            counterpart_bundle=counterpart_bundle,
+        )
+    except Exception:
+        repository = FilesystemObjectRepository(object_root)
+        reproduction_command = "docker compose --profile acceptance run --build --rm acceptance"
+        evaluation = P1AcceptanceEvaluation(
+            attempt_id=f"p1-{uuid4()}",
+            created_at=datetime.now(UTC),
+            git_commit="unavailable:evidence_capture_failed",
+            image_digest="unavailable:evidence_capture_failed",
+            deployment_digest="unavailable:evidence_capture_failed",
+            migration_digest="unavailable:evidence_capture_failed",
+            fixture_digests={},
+            source_policy_ids=(),
+            manifest_ids=(),
+            contract_results={"acceptance_runner": {"status": "blocked"}},
+            end_to_end_ids=(),
+            scenario_results={"acceptance_runner": {"status": "blocked"}},
+            failure_evidence=(
+                {
+                    "owner": "platform_owner",
+                    "reason": "evidence_capture_failed",
+                    "scenario": "acceptance_runner",
+                    "stage": "orchestration",
+                    "status": "exception",
+                },
+            ),
+            rest_golden_digest="unavailable:evidence_capture_failed",
+            ui_golden_digest="unavailable:evidence_capture_failed",
+            restart_results={},
+            resource_smoke={},
+            gate_results=tuple(
+                P1GateResult(
+                    trace_id=trace_id,
+                    status="blocked",
+                    reason="evidence_capture_failed",
+                    owner=owner,
+                )
+                for trace_id, owner in P1_HARD_GATE_OWNERS.items()
+            ),
+            previous_bundle_reference=previous_bundle_reference,
+            reproduction_command=reproduction_command,
+        )
+        bundle_reference = P1AcceptanceBundlePublisher(repository).publish(evaluation)
+        bundle = json.loads(repository.open(bundle_reference).read())
+        return {
+            "status": bundle["status"],
+            "platform_run_status": "blocked",
+            "trace_ids": list(P1_TRACE_IDS),
+            "hard_gates": bundle["hard_gates"],
+            "scenario_results": evaluation.scenario_results,
+            "optional_modalities": {},
+            "bundle": {
+                "object_id": bundle_reference.object_id,
+                "checksum": bundle_reference.checksum,
+                "uri": bundle_reference.uri,
+            },
+        }

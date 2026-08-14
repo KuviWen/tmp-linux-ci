@@ -12,3 +12,4 @@ htmlcov/
 .ticket-02-objects/
 .ticket-02.db
 .env.test
+.artifacts/

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
@@ -49,6 +51,25 @@ def _parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--project-root", type=Path, default=Path.cwd())
     acceptance.add_argument("--git-dir", type=Path, default=Path.cwd() / ".git")
     acceptance.add_argument("--previous-bundle-reference")
+    acceptance.add_argument(
+        "--platform-name",
+        choices=["windows_docker_desktop", "linux_ci"],
+        default=os.environ.get("P1_ACCEPTANCE_PLATFORM"),
+    )
+    acceptance.add_argument(
+        "--container-image-digest",
+        default=os.environ.get("P1_OCI_IMAGE_DIGEST"),
+    )
+    acceptance.add_argument(
+        "--counterpart-bundle",
+        type=Path,
+        default=(Path(value) if (value := os.environ.get("P1_COUNTERPART_BUNDLE")) else None),
+    )
+    acceptance.add_argument(
+        "--evidence-export-dir",
+        type=Path,
+        default=(Path(value) if (value := os.environ.get("P1_ACCEPTANCE_EXPORT_DIR")) else None),
+    )
     relay = commands.add_parser("relay")
     relay.add_argument("--once", action="store_true")
     local_key = commands.add_parser("local-key")
@@ -118,13 +139,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "project_root": arguments.project_root,
                     "git_dir": arguments.git_dir,
                     "previous_bundle_reference": arguments.previous_bundle_reference,
+                    "platform_name": arguments.platform_name,
+                    "container_image_digest": arguments.container_image_digest,
+                    "counterpart_bundle": arguments.counterpart_bundle,
                 }
             )
         report = runner(
             **runner_arguments,
         )
+        if arguments.ticket == "ticket-05" and arguments.evidence_export_dir is not None:
+            export_directory = arguments.evidence_export_dir
+            export_directory.mkdir(parents=True, exist_ok=True)
+            bundle_report = report["bundle"]
+            if not isinstance(bundle_report, dict):
+                raise RuntimeError("acceptance_bundle_report_invalid")
+            bundle_content = Path(str(bundle_report["uri"])).read_bytes()
+            bundle_checksum = hashlib.sha256(bundle_content).hexdigest()
+            if bundle_checksum != bundle_report["checksum"]:
+                raise RuntimeError("acceptance_bundle_export_checksum_mismatch")
+            content_path = export_directory / f"{bundle_checksum}.p1-acceptance.json"
+            stable_path = export_directory / "p1-acceptance-bundle.json"
+            checksum_path = export_directory / "p1-acceptance-bundle.json.sha256"
+            content_path.write_bytes(bundle_content)
+            stable_path.write_bytes(bundle_content)
+            checksum_path.write_text(
+                f"{bundle_checksum}  p1-acceptance-bundle.json\n",
+                encoding="utf-8",
+            )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
-        return 0 if report["status"] == "passed" else 1
+        run_status = report.get("platform_run_status", report["status"])
+        return 0 if run_status == "passed" else 1
     if arguments.command == "relay":
         if not arguments.once:
             parser.error("relay currently requires --once")

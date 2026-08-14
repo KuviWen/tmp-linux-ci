@@ -22,6 +22,14 @@ from stock_forecasting.contracts import PredictionPayload
 
 OPENAPI_SOURCE = Path(__file__).parents[3] / "openapi" / "openapi.yaml"
 
+P1_PHASE_BOUNDARIES = {
+    modality: {
+        "status": "unavailable",
+        "reason": "phase_1_optional_modality_out_of_scope",
+    }
+    for modality in ("documents", "fundamentals", "macro")
+}
+
 
 def _etag(payload: object) -> str:
     encoded = json.dumps(
@@ -256,6 +264,7 @@ def create_web_app(application: Application) -> FastAPI:
         payload: dict[str, object] = {
             "information_cutoff": information_cutoff,
             "execution_purpose": "fixture",
+            "phase_boundaries": P1_PHASE_BOUNDARIES,
             "items": items,
         }
         tag = _etag(payload)
@@ -357,7 +366,8 @@ def create_web_app(application: Application) -> FastAPI:
             )
         body = (
             "<main><header><p>研究決策支援系統</p><h1>比較矩陣</h1>"
-            "<p>所有結果均為 fixture 工程證據，不是正式預測。</p></header>"
+            "<p>所有結果均為 fixture 工程證據，不是正式預測。</p>"
+            '<p class="status">文件、基本面、總體模態：P1 尚未提供</p></header>'
             f'<section aria-label="目前檢視條件"><p>期間焦點 {horizon}</p>'
             f"<p>市場 {escape(market)}</p><p>資料支援 {escape(support)}</p>"
             f"<p>排序 {escape(sort)}</p></section>"

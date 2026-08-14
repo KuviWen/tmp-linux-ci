@@ -15,6 +15,10 @@ x-application-environment: &application-environment
   LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
   PLATFORM_ADMIN_API_KEY_FILE: /run/stock-forecasting/platform-admin-api-key.json
   AUTHORIZATION_POLICY_SET_ID: fixture-active-v1
+  P1_ACCEPTANCE_PLATFORM: ${P1_ACCEPTANCE_PLATFORM:-windows_docker_desktop}
+  P1_OCI_IMAGE_DIGEST: ${P1_OCI_IMAGE_DIGEST:-}
+  P1_ACCEPTANCE_EXPORT_DIR: /var/lib/stock-forecasting/exports
+  P1_COUNTERPART_BUNDLE: ${P1_COUNTERPART_BUNDLE:-}
 
 x-application: &application
   image: stock-forecasting-ticket-05-app:0.1.0
@@ -155,6 +159,10 @@ services:
     <<: *application
     build:
       context: .
+      args:
+        SOURCE_DATE_EPOCH: "0"
+      provenance: false
+      sbom: false
     command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "127.0.0.1", "--port", "8000"]
     ports:
       - '127.0.0.1:18005:8080'
@@ -332,6 +340,7 @@ services:
       - dagster-home:/var/lib/dagster
       - local-api-key:/run/stock-forecasting
       - ./.git:/workspace/.git:ro
+      - ./.artifacts:/var/lib/stock-forecasting/exports
     command:
       - python
       - -m

@@ -62,7 +62,12 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
     assert {services[name]["image"] for name in application_services} == {
         "stock-forecasting-ticket-05-app:0.1.0"
     }
-    assert services["api"]["build"] == {"context": "."}
+    assert services["api"]["build"] == {
+        "context": ".",
+        "args": {"SOURCE_DATE_EPOCH": "0"},
+        "provenance": False,
+        "sbom": False,
+    }
     assert all("build" not in services[name] for name in application_services if name != "api")
     assert services["outbox-relay"]["profiles"] == ["relay"]
     assert services["outbox-relay"]["command"] == [
@@ -232,10 +237,21 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "LOCAL_API_KEY_FILE": "/run/stock-forecasting/local-api-key.json",
         "PLATFORM_ADMIN_API_KEY_FILE": "/run/stock-forecasting/platform-admin-api-key.json",
         "AUTHORIZATION_POLICY_SET_ID": "fixture-active-v1",
+        "P1_ACCEPTANCE_PLATFORM": "${P1_ACCEPTANCE_PLATFORM:-windows_docker_desktop}",
+        "P1_OCI_IMAGE_DIGEST": "${P1_OCI_IMAGE_DIGEST:-}",
+        "P1_ACCEPTANCE_EXPORT_DIR": "/var/lib/stock-forecasting/exports",
+        "P1_COUNTERPART_BUNDLE": "${P1_COUNTERPART_BUNDLE:-}",
     }
     for name in application_services:
         assert "local-api-key:/run/stock-forecasting" in services[name]["volumes"]
     assert "./.git:/workspace/.git:ro" in services["acceptance"]["volumes"]
+    assert "./.artifacts:/var/lib/stock-forecasting/exports" in services["acceptance"]["volumes"]
+    assert compose["x-application-environment"]["P1_ACCEPTANCE_PLATFORM"] == (
+        "${P1_ACCEPTANCE_PLATFORM:-windows_docker_desktop}"
+    )
+    assert compose["x-application-environment"]["P1_ACCEPTANCE_EXPORT_DIR"] == (
+        "/var/lib/stock-forecasting/exports"
+    )
     assert "local-api-key" in compose["volumes"]
     role_grant_sql = (
         REPOSITORY_ROOT / "docker" / "postgres" / "grant-application-role.sql"
@@ -282,14 +298,54 @@ def test_linux_ci_uses_the_same_compose_acceptance_command() -> None:
     job = workflow["jobs"]["p1-acceptance"]
 
     assert job["runs-on"] == "ubuntu-24.04"
+    assert job["env"] == {"BUILDX_NO_DEFAULT_ATTESTATIONS": "1"}
     assert workflow["permissions"] == {"contents": "read"}
     commands = [step.get("run") for step in job["steps"]]
     assert "docker compose --profile acceptance run --build --rm acceptance" in commands
-    assert "python -m pytest" in commands
+    assert (
+        'python -m pytest -m "not postgresql" --junitxml=.artifacts/non-postgresql.xml' in commands
+    )
+    postgres_step = next(
+        step for step in job["steps"] if step.get("name") == "PostgreSQL provider contract"
+    )
+    assert postgres_step["env"]["TEST_DATABASE_URL"].startswith("postgresql+psycopg://stock_test:")
+    assert postgres_step["run"] == (
+        "python -m pytest -m postgresql -q --junitxml=.artifacts/postgresql.xml"
+    )
+    assert (
+        "cd .artifacts && sha256sum non-postgresql.xml postgresql.xml > contract-reports.sha256"
+        in commands
+    )
     assert "python -m mypy src tests" in commands
     assert "python -m ruff check ." in commands
     assert "python -m ruff format --check ." in commands
-    cleanup = next(step for step in job["steps"] if step.get("name") == "Clean acceptance state")
+    acceptance_index = next(
+        index
+        for index, step in enumerate(job["steps"])
+        if step.get("run") == "docker compose --profile acceptance run --build --rm acceptance"
+    )
+    verify_index = next(
+        index
+        for index, step in enumerate(job["steps"])
+        if step.get("name") == "Verify exported acceptance bundle"
+    )
+    upload_index = next(
+        index
+        for index, step in enumerate(job["steps"])
+        if step.get("uses") == "actions/upload-artifact@v4"
+    )
+    cleanup_index = next(
+        index
+        for index, step in enumerate(job["steps"])
+        if step.get("name") == "Clean acceptance state"
+    )
+    assert acceptance_index < verify_index < upload_index < cleanup_index
+    assert job["steps"][verify_index]["run"] == (
+        "cd .artifacts && sha256sum --check contract-reports.sha256 && "
+        "sha256sum --check p1-acceptance-bundle.json.sha256"
+    )
+    assert job["steps"][upload_index]["with"]["path"] == ".artifacts/"
+    cleanup = job["steps"][cleanup_index]
     assert cleanup["if"] == "always()"
     assert cleanup["run"] == "docker compose --profile acceptance down --volumes --remove-orphans"
 

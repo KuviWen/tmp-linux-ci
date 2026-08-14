@@ -185,13 +185,28 @@ components:
         projection: {$ref: '#/components/schemas/ProjectionStatus'}
     PredictionMatrix:
       type: object
-      required: [information_cutoff, execution_purpose, items]
+      required: [information_cutoff, execution_purpose, phase_boundaries, items]
       properties:
         information_cutoff: {type: string, format: date-time}
         execution_purpose: {type: string, const: fixture}
+        phase_boundaries:
+          type: object
+          additionalProperties: false
+          required: [documents, fundamentals, macro]
+          properties:
+            documents: {$ref: '#/components/schemas/UnavailablePhaseModality'}
+            fundamentals: {$ref: '#/components/schemas/UnavailablePhaseModality'}
+            macro: {$ref: '#/components/schemas/UnavailablePhaseModality'}
         items:
           type: array
           items: {$ref: '#/components/schemas/MatrixItem'}
+    UnavailablePhaseModality:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: {type: string, const: unavailable}
+        reason: {type: string, const: phase_1_optional_modality_out_of_scope}
     ListingResearch:
       type: object
       required:

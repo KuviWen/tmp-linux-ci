@@ -23,16 +23,21 @@ Status: ready-for-agent
   `stock-forecasting acceptance ticket-05` 聚合既有 ticket 02／03／04 公共 runners，再驗證
   checksum、stale fencing、optional-modality phase boundary 與 fixture promotion denial。
 - Bundle seam：`P1AcceptanceBundlePublisher.publish(evaluation)` 使用真實 filesystem
-  ObjectRepository 發布 canonical、content-addressed JSON；missing gate fail closed，rerun 以新
-  attempt／reference 建立新物件。
-- Windows Docker Desktop deployed command 已從不存在的 ticket-05 project state 通過；每次驗收輸出
-  當次 content-addressed bundle reference，最終提交後需再執行以對齊 Git commit 與 image payload。
+  ObjectRepository 發布 canonical、content-addressed JSON；invalid／duplicate／missing gate 與矛盾
+  evidence fail closed，rerun 以新 attempt／reference 建立新物件。
+- 每個平台 run 發布獨立的 content-addressed evidence，綁定實際 OCI image ID、Git、application
+  payload、deployment、migration、contract、scenario、restart 與 resource 結果；只有同一
+  provenance 的 Windows Docker Desktop 與 Linux CI evidence 都通過，P1-EXIT 才能 passing。
+- Windows Docker Desktop deployed path 已從不存在的 ticket-05 state 通過；目前 bundle 正確保持
+  `blocked`（`dual_platform_evidence_required`），等待同 commit 的 hosted Linux artifact。
+- Linux workflow 會執行真實 PostgreSQL opt-in suite，並在清理前 checksum 驗證及上傳匯出的
+  bundle；repo 無 remote／hosted run 證據，因此對應 criterion 保持未勾選。
+- Failure matrix 由實際觀察建立，correction／withdrawal 分列；optional modalities 由 REST／UI
+  公開 phase boundary 觀察；fixture digest 綁 raw artifact 而非 dataset manifest。
 - 驗證：`python -m pytest tests/acceptance/test_acceptance_runner.py
   tests/contracts/test_acceptance_bundle.py tests/contracts/test_compose_contract.py
-  tests/contracts/test_object_repository.py -q`（21 passed）；`python -m mypy src tests`；
+  tests/contracts/test_object_repository.py -q`；`python -m mypy src tests`；
   `python -m ruff check .`；`python -m ruff format --check .`；上述 Docker Compose acceptance command。
 - PostgreSQL 17 provider suite：依 `docs/development/postgresql-test-environment.md` 啟動隔離 project 後，
-  `python -m pytest -m postgresql -q`（1 passed，116 deselected）。完整 suite：
-  `python -m pytest -q`（116 passed，1 skipped；PostgreSQL opt-in 另行通過）。
-- Linux CI workflow 與相同 command 已建立並由 contract test 驗證，但 repo 無 remote／hosted run
-  證據；對應 criterion 保持未勾選，不宣稱 Linux CI 已通過。
+  `python -m pytest -m postgresql -q`。完整 suite：`python -m pytest -q`（PostgreSQL opt-in 另行
+  通過）。確切 counts 與最終 bundle reference 以本次實作最終回報為準。
