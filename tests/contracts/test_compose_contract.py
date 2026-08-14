@@ -385,6 +385,7 @@ def test_linux_ci_uses_the_same_compose_acceptance_command() -> None:
         "sha256sum --check p1-evidence-objects.sha256"
     )
     assert job["steps"][upload_index]["with"]["path"] == ".artifacts/"
+    assert job["steps"][upload_index]["with"]["include-hidden-files"] is True
     cleanup = job["steps"][cleanup_index]
     assert cleanup["if"] == "always()"
     assert cleanup["run"] == "docker compose --profile acceptance down --volumes --remove-orphans"
