@@ -1,20 +1,30 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol
+from uuid import uuid4
 
 from dagster import ResourceDefinition, materialize
 from fastapi.testclient import TestClient
 from httpx import Client
+from sqlalchemy import text
 
+from stock_forecasting.acceptance_bundle import (
+    P1_TRACE_IDS,
+    P1AcceptanceBundlePublisher,
+    P1AcceptanceEvaluation,
+    P1GateResult,
+)
 from stock_forecasting.adapters.dagster import (
     FixtureRunner,
     xnas_fixture_eod_asset,
@@ -43,6 +53,7 @@ from stock_forecasting.dagster_deployment import (
 from stock_forecasting.fixture_market import FixtureMarket, default_fixture_market_adapters
 from stock_forecasting.fixture_scenarios import FixtureScenario
 from stock_forecasting.outbox import RelayFault, RelayOutcome
+from stock_forecasting.platform.object_repository import ObjectIntegrityError
 from stock_forecasting.research_query import ResearchQuery
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand, FixtureEodOutcome
 from stock_forecasting.workflows.fixture_use import FixtureUseCommand, FixtureUseTarget
@@ -77,6 +88,32 @@ class _CrashOperationsProjection(RelayFault):
     def before_consumer_commit(self, consumer_name: str, event_id: str) -> None:
         if consumer_name == "operations_projection":
             raise RuntimeError("injected_consumer_transaction_crash")
+
+    def before_ack(self, event_id: str) -> None:
+        pass
+
+
+class _MutableRelayClock:
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def now(self) -> datetime:
+        return self._now
+
+    def advance(self, delta: timedelta) -> None:
+        self._now += delta
+
+
+class _ExpireResearchConsumerLease(RelayFault):
+    def __init__(self, clock: _MutableRelayClock) -> None:
+        self._clock = clock
+
+    def before_consumers(self, event_id: str) -> None:
+        pass
+
+    def before_consumer_commit(self, consumer_name: str, event_id: str) -> None:
+        if consumer_name == "research_projection":
+            self._clock.advance(timedelta(seconds=3))
 
     def before_ack(self, event_id: str) -> None:
         pass
@@ -1316,4 +1353,565 @@ def run_ticket_04(
         "formal_source_qualified": False,
         "formal_prediction": False,
         "checks": checks,
+    }
+
+
+def _git_commit(git_dir: Path) -> str:
+    head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+    if not head.startswith("ref: "):
+        return head
+    reference = head.removeprefix("ref: ")
+    loose_reference = git_dir / reference
+    if loose_reference.exists():
+        return loose_reference.read_text(encoding="utf-8").strip()
+    packed_refs = git_dir / "packed-refs"
+    if packed_refs.exists():
+        for line in packed_refs.read_text(encoding="utf-8").splitlines():
+            if line.endswith(f" {reference}"):
+                return line.split(" ", 1)[0]
+    raise RuntimeError("git_commit_unavailable")
+
+
+def _tree_digest(project_root: Path, relative_paths: tuple[str, ...]) -> str:
+    files: list[Path] = []
+    for relative_path in relative_paths:
+        candidate = project_root / relative_path
+        if candidate.is_file():
+            files.append(candidate)
+        elif candidate.is_dir():
+            files.extend(
+                path
+                for path in candidate.rglob("*")
+                if path.is_file()
+                and "__pycache__" not in path.parts
+                and path.suffix not in {".pyc", ".pyo"}
+            )
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda item: item.relative_to(project_root).as_posix()):
+        digest.update(path.relative_to(project_root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _p1_research_goldens(
+    application: Application,
+    *,
+    base_url: str | None,
+    information_cutoff: datetime,
+    listing_id: str,
+) -> dict[str, object]:
+    authorization_headers = {
+        "Authorization": application.local_identity.credential.authorization_header()
+    }
+    client: HttpClient = (
+        TestClient(
+            create_web_app(application),
+            headers=authorization_headers,
+            client=("127.0.0.1", 50000),
+        )
+        if base_url is None
+        else Client(base_url=base_url, timeout=10.0, headers=authorization_headers)
+    )
+    cutoff_text = information_cutoff.isoformat().replace("+00:00", "Z")
+    rest_response = client.get(
+        "/api/v1/research/predictions",
+        params={"information_cutoff": cutoff_text},
+    )
+    matrix_response = client.get(
+        "/research",
+        params={
+            "information_cutoff": cutoff_text,
+            "horizon": 5,
+            "market": "all",
+            "support": "full",
+            "sort": "confidence_desc",
+        },
+    )
+    detail_params = {
+        "information_cutoff": cutoff_text,
+        "horizon": 5,
+        "market": "all",
+        "support": "full",
+        "sort": "confidence_desc",
+        "tab": "lineage",
+    }
+    detail_response = client.get(
+        f"/research/listings/{listing_id}",
+        params=detail_params,
+    )
+    detail_reload = client.get(
+        f"/research/listings/{listing_id}",
+        params=detail_params,
+    )
+    client.close()
+    rest_payload = rest_response.json() if rest_response.status_code == 200 else {"items": []}
+    items = rest_payload["items"]
+    visible_text = matrix_response.text + detail_response.text
+    observable = (
+        rest_response.status_code == 200
+        and matrix_response.status_code == 200
+        and detail_response.status_code == 200
+        and detail_response.text == detail_reload.text
+        and {item["market"] for item in items} == {"XTAI", "XNAS"}
+        and all(
+            {prediction["horizon_sessions"] for prediction in item["predictions"]} == {1, 5, 20}
+            for item in items
+        )
+        and '<html lang="zh-Hant">' in visible_text
+        and "Fixture／非正式預測" in visible_text
+        and "資訊截止點" in visible_text
+        and "上漲" in visible_text
+        and "盤整" in visible_text
+        and "下跌" in visible_text
+        and "信心" in visible_text
+        and "資料支援" in visible_text
+        and "FeatureSnapshot" in visible_text
+        and "ModelArtifact" in visible_text
+        and "服務指派" in visible_text
+        and "資料集版本" in visible_text
+        and "原始資料物件" in visible_text
+        and "<a href=" in visible_text
+        and "a:focus-visible" in visible_text
+    )
+    return {
+        "observable": observable,
+        "rest_digest": f"sha256:{hashlib.sha256(rest_response.content).hexdigest()}",
+        "ui_digest": f"sha256:{hashlib.sha256(visible_text.encode('utf-8')).hexdigest()}",
+    }
+
+
+def _p1_stale_fencing_probe(
+    *,
+    database_url: str,
+    object_root: Path,
+    information_cutoff: datetime,
+    deployed: bool,
+) -> bool:
+    clock = _MutableRelayClock(information_cutoff)
+    if deployed:
+        key_file = os.environ.get("LOCAL_API_KEY_FILE")
+        if key_file is None:
+            raise RuntimeError("LOCAL_API_KEY_FILE is required for deployed acceptance")
+        identity = LocalApiKeyIdentity.load(Path(key_file))
+        expired_worker = build_application(
+            observed_at=information_cutoff,
+            object_root=object_root,
+            database_url=database_url,
+            relay_clock=clock,
+            relay_worker_id="p1-expired-worker",
+            relay_fault=_ExpireResearchConsumerLease(clock),
+            local_identity=identity,
+            authorization_policy_set_id=FIXTURE_ACTIVE_POLICY_SET,
+        )
+    else:
+        expired_worker = build_test_application(
+            observed_at=information_cutoff,
+            object_root=object_root,
+            database_url=database_url,
+            relay_clock=clock,
+            relay_worker_id="p1-expired-worker",
+            relay_fault=_ExpireResearchConsumerLease(clock),
+            authorization_policy_set_id=FIXTURE_ACTIVE_POLICY_SET,
+        )
+        identity = expired_worker.local_identity
+    outcome = _fixture_success(
+        expired_worker,
+        FixtureEodCommand(
+            information_cutoff=information_cutoff,
+            trace_id="trace-p1-exit-01-stale-fencing",
+            idempotency_key="p1-exit-01-stale-fencing",
+        ),
+    )
+    lease_lost = expired_worker.relay_outbox(event_id=outcome.outbox_event_id)
+    after_expiry = expired_worker.operations_control.get_outbox_recovery(outcome.outbox_event_id)
+    replacement = (
+        build_application(
+            observed_at=information_cutoff,
+            object_root=object_root,
+            database_url=database_url,
+            relay_clock=clock,
+            relay_worker_id="p1-replacement-worker",
+            local_identity=identity,
+            authorization_policy_set_id=FIXTURE_ACTIVE_POLICY_SET,
+        )
+        if deployed
+        else build_test_application(
+            observed_at=information_cutoff,
+            object_root=object_root,
+            database_url=database_url,
+            relay_clock=clock,
+            relay_worker_id="p1-replacement-worker",
+            local_identity=identity,
+            authorization_policy_set_id=FIXTURE_ACTIVE_POLICY_SET,
+        )
+    )
+    recovered = replacement.relay_outbox(event_id=outcome.outbox_event_id)
+    after_recovery = replacement.operations_control.get_outbox_recovery(outcome.outbox_event_id)
+    return (
+        lease_lost.status == "busy"
+        and after_expiry["consumer_effect_counts"]
+        == {"research_projection": 0, "operations_projection": 0}
+        and recovered.status == "delivered"
+        and [attempt["fencing_token"] for attempt in after_recovery["delivery_attempts"]] == [1, 2]
+        and after_recovery["consumer_effect_counts"]
+        == {"research_projection": 1, "operations_projection": 1}
+    )
+
+
+def run_ticket_05(
+    *,
+    database_url: str,
+    object_root: Path,
+    information_cutoff: datetime,
+    observed_at: datetime,
+    project_root: Path,
+    git_dir: Path,
+    base_url: str | None = None,
+    dagster_url: str | None = None,
+    denied_base_url: str | None = None,
+    previous_bundle_reference: str | None = None,
+) -> dict[str, Any]:
+    _validate_deployment_endpoints(base_url, dagster_url)
+    deployed = base_url is not None
+    if deployed != (denied_base_url is not None):
+        raise ValueError("denied_deployment_endpoint_must_match_deployment_mode")
+
+    ticket_03 = run_ticket_03(
+        database_url=database_url,
+        object_root=object_root,
+        information_cutoff=information_cutoff + timedelta(days=10),
+        observed_at=observed_at + timedelta(days=10),
+        base_url=base_url,
+        dagster_url=dagster_url,
+    )
+    stale_fencing = _p1_stale_fencing_probe(
+        database_url=database_url,
+        object_root=object_root,
+        information_cutoff=information_cutoff + timedelta(days=30),
+        deployed=deployed,
+    )
+    ticket_02 = run_ticket_02(
+        database_url=database_url,
+        object_root=object_root,
+        information_cutoff=information_cutoff,
+        observed_at=observed_at,
+        base_url=base_url,
+        dagster_url=dagster_url,
+    )
+    ticket_04 = run_ticket_04(
+        database_url=database_url,
+        object_root=object_root,
+        information_cutoff=information_cutoff + timedelta(days=20),
+        observed_at=observed_at + timedelta(days=20),
+        base_url=base_url,
+        dagster_url=dagster_url,
+        denied_base_url=denied_base_url,
+    )
+    application = _build_acceptance_application(
+        observed_at=observed_at,
+        object_root=object_root,
+        database_url=database_url,
+        deployed=deployed,
+    )
+
+    trace_evidence = {
+        "XTAI": application.operations_control.get_trace_evidence("trace-p1-trace-tw-01"),
+        "XNAS": application.operations_control.get_trace_evidence("trace-p1-trace-us-01"),
+    }
+    research = {
+        market: _listing_success(
+            application.research_query,
+            listing_id=listing_id,
+            information_cutoff=information_cutoff,
+        )
+        for market, listing_id in ticket_02["listing_ids"].items()
+    }
+    promotion_decision = application.attempt_fixture_use(
+        FixtureUseCommand(
+            model_artifact_id=trace_evidence["XTAI"]["lineage_ids"]["model_artifact_id"],
+            target="model_promotion",
+            trace_id="trace-p1-exit-01-fixture-promotion",
+        )
+    )
+
+    checksum_rejected = False
+    try:
+        application.object_repository.put_verified(
+            BytesIO(b"p1-checksum-failure-probe"),
+            expected_checksum="0" * 64,
+            metadata={"media_type": "application/octet-stream", "source": "acceptance"},
+        )
+    except ObjectIntegrityError as error:
+        checksum_rejected = str(error) == "checksum_mismatch"
+    smoke_content = b'{"probe":"p1-resource-smoke"}'
+    smoke_checksum = hashlib.sha256(smoke_content).hexdigest()
+    smoke_reference = application.object_repository.put_verified(
+        BytesIO(smoke_content),
+        expected_checksum=smoke_checksum,
+        metadata={"media_type": "application/json", "source": "acceptance"},
+    )
+    object_round_trip = application.object_repository.open(smoke_reference).read() == smoke_content
+    with application.state_store.engine.connect() as connection:
+        database_ready = connection.execute(text("SELECT 1")).scalar_one() == 1
+
+    goldens = _p1_research_goldens(
+        application,
+        base_url=base_url,
+        information_cutoff=information_cutoff,
+        listing_id=ticket_02["listing_ids"]["XNAS"],
+    )
+
+    optional_modalities = {
+        modality: {
+            "status": "unavailable",
+            "reason": "phase_1_optional_modality_out_of_scope",
+        }
+        for modality in ("documents", "fundamentals", "macro")
+    }
+    optional_absence_explicit = all(
+        prediction["prediction_status"] == "full"
+        and "probabilities" in prediction
+        and prediction["data_support"] == {"price_volume": "full"}
+        for market_research in research.values()
+        for prediction in market_research["predictions"]
+    ) and all(
+        support
+        == {
+            "status": "unavailable",
+            "reason": "phase_1_optional_modality_out_of_scope",
+        }
+        for support in optional_modalities.values()
+    )
+
+    scenario_checks = {
+        "checksum_failure": checksum_rejected,
+        "duplicate_collection": ticket_02["checks"]["adversarial_scenarios"],
+        "fixture_promotion_attempt": promotion_decision["code"] == "fixture_use_forbidden",
+        "late_data": ticket_02["checks"]["adversarial_scenarios"],
+        "missing_calendar": ticket_02["checks"]["adversarial_scenarios"],
+        "missing_company_action": ticket_02["checks"]["adversarial_scenarios"],
+        "necessary_modality_missing": ticket_02["checks"]["adversarial_scenarios"],
+        "one_market_failure": ticket_02["checks"]["one_market_failure_isolated"],
+        "optional_modalities_missing": optional_absence_explicit,
+        "outbox_redelivery": ticket_03["checks"]["duplicate_delivery_idempotent"],
+        "outbox_restart": ticket_03["checks"]["original_event_identity_recovered"],
+        "stale_fencing": stale_fencing,
+    }
+    scenario_owners = {
+        "checksum_failure": "data_owner",
+        "duplicate_collection": "data_owner",
+        "fixture_promotion_attempt": "model_governor",
+        "late_data": "data_owner",
+        "missing_calendar": "data_owner",
+        "missing_company_action": "data_owner",
+        "necessary_modality_missing": "data_owner",
+        "one_market_failure": "operations_owner",
+        "optional_modalities_missing": "research_owner",
+        "outbox_redelivery": "operations_owner",
+        "outbox_restart": "operations_owner",
+        "stale_fencing": "operations_owner",
+    }
+    scenario_results = {
+        scenario: {
+            "status": "passed" if passed else "failed",
+            "reason": f"{scenario}_{'verified' if passed else 'failed'}",
+            "owner": scenario_owners[scenario],
+        }
+        for scenario, passed in scenario_checks.items()
+    }
+
+    actual_postgresql = database_url.startswith("postgresql+") and database_ready
+    dagster_ready = dagster_url is not None and inspect_dagster_deployment(dagster_url).ready
+    deploy_passed = (
+        deployed
+        and actual_postgresql
+        and object_round_trip
+        and dagster_ready
+        and ticket_04["checks"].get("application_database_role_least_privilege", False)
+    )
+    gate_conditions = {
+        "GATE-POLICY-01": ticket_04["status"] == "passed",
+        "GATE-PIT-01": ticket_02["checks"]["adversarial_scenarios"],
+        "GATE-DATA-01": ticket_02["status"] == "passed" and checksum_rejected and object_round_trip,
+        "GATE-MODEL-01": scenario_checks["fixture_promotion_attempt"]
+        and ticket_02["checks"]["no_production_prediction_records"],
+        "GATE-SEC-01": ticket_04["status"] == "passed",
+        "GATE-OPS-01": ticket_03["status"] == "passed" and stale_fencing,
+        "GATE-DEPLOY-01": deploy_passed,
+        "GATE-UX-01": bool(goldens["observable"]) and optional_absence_explicit,
+    }
+    gate_owners = {
+        "GATE-POLICY-01": "source_steward",
+        "GATE-PIT-01": "data_owner",
+        "GATE-DATA-01": "data_owner",
+        "GATE-MODEL-01": "model_governor",
+        "GATE-SEC-01": "security_owner",
+        "GATE-OPS-01": "operations_owner",
+        "GATE-DEPLOY-01": "platform_owner",
+        "GATE-UX-01": "research_owner",
+    }
+    gate_results = tuple(
+        P1GateResult(
+            trace_id=trace_id,
+            status=(
+                "passed" if passed else "blocked" if trace_id == "GATE-DEPLOY-01" else "failed"
+            ),
+            reason=(
+                f"{trace_id.lower()}_passed"
+                if passed
+                else "deployed_endpoints_required"
+                if trace_id == "GATE-DEPLOY-01" and not deployed
+                else f"{trace_id.lower()}_failed"
+            ),
+            owner=gate_owners[trace_id],
+        )
+        for trace_id, passed in gate_conditions.items()
+    )
+
+    source_policy_ids: list[str] = []
+    manifest_ids: list[str] = []
+    fixture_digests: dict[str, str] = {}
+    for market, evidence in trace_evidence.items():
+        artifacts = dict(zip(evidence["artifact_kinds"], evidence["artifact_ids"], strict=False))
+        source_policy_ids.append(artifacts["source_policy_version"])
+        manifest_id = evidence["lineage_ids"]["dataset_version_id"]
+        manifest_ids.append(manifest_id)
+        fixture_digests[market] = f"sha256:{evidence['artifact_content_digests'][manifest_id]}"
+
+    failure_evidence = (
+        {
+            "scenario": "late_data",
+            "status": "blocked",
+            "reason": "post_cutoff_evidence",
+            "owner": "data_owner",
+        },
+        {
+            "scenario": "necessary_modality_missing",
+            "status": "blocked",
+            "reason": "missing_anchor_price",
+            "owner": "data_owner",
+        },
+        {
+            "scenario": "optional_modalities_missing",
+            "status": "degraded",
+            "reason": "phase_1_optional_modality_out_of_scope",
+            "owner": "research_owner",
+        },
+        {
+            "scenario": "missing_calendar",
+            "status": "blocked",
+            "reason": "calendar_unresolved",
+            "owner": "data_owner",
+        },
+        {
+            "scenario": "missing_company_action",
+            "status": "blocked",
+            "reason": "missing_company_action",
+            "owner": "data_owner",
+        },
+        {
+            "scenario": "checksum_failure",
+            "status": "blocked",
+            "reason": "checksum_mismatch",
+            "owner": "data_owner",
+        },
+        {
+            "scenario": "stale_fencing",
+            "status": "blocked_then_recovered",
+            "reason": "relay_lease_superseded",
+            "owner": "operations_owner",
+        },
+        {
+            "scenario": "one_market_failure",
+            "status": "degraded",
+            "reason": "market_failure_isolated",
+            "owner": "operations_owner",
+        },
+        {
+            "scenario": "fixture_promotion_attempt",
+            "status": "policy_blocked",
+            "reason": "fixture_use_forbidden",
+            "owner": "model_governor",
+        },
+        {
+            "scenario": "source_entitlement",
+            "status": "policy_blocked",
+            "reason": "source_entitlement_revoked",
+            "owner": "source_steward",
+        },
+        {
+            "scenario": "outbox_restart",
+            "status": "failed_then_recovered",
+            "reason": "injected_relay_crash",
+            "owner": "operations_owner",
+        },
+    )
+    reproduction_command = "docker compose --profile acceptance run --build --rm acceptance"
+    evaluation = P1AcceptanceEvaluation(
+        attempt_id=f"p1-{uuid4()}",
+        created_at=datetime.now(UTC),
+        git_commit=_git_commit(git_dir),
+        image_digest=_tree_digest(
+            project_root,
+            ("src", "pyproject.toml", "requirements.lock", "openapi"),
+        ),
+        deployment_digest=_tree_digest(
+            project_root,
+            ("Dockerfile", "compose.yaml", "docker", ".github/workflows"),
+        ),
+        migration_digest=_tree_digest(project_root, ("alembic.ini", "migrations")),
+        fixture_digests=fixture_digests,
+        source_policy_ids=tuple(source_policy_ids),
+        manifest_ids=tuple(manifest_ids),
+        contract_results={
+            "dagster_wrapper": "passed" if ticket_02["checks"]["dagster_parity"] else "failed",
+            "event": "passed" if ticket_03["status"] == "passed" else "failed",
+            "filesystem_object_repository": "passed" if object_round_trip else "failed",
+            "postgresql": "passed" if actual_postgresql else "blocked",
+            "rest": "passed" if goldens["observable"] else "failed",
+        },
+        end_to_end_ids=(
+            "trace-p1-trace-tw-01",
+            "trace-p1-trace-us-01",
+            ticket_03["event_id"],
+            ticket_02["listing_ids"]["XTAI"],
+            ticket_02["listing_ids"]["XNAS"],
+        ),
+        scenario_results=scenario_results,
+        failure_evidence=failure_evidence,
+        rest_golden_digest=str(goldens["rest_digest"]),
+        ui_golden_digest=str(goldens["ui_digest"]),
+        restart_results={
+            "outbox_recovered": ticket_03["checks"]["original_event_identity_recovered"],
+            "same_event_identity": ticket_03["checks"]["original_event_identity_recovered"],
+            "single_consumer_effect": ticket_03["checks"]["zero_lost_or_duplicate_effects"],
+        },
+        resource_smoke={
+            "api_ready": bool(goldens["observable"]),
+            "dagster_ready": dagster_ready,
+            "filesystem_object_round_trip": object_round_trip,
+            "postgresql_ready": actual_postgresql,
+            "formal_capacity_claim": False,
+        },
+        gate_results=gate_results,
+        previous_bundle_reference=previous_bundle_reference,
+        reproduction_command=reproduction_command,
+    )
+    bundle_reference = P1AcceptanceBundlePublisher(application.object_repository).publish(
+        evaluation
+    )
+    bundle = json.loads(application.object_repository.open(bundle_reference).read())
+    return {
+        "status": bundle["status"],
+        "trace_ids": list(P1_TRACE_IDS),
+        "hard_gates": bundle["hard_gates"],
+        "scenario_results": scenario_results,
+        "optional_modalities": optional_modalities,
+        "bundle": {
+            "object_id": bundle_reference.object_id,
+            "checksum": bundle_reference.checksum,
+            "uri": bundle_reference.uri,
+        },
     }

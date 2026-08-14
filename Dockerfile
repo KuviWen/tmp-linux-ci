@@ -14,6 +14,9 @@ RUN python -m pip install --no-cache-dir -r requirements.lock
 COPY src ./src
 COPY migrations ./migrations
 COPY openapi ./openapi
+COPY Dockerfile compose.yaml ./
+COPY docker ./docker
+COPY .github ./.github
 COPY alembic.ini dagster-workspace.yaml ./
 RUN mkdir -p /var/lib/stock-forecasting/objects /var/lib/dagster /run/stock-forecasting \
     && chown -R app:app /var/lib/stock-forecasting /var/lib/dagster /run/stock-forecasting

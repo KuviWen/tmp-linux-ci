@@ -5,11 +5,11 @@ import yaml
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
-def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
+def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
     compose = yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8"))
     services = compose["services"]
 
-    assert compose["name"] == "stock-forecasting-ticket-04"
+    assert compose["name"] == "stock-forecasting-ticket-05"
     assert set(services) == {
         "postgres",
         "migration",
@@ -36,9 +36,15 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
     }
     assert services["migration"]["command"][-2:] == ["upgrade", "head"]
     assert services["acceptance"]["profiles"] == ["acceptance"]
-    assert "ticket-04" in services["acceptance"]["command"]
+    assert "ticket-05" in services["acceptance"]["command"]
     assert "--base-url" in services["acceptance"]["command"]
     assert "--observed-at" in services["acceptance"]["command"]
+    assert services["acceptance"]["command"][-4:] == [
+        "--project-root",
+        "/app",
+        "--git-dir",
+        "/workspace/.git",
+    ]
     application_services = {
         "migration",
         "local-key-init",
@@ -54,7 +60,7 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "acceptance",
     }
     assert {services[name]["image"] for name in application_services} == {
-        "stock-forecasting-ticket-04-app:0.1.0"
+        "stock-forecasting-ticket-05-app:0.1.0"
     }
     assert services["api"]["build"] == {"context": "."}
     assert all("build" not in services[name] for name in application_services if name != "api")
@@ -118,7 +124,9 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
         "--port",
         "8001",
     ]
-    assert services["api"]["ports"] == ["127.0.0.1:8000:8080"]
+    assert services["postgres"]["ports"] == ["127.0.0.1:15435:5432"]
+    assert services["api"]["ports"] == ["127.0.0.1:18005:8080"]
+    assert services["dagster-webserver"]["ports"] == ["127.0.0.1:13005:3000"]
     assert services["api-ingress"]["image"] == "nginx:1.29.1-alpine"
     assert services["api-ingress"]["network_mode"] == "service:api"
     assert services["denied-api-ingress"]["network_mode"] == "service:denied-api"
@@ -227,6 +235,7 @@ def test_compose_declares_the_deployable_ticket_04_runtime() -> None:
     }
     for name in application_services:
         assert "local-api-key:/run/stock-forecasting" in services[name]["volumes"]
+    assert "./.git:/workspace/.git:ro" in services["acceptance"]["volumes"]
     assert "local-api-key" in compose["volumes"]
     role_grant_sql = (
         REPOSITORY_ROOT / "docker" / "postgres" / "grant-application-role.sql"
@@ -255,10 +264,34 @@ def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
 
     assert dockerfile.startswith("FROM python:3.12.12-slim\n")
     assert "COPY requirements.lock pyproject.toml ./" in dockerfile
+    assert "COPY Dockerfile compose.yaml ./" in dockerfile
+    assert "COPY docker ./docker" in dockerfile
+    assert "COPY .github ./.github" in dockerfile
     assert "/run/stock-forecasting" in dockerfile
     assert "USER app" in dockerfile
     assert '"--host", "127.0.0.1"' in dockerfile
     assert (REPOSITORY_ROOT / "requirements.lock").is_file()
+
+
+def test_linux_ci_uses_the_same_compose_acceptance_command() -> None:
+    workflow = yaml.safe_load(
+        (REPOSITORY_ROOT / ".github" / "workflows" / "p1-acceptance.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    job = workflow["jobs"]["p1-acceptance"]
+
+    assert job["runs-on"] == "ubuntu-24.04"
+    assert workflow["permissions"] == {"contents": "read"}
+    commands = [step.get("run") for step in job["steps"]]
+    assert "docker compose --profile acceptance run --build --rm acceptance" in commands
+    assert "python -m pytest" in commands
+    assert "python -m mypy src tests" in commands
+    assert "python -m ruff check ." in commands
+    assert "python -m ruff format --check ." in commands
+    cleanup = next(step for step in job["steps"] if step.get("name") == "Clean acceptance state")
+    assert cleanup["if"] == "always()"
+    assert cleanup["run"] == "docker compose --profile acceptance down --volumes --remove-orphans"
 
 
 def test_dagster_workspace_exposes_a_separate_revoked_entitlement_location() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,6 +12,7 @@ from stock_forecasting.acceptance import (
     run_ticket_02,
     run_ticket_03,
     run_ticket_04,
+    run_ticket_05,
 )
 from stock_forecasting.authorization import LocalApiKeyIdentity
 from stock_forecasting.authorization_repository import (
@@ -36,7 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     acceptance = commands.add_parser("acceptance")
     acceptance.add_argument(
         "ticket",
-        choices=["ticket-01", "ticket-02", "ticket-03", "ticket-04"],
+        choices=["ticket-01", "ticket-02", "ticket-03", "ticket-04", "ticket-05"],
     )
     acceptance.add_argument("--database-url", required=True)
     acceptance.add_argument("--object-root", type=Path, required=True)
@@ -45,6 +46,9 @@ def _parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--base-url")
     acceptance.add_argument("--dagster-url")
     acceptance.add_argument("--denied-base-url")
+    acceptance.add_argument("--project-root", type=Path, default=Path.cwd())
+    acceptance.add_argument("--git-dir", type=Path, default=Path.cwd() / ".git")
+    acceptance.add_argument("--previous-bundle-reference")
     relay = commands.add_parser("relay")
     relay.add_argument("--once", action="store_true")
     local_key = commands.add_parser("local-key")
@@ -84,14 +88,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "ticket-02",
         "ticket-03",
         "ticket-04",
+        "ticket-05",
     }:
         if (arguments.base_url is None) != (arguments.dagster_url is None):
             parser.error("--base-url and --dagster-url must be provided together")
-        runners = {
+        runners: dict[str, Callable[..., dict[str, object]]] = {
             "ticket-01": run_ticket_01,
             "ticket-02": run_ticket_02,
             "ticket-03": run_ticket_03,
             "ticket-04": run_ticket_04,
+            "ticket-05": run_ticket_05,
         }
         runner = runners[arguments.ticket]
         runner_arguments = {
@@ -102,10 +108,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "base_url": arguments.base_url,
             "dagster_url": arguments.dagster_url,
         }
-        if arguments.ticket == "ticket-04":
+        if arguments.ticket in {"ticket-04", "ticket-05"}:
             runner_arguments["denied_base_url"] = arguments.denied_base_url
         elif arguments.denied_base_url is not None:
-            parser.error("--denied-base-url is only valid for ticket-04")
+            parser.error("--denied-base-url is only valid for ticket-04 or ticket-05")
+        if arguments.ticket == "ticket-05":
+            runner_arguments.update(
+                {
+                    "project_root": arguments.project_root,
+                    "git_dir": arguments.git_dir,
+                    "previous_bundle_reference": arguments.previous_bundle_reference,
+                }
+            )
         report = runner(
             **runner_arguments,
         )

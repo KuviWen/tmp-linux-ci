@@ -14,7 +14,12 @@ from typing import Any
 
 import pytest
 
-from stock_forecasting.acceptance import run_ticket_01, run_ticket_02, run_ticket_04
+from stock_forecasting.acceptance import (
+    run_ticket_01,
+    run_ticket_02,
+    run_ticket_04,
+    run_ticket_05,
+)
 from stock_forecasting.dagster_deployment import (
     inspect_dagster_deployment,
     materialize_deployed_asset,
@@ -442,3 +447,103 @@ def test_ticket_04_acceptance_runner_verifies_authorization_denial_path(
         observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
     )
     assert direct_report["status"] == "passed"
+
+
+def test_ticket_05_runner_publishes_blocked_evidence_when_not_deployed(
+    tmp_path: Path,
+) -> None:
+    report = run_ticket_05(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+        object_root=tmp_path / "objects",
+        information_cutoff=datetime(2026, 8, 12, 22, tzinfo=UTC),
+        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+        project_root=Path.cwd(),
+        git_dir=Path.cwd() / ".git",
+    )
+
+    assert report["status"] == "blocked"
+    assert report["trace_ids"] == [
+        "P1-ENTRY-01",
+        "P1-TRACE-TW-01",
+        "P1-TRACE-US-01",
+        "P1-TRACE-OUTBOX-01",
+        "P1-TRACE-AUTH-01",
+        "P1-EXIT-01",
+        "GATE-POLICY-01",
+        "GATE-PIT-01",
+        "GATE-DATA-01",
+        "GATE-MODEL-01",
+        "GATE-SEC-01",
+        "GATE-OPS-01",
+        "GATE-DEPLOY-01",
+        "GATE-UX-01",
+    ]
+    assert report["hard_gates"]["GATE-DEPLOY-01"] == {
+        "owner": "platform_owner",
+        "reason": "deployed_endpoints_required",
+        "status": "blocked",
+    }
+    assert set(report["scenario_results"]) == {
+        "checksum_failure",
+        "duplicate_collection",
+        "fixture_promotion_attempt",
+        "late_data",
+        "missing_calendar",
+        "missing_company_action",
+        "necessary_modality_missing",
+        "one_market_failure",
+        "optional_modalities_missing",
+        "outbox_redelivery",
+        "outbox_restart",
+        "stale_fencing",
+    }
+    assert all(result["status"] == "passed" for result in report["scenario_results"].values())
+    assert report["bundle"]["object_id"].startswith("sha256:")
+    bundle = json.loads(Path(report["bundle"]["uri"]).read_text(encoding="utf-8"))
+    assert bundle["status"] == "blocked"
+    assert bundle["previous_bundle_reference"] is None
+    assert bundle["claims"]["scope"] == "engineering_spine_only"
+    assert (
+        bundle["provenance"]["git_commit"]
+        == subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+    )
+
+
+def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "stock_forecasting.cli",
+            "acceptance",
+            "ticket-05",
+            "--database-url",
+            f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+            "--object-root",
+            str(tmp_path / "objects"),
+            "--information-cutoff",
+            "2026-08-12T22:00:00Z",
+            "--observed-at",
+            "2026-08-12T21:55:00Z",
+            "--project-root",
+            str(Path.cwd()),
+            "--git-dir",
+            str(Path.cwd() / ".git"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+
+    assert completed.returncode == 1, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["status"] == "blocked"
+    assert report["bundle"]["object_id"].startswith("sha256:")

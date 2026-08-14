@@ -1,4 +1,4 @@
-name: stock-forecasting-ticket-04
+name: stock-forecasting-ticket-05
 
 x-fixture-information-cutoff: &fixture-information-cutoff '2026-08-12T22:00:00Z'
 x-fixture-collection-observed-at: &fixture-collection-observed-at '2026-08-12T21:55:00Z'
@@ -17,7 +17,7 @@ x-application-environment: &application-environment
   AUTHORIZATION_POLICY_SET_ID: fixture-active-v1
 
 x-application: &application
-  image: stock-forecasting-ticket-04-app:0.1.0
+  image: stock-forecasting-ticket-05-app:0.1.0
   environment: *application-environment
   volumes:
     - fixture-objects:/var/lib/stock-forecasting/objects
@@ -32,7 +32,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
-      - '127.0.0.1:5432:5432'
+      - '127.0.0.1:15435:5432'
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d stock_forecasting"]
       interval: 2s
@@ -157,7 +157,7 @@ services:
       context: .
     command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "127.0.0.1", "--port", "8000"]
     ports:
-      - '127.0.0.1:8000:8080'
+      - '127.0.0.1:18005:8080'
     depends_on:
       migration:
         condition: service_completed_successfully
@@ -264,7 +264,7 @@ services:
     <<: *application
     command: ["dagster-webserver", "-h", "0.0.0.0", "-p", "3000", "-w", "dagster-workspace.yaml"]
     ports:
-      - '127.0.0.1:3000:3000'
+      - '127.0.0.1:13005:3000'
     depends_on:
       dagster-code:
         condition: service_healthy
@@ -327,12 +327,17 @@ services:
   acceptance:
     <<: *application
     profiles: ["acceptance"]
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects
+      - dagster-home:/var/lib/dagster
+      - local-api-key:/run/stock-forecasting
+      - ./.git:/workspace/.git:ro
     command:
       - python
       - -m
       - stock_forecasting.cli
       - acceptance
-      - ticket-04
+      - ticket-05
       - --database-url
       - postgresql+psycopg://stock@postgres:5432/stock_forecasting
       - --object-root
@@ -347,6 +352,10 @@ services:
       - http://dagster-webserver:3000/graphql
       - --denied-base-url
       - http://denied-api:8081
+      - --project-root
+      - /app
+      - --git-dir
+      - /workspace/.git
     depends_on:
       api:
         condition: service_healthy
