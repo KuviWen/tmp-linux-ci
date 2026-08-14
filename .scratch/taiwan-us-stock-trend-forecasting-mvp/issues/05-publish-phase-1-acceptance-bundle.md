@@ -58,6 +58,8 @@ Status: ready-for-agent
 - Scenario results 由單一 scenario-owner catalog 產生並驗證 canonical `status + reason + owner`；來源
   policy 與 manifest 各要求兩個 canonical UUID，E2E IDs 要求台／美固定 tracer 加三個 UUID，避免測試
   標籤被誤認為可發布 provenance。
+- Required scenario／failure tuple 直接由各自 catalog 衍生，failure owner 引用同一 scenario-owner
+  catalog，新增或改派 scenario 不需同步多份 domain rule。
 - 驗證：`python -m pytest tests/acceptance/test_acceptance_runner.py
   tests/contracts/test_acceptance_bundle.py tests/contracts/test_compose_contract.py
   tests/contracts/test_object_repository.py -q`；`python -m mypy src tests`；

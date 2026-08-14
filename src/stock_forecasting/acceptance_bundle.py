@@ -50,22 +50,6 @@ P1_REQUIRED_CONTRACTS = (
     "postgresql",
     "rest",
 )
-P1_REQUIRED_SCENARIOS = (
-    "checksum_failure",
-    "correction",
-    "duplicate_collection",
-    "fixture_promotion_attempt",
-    "late_data",
-    "missing_calendar",
-    "missing_company_action",
-    "necessary_modality_missing",
-    "one_market_failure",
-    "optional_modalities_missing",
-    "outbox_redelivery",
-    "outbox_restart",
-    "stale_fencing",
-    "withdrawal",
-)
 P1_SCENARIO_OWNERS = {
     "checksum_failure": "data_owner",
     "correction": "data_owner",
@@ -82,6 +66,7 @@ P1_SCENARIO_OWNERS = {
     "stale_fencing": "operations_owner",
     "withdrawal": "data_owner",
 }
+P1_REQUIRED_SCENARIOS = tuple(P1_SCENARIO_OWNERS)
 P1_REQUIRED_RESTART_CHECKS = (
     "outbox_recovered",
     "same_event_identity",
@@ -94,42 +79,56 @@ P1_REQUIRED_RESOURCES = (
     "postgresql_ready",
     "formal_capacity_claim",
 )
-P1_REQUIRED_FAILURE_SCENARIOS = (
-    "late_data",
-    "necessary_modality_missing",
-    "optional_modalities_missing",
-    "missing_calendar",
-    "missing_company_action",
-    "withdrawal",
-    "checksum_failure",
-    "stale_fencing",
-    "one_market_failure",
-    "fixture_promotion_attempt",
-    "source_entitlement",
-    "outbox_restart",
-)
 P1_FAILURE_EVIDENCE_CATALOG = {
-    "late_data": ("blocked", "post_cutoff_evidence", "data_owner"),
-    "necessary_modality_missing": ("blocked", "missing_anchor_price", "data_owner"),
+    "late_data": (
+        "blocked",
+        "post_cutoff_evidence",
+        P1_SCENARIO_OWNERS["late_data"],
+    ),
+    "necessary_modality_missing": (
+        "blocked",
+        "missing_anchor_price",
+        P1_SCENARIO_OWNERS["necessary_modality_missing"],
+    ),
     "optional_modalities_missing": (
         "degraded",
         "phase_1_optional_modality_out_of_scope",
-        "research_owner",
+        P1_SCENARIO_OWNERS["optional_modalities_missing"],
     ),
-    "missing_calendar": ("blocked", "calendar_unresolved", "data_owner"),
-    "missing_company_action": ("blocked", "missing_company_action", "data_owner"),
-    "withdrawal": ("blocked", "source_withdrawn", "data_owner"),
-    "checksum_failure": ("blocked", "checksum_mismatch", "data_owner"),
+    "missing_calendar": (
+        "blocked",
+        "calendar_unresolved",
+        P1_SCENARIO_OWNERS["missing_calendar"],
+    ),
+    "missing_company_action": (
+        "blocked",
+        "missing_company_action",
+        P1_SCENARIO_OWNERS["missing_company_action"],
+    ),
+    "withdrawal": (
+        "blocked",
+        "source_withdrawn",
+        P1_SCENARIO_OWNERS["withdrawal"],
+    ),
+    "checksum_failure": (
+        "blocked",
+        "checksum_mismatch",
+        P1_SCENARIO_OWNERS["checksum_failure"],
+    ),
     "stale_fencing": (
         "blocked_then_recovered",
         "relay_lease_superseded",
-        "operations_owner",
+        P1_SCENARIO_OWNERS["stale_fencing"],
     ),
-    "one_market_failure": ("degraded", "market_failure_isolated", "operations_owner"),
+    "one_market_failure": (
+        "degraded",
+        "market_failure_isolated",
+        P1_SCENARIO_OWNERS["one_market_failure"],
+    ),
     "fixture_promotion_attempt": (
         "policy_blocked",
         "fixture_use_forbidden",
-        "model_governor",
+        P1_SCENARIO_OWNERS["fixture_promotion_attempt"],
     ),
     "source_entitlement": (
         "policy_blocked",
@@ -139,9 +138,10 @@ P1_FAILURE_EVIDENCE_CATALOG = {
     "outbox_restart": (
         "failed_then_recovered",
         "injected_relay_crash",
-        "operations_owner",
+        P1_SCENARIO_OWNERS["outbox_restart"],
     ),
 }
+P1_REQUIRED_FAILURE_SCENARIOS = tuple(P1_FAILURE_EVIDENCE_CATALOG)
 P1_SCOPE_CLAIMS = {
     "fixture_model_promotable": False,
     "fixture_prediction_record_production_eligible": False,
