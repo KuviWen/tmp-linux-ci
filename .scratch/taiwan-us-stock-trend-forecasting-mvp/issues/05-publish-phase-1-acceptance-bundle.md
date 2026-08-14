@@ -43,6 +43,9 @@ Status: ready-for-agent
   temporary file／atomic rename 發布後結束。CLI 在清理 ObjectRepository volume 前匯出並 checksum
   驗證 failure matrix 所引用的內容定址 probe objects。損毀或任意格式的 previous reference 會
   fail closed 成新的 blocked bundle，而不在 runner 外中止。
+- Publisher 的 passing consistency 會驗證完整 provenance、雙市場 fixture、policy／manifest／E2E、
+  failure matrix 與 goldens；previous chain 使用相同 bundle envelope 契約，不接受只有 schema
+  discriminator 的不完整 JSON。
 - 驗證：`python -m pytest tests/acceptance/test_acceptance_runner.py
   tests/contracts/test_acceptance_bundle.py tests/contracts/test_compose_contract.py
   tests/contracts/test_object_repository.py -q`；`python -m mypy src tests`；

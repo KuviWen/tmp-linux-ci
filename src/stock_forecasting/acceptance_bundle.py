@@ -77,6 +77,20 @@ P1_REQUIRED_RESOURCES = (
     "postgresql_ready",
     "formal_capacity_claim",
 )
+P1_REQUIRED_FAILURE_SCENARIOS = (
+    "late_data",
+    "necessary_modality_missing",
+    "optional_modalities_missing",
+    "missing_calendar",
+    "missing_company_action",
+    "withdrawal",
+    "checksum_failure",
+    "stale_fencing",
+    "one_market_failure",
+    "fixture_promotion_attempt",
+    "source_entitlement",
+    "outbox_restart",
+)
 
 _P1_GATE_STATUSES = {"passed", "failed", "blocked", "policy_blocked"}
 _P1_PLATFORMS = {"linux_ci", "windows_docker_desktop"}
@@ -88,6 +102,204 @@ def is_sha256_reference(value: object) -> bool:
         and value.startswith("sha256:")
         and len(value) == 71
         and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def _is_git_commit(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _nonempty_unique_strings(values: object, *, minimum: int) -> bool:
+    return (
+        isinstance(values, (list, tuple))
+        and len(values) >= minimum
+        and all(isinstance(value, str) and bool(value) for value in values)
+        and len(set(values)) == len(values)
+    )
+
+
+def _failure_evidence_is_complete(evidence: object) -> bool:
+    if not isinstance(evidence, (list, tuple)):
+        return False
+    by_scenario: dict[str, Mapping[str, object]] = {}
+    for result in evidence:
+        if not isinstance(result, Mapping):
+            return False
+        scenario = result.get("scenario")
+        if not isinstance(scenario, str) or scenario in by_scenario:
+            return False
+        by_scenario[scenario] = result
+    return set(by_scenario) == set(P1_REQUIRED_FAILURE_SCENARIOS) and all(
+        isinstance(result.get("status"), str)
+        and bool(result["status"])
+        and isinstance(result.get("reason"), str)
+        and bool(result["reason"])
+        and isinstance(result.get("owner"), str)
+        and bool(result["owner"])
+        and _nonempty_unique_strings(result.get("evidence_ids"), minimum=1)
+        for result in by_scenario.values()
+    )
+
+
+def _passing_provenance_is_complete(
+    *,
+    git_commit: object,
+    application_digest: object,
+    deployment_digest: object,
+    migration_digest: object,
+    fixture_digests: object,
+    source_policy_ids: object,
+    manifest_ids: object,
+    end_to_end_ids: object,
+    failure_evidence: object,
+    rest_golden_digest: object,
+    ui_golden_digest: object,
+    previous_bundle_reference: object,
+    reproduction_command: object,
+) -> bool:
+    return (
+        _is_git_commit(git_commit)
+        and is_sha256_reference(application_digest)
+        and is_sha256_reference(deployment_digest)
+        and is_sha256_reference(migration_digest)
+        and isinstance(fixture_digests, Mapping)
+        and set(fixture_digests) == {"XTAI", "XNAS"}
+        and all(is_sha256_reference(value) for value in fixture_digests.values())
+        and _nonempty_unique_strings(source_policy_ids, minimum=2)
+        and _nonempty_unique_strings(manifest_ids, minimum=2)
+        and _nonempty_unique_strings(end_to_end_ids, minimum=2)
+        and _failure_evidence_is_complete(failure_evidence)
+        and is_sha256_reference(rest_golden_digest)
+        and is_sha256_reference(ui_golden_digest)
+        and (previous_bundle_reference is None or is_sha256_reference(previous_bundle_reference))
+        and reproduction_command
+        == "docker compose --profile acceptance run --build --rm acceptance"
+    )
+
+
+def p1_acceptance_bundle_envelope_is_valid(payload: object) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    required_fields = {
+        "approval",
+        "attempt_id",
+        "claims",
+        "contracts",
+        "created_at",
+        "end_to_end_ids",
+        "failure_evidence",
+        "goldens",
+        "hard_gates",
+        "manifests",
+        "phase",
+        "platform_runs",
+        "previous_bundle_reference",
+        "provenance",
+        "reproduction_command",
+        "resource_smoke",
+        "restart",
+        "scenario_results",
+        "schema_version",
+        "source_policy_ids",
+        "status",
+        "trace_ids",
+    }
+    if not required_fields <= set(payload):
+        return False
+    status = payload.get("status")
+    approval = payload.get("approval")
+    hard_gates = payload.get("hard_gates")
+    provenance = payload.get("provenance")
+    goldens = payload.get("goldens")
+    platform_runs = payload.get("platform_runs")
+    trace_ids = payload.get("trace_ids")
+    if (
+        payload.get("schema_version") != "p1-acceptance-bundle-v1"
+        or payload.get("phase") != "P1"
+        or status not in {"passed", "failed", "blocked"}
+        or not isinstance(payload.get("attempt_id"), str)
+        or not payload["attempt_id"]
+        or not isinstance(payload.get("created_at"), str)
+        or not payload["created_at"]
+        or not isinstance(trace_ids, (list, tuple))
+        or tuple(trace_ids) != P1_TRACE_IDS
+        or not isinstance(approval, Mapping)
+        or approval.get("kind") != "automated_hard_gate_evaluation"
+        or approval.get("approved") is not (status == "passed")
+        or not isinstance(payload.get("claims"), Mapping)
+        or not isinstance(payload.get("contracts"), Mapping)
+        or not isinstance(payload.get("scenario_results"), Mapping)
+        or not isinstance(payload.get("restart"), Mapping)
+        or not isinstance(payload.get("resource_smoke"), Mapping)
+        or not isinstance(payload.get("failure_evidence"), (list, tuple))
+        or not isinstance(payload.get("source_policy_ids"), (list, tuple))
+        or not isinstance(payload.get("manifests"), (list, tuple))
+        or not isinstance(payload.get("end_to_end_ids"), (list, tuple))
+        or not isinstance(goldens, Mapping)
+        or not isinstance(goldens.get("rest"), str)
+        or not isinstance(goldens.get("ui"), str)
+        or not isinstance(provenance, Mapping)
+        or not {
+            "application_payload_digest",
+            "deployment_digest",
+            "fixture_digests",
+            "git_commit",
+            "images",
+            "migration_digest",
+        }
+        <= set(provenance)
+        or not isinstance(provenance.get("fixture_digests"), Mapping)
+        or not isinstance(provenance.get("images"), Mapping)
+        or not isinstance(platform_runs, Mapping)
+        or payload.get("reproduction_command")
+        != "docker compose --profile acceptance run --build --rm acceptance"
+        or (
+            payload.get("previous_bundle_reference") is not None
+            and not is_sha256_reference(payload.get("previous_bundle_reference"))
+        )
+        or not isinstance(hard_gates, Mapping)
+        or set(hard_gates) != set(P1_HARD_GATE_OWNERS)
+    ):
+        return False
+    for trace_id, owner in P1_HARD_GATE_OWNERS.items():
+        result = hard_gates[trace_id]
+        if (
+            not isinstance(result, Mapping)
+            or result.get("owner") != owner
+            or result.get("status") not in _P1_GATE_STATUSES
+            or not isinstance(result.get("reason"), str)
+            or not result["reason"]
+        ):
+            return False
+    for platform, result in platform_runs.items():
+        if (
+            platform not in _P1_PLATFORMS
+            or not isinstance(result, Mapping)
+            or result.get("status") not in {"passed", "blocked"}
+            or not is_sha256_reference(result.get("evidence_reference"))
+            or not isinstance(result.get("evidence"), Mapping)
+        ):
+            return False
+    if status != "passed":
+        return True
+    return _passing_provenance_is_complete(
+        git_commit=provenance.get("git_commit"),
+        application_digest=provenance.get("application_payload_digest"),
+        deployment_digest=provenance.get("deployment_digest"),
+        migration_digest=provenance.get("migration_digest"),
+        fixture_digests=provenance.get("fixture_digests"),
+        source_policy_ids=payload.get("source_policy_ids"),
+        manifest_ids=payload.get("manifests"),
+        end_to_end_ids=payload.get("end_to_end_ids"),
+        failure_evidence=payload.get("failure_evidence"),
+        rest_golden_digest=goldens.get("rest"),
+        ui_golden_digest=goldens.get("ui"),
+        previous_bundle_reference=payload.get("previous_bundle_reference"),
+        reproduction_command=payload.get("reproduction_command"),
     )
 
 
@@ -154,7 +366,22 @@ def _has_exact_catalog(results: object, required_names: tuple[str, ...]) -> bool
 
 def _passing_evidence_is_consistent(evaluation: P1AcceptanceEvaluation) -> bool:
     return (
-        _has_exact_catalog(evaluation.contract_results, P1_REQUIRED_CONTRACTS)
+        _passing_provenance_is_complete(
+            git_commit=evaluation.git_commit,
+            application_digest=evaluation.image_digest,
+            deployment_digest=evaluation.deployment_digest,
+            migration_digest=evaluation.migration_digest,
+            fixture_digests=evaluation.fixture_digests,
+            source_policy_ids=evaluation.source_policy_ids,
+            manifest_ids=evaluation.manifest_ids,
+            end_to_end_ids=evaluation.end_to_end_ids,
+            failure_evidence=evaluation.failure_evidence,
+            rest_golden_digest=evaluation.rest_golden_digest,
+            ui_golden_digest=evaluation.ui_golden_digest,
+            previous_bundle_reference=evaluation.previous_bundle_reference,
+            reproduction_command=evaluation.reproduction_command,
+        )
+        and _has_exact_catalog(evaluation.contract_results, P1_REQUIRED_CONTRACTS)
         and all(
             _contract_evidence_passed(result) for result in evaluation.contract_results.values()
         )

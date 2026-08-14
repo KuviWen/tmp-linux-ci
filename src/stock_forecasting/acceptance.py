@@ -27,6 +27,7 @@ from stock_forecasting.acceptance_bundle import (
     P1GateResult,
     digest_required_paths,
     is_sha256_reference,
+    p1_acceptance_bundle_envelope_is_valid,
 )
 from stock_forecasting.adapters.dagster import (
     FixtureRunner,
@@ -90,9 +91,7 @@ def _validated_previous_bundle_reference(path: Path) -> str:
         payload = json.loads(content)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise _PreviousAcceptanceBundleInvalid(reference) from error
-    if not isinstance(payload, dict) or payload.get("schema_version") != (
-        "p1-acceptance-bundle-v1"
-    ):
+    if not p1_acceptance_bundle_envelope_is_valid(payload):
         raise _PreviousAcceptanceBundleInvalid(reference)
     return reference
 

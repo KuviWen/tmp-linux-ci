@@ -9,6 +9,7 @@ import pytest
 
 from stock_forecasting.acceptance_bundle import (
     P1_REQUIRED_CONTRACTS,
+    P1_REQUIRED_FAILURE_SCENARIOS,
     P1_REQUIRED_RESOURCES,
     P1_REQUIRED_RESTART_CHECKS,
     P1_REQUIRED_SCENARIOS,
@@ -16,6 +17,7 @@ from stock_forecasting.acceptance_bundle import (
     P1AcceptanceEvaluation,
     P1GateResult,
     digest_required_paths,
+    p1_acceptance_bundle_envelope_is_valid,
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 
@@ -48,6 +50,20 @@ EXPECTED_P1_RESTART_CHECKS = (
     "same_event_identity",
     "single_consumer_effect",
 )
+EXPECTED_P1_FAILURE_SCENARIOS = (
+    "late_data",
+    "necessary_modality_missing",
+    "optional_modalities_missing",
+    "missing_calendar",
+    "missing_company_action",
+    "withdrawal",
+    "checksum_failure",
+    "stale_fencing",
+    "one_market_failure",
+    "fixture_promotion_attempt",
+    "source_entitlement",
+    "outbox_restart",
+)
 EXPECTED_P1_RESOURCES = (
     "api_ready",
     "dagster_ready",
@@ -73,11 +89,25 @@ def _passing_resources() -> dict[str, bool]:
     return {resource: resource != "formal_capacity_claim" for resource in EXPECTED_P1_RESOURCES}
 
 
+def _failure_evidence() -> tuple[dict[str, object], ...]:
+    return tuple(
+        {
+            "evidence_ids": [f"evidence-{scenario}"],
+            "owner": "test_owner",
+            "reason": f"{scenario}_verified",
+            "scenario": scenario,
+            "status": "blocked",
+        }
+        for scenario in EXPECTED_P1_FAILURE_SCENARIOS
+    )
+
+
 def test_required_p1_evidence_catalogs_match_the_ticket_contract() -> None:
     assert P1_REQUIRED_CONTRACTS == EXPECTED_P1_CONTRACTS
     assert P1_REQUIRED_SCENARIOS == EXPECTED_P1_SCENARIOS
     assert P1_REQUIRED_RESTART_CHECKS == EXPECTED_P1_RESTART_CHECKS
     assert P1_REQUIRED_RESOURCES == EXPECTED_P1_RESOURCES
+    assert P1_REQUIRED_FAILURE_SCENARIOS == EXPECTED_P1_FAILURE_SCENARIOS
 
 
 def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
@@ -98,13 +128,7 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
         contract_results=_passing_contracts(),
         end_to_end_ids=("e2e-xtai-001", "e2e-xnas-001"),
         scenario_results=_passing_scenarios(),
-        failure_evidence=(
-            {
-                "scenario": "policy_blocked",
-                "reason": "source_entitlement_inactive",
-                "owner": "source_steward",
-            },
-        ),
+        failure_evidence=_failure_evidence(),
         rest_golden_digest="sha256:" + "1" * 64,
         ui_golden_digest="sha256:" + "2" * 64,
         restart_results=_passing_restart_checks(),
@@ -149,6 +173,7 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
     reference = publisher.publish(evaluation)
 
     bundle = json.loads(repository.open(reference).read())
+    assert p1_acceptance_bundle_envelope_is_valid(bundle)
     assert reference.object_id == f"sha256:{reference.checksum}"
     assert repository.stat(reference)["metadata"] == {
         "attempt_id": "p1-attempt-pass-001",
@@ -242,6 +267,17 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
             evaluation,
             resource_smoke={"x": True, "formal_capacity_claim": False},
         ),
+        replace(evaluation, git_commit=""),
+        replace(evaluation, image_digest=""),
+        replace(evaluation, deployment_digest=""),
+        replace(evaluation, migration_digest=""),
+        replace(evaluation, fixture_digests={}),
+        replace(evaluation, source_policy_ids=()),
+        replace(evaluation, manifest_ids=()),
+        replace(evaluation, end_to_end_ids=()),
+        replace(evaluation, failure_evidence=()),
+        replace(evaluation, rest_golden_digest=""),
+        replace(evaluation, ui_golden_digest=""),
     ):
         with pytest.raises(ValueError, match="passing_gate_evidence_inconsistent"):
             publisher.publish(incomplete_evaluation)
@@ -347,13 +383,13 @@ def test_single_platform_evidence_cannot_approve_p1_exit(tmp_path: Path) -> None
         image_digest="sha256:" + "b" * 64,
         deployment_digest="sha256:" + "c" * 64,
         migration_digest="sha256:" + "d" * 64,
-        fixture_digests={"XNAS": "sha256:" + "e" * 64},
-        source_policy_ids=("fixture-source-policy-xnas-v1",),
-        manifest_ids=("manifest-xnas-001",),
+        fixture_digests={"XNAS": "sha256:" + "e" * 64, "XTAI": "sha256:" + "f" * 64},
+        source_policy_ids=("fixture-source-policy-xtai-v1", "fixture-source-policy-xnas-v1"),
+        manifest_ids=("manifest-xtai-001", "manifest-xnas-001"),
         contract_results=_passing_contracts(),
-        end_to_end_ids=("e2e-xnas-001",),
+        end_to_end_ids=("e2e-xtai-001", "e2e-xnas-001"),
         scenario_results=_passing_scenarios(),
-        failure_evidence=(),
+        failure_evidence=_failure_evidence(),
         rest_golden_digest="sha256:" + "1" * 64,
         ui_golden_digest="sha256:" + "2" * 64,
         restart_results=_passing_restart_checks(),

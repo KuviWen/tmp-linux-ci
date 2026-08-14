@@ -540,7 +540,16 @@ def test_ticket_05_runner_publishes_blocked_evidence_when_not_deployed(
 def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
     export_directory = tmp_path / "exports"
     export_directory.mkdir()
-    previous_content = b'{"schema_version":"p1-acceptance-bundle-v1"}'
+    previous_report = run_ticket_05(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'previous.db'}",
+        object_root=tmp_path / "previous-objects",
+        information_cutoff=datetime(2026, 8, 12, 22, tzinfo=UTC),
+        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+        project_root=Path.cwd(),
+        git_dir=Path.cwd() / ".git",
+        previous_bundle_reference="invalid-reference",
+    )
+    previous_content = Path(previous_report["bundle"]["uri"]).read_bytes()
     previous_reference = f"sha256:{hashlib.sha256(previous_content).hexdigest()}"
     (export_directory / "p1-acceptance-bundle.json").write_bytes(previous_content)
     completed = subprocess.run(
@@ -683,6 +692,51 @@ def test_ticket_05_runner_publishes_fail_closed_bundle_when_a_stage_raises(
     assert bundle["reproduction_command"] == (
         "docker compose --profile acceptance run --build --rm acceptance"
     )
+
+
+def test_ticket_05_cli_rejects_a_structurally_incomplete_previous_bundle(
+    tmp_path: Path,
+) -> None:
+    export_directory = tmp_path / "exports"
+    export_directory.mkdir()
+    incomplete_content = b'{"schema_version":"p1-acceptance-bundle-v1"}'
+    incomplete_checksum = hashlib.sha256(incomplete_content).hexdigest()
+    (export_directory / "p1-acceptance-bundle.json").write_bytes(incomplete_content)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "stock_forecasting.cli",
+            "acceptance",
+            "ticket-05",
+            "--database-url",
+            f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+            "--object-root",
+            str(tmp_path / "objects"),
+            "--information-cutoff",
+            "2026-08-12T22:00:00Z",
+            "--observed-at",
+            "2026-08-12T21:55:00Z",
+            "--project-root",
+            str(Path.cwd()),
+            "--git-dir",
+            str(Path.cwd() / ".git"),
+            "--evidence-export-dir",
+            str(export_directory),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+
+    assert completed.returncode == 1, completed.stderr
+    report = json.loads(completed.stdout)
+    bundle = json.loads(Path(report["bundle"]["uri"]).read_text(encoding="utf-8"))
+    assert bundle["previous_bundle_reference"] == f"sha256:{incomplete_checksum}"
+    assert bundle["failure_evidence"][0]["reason"] == ("previous_acceptance_bundle_invalid")
 
 
 def test_ticket_05_runner_rejects_an_arbitrary_previous_bundle_reference(

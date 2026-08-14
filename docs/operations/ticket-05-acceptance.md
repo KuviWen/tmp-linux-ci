@@ -39,7 +39,10 @@ PredictionRecord，且不宣稱正式來源授權、預測力、簽章或容量�
 `previous_bundle_reference`；直接 CLI 的 `--previous-bundle-reference sha256:<digest>` 可明確覆寫。
 覆寫值必須是 SHA-256 reference。既有 stable input 會先保存到 `.artifacts/previous/sha256/`；即使
 內容損毀，runner 也會發布 reason 為 `previous_acceptance_bundle_invalid` 的 blocked bundle，並以
-實際 digest 識別該輸入。Publisher 只建立新的 content-addressed bundle，不修改既有物件。
+實際 digest 識別該輸入。Previous bundle 必須通過完整 envelope validation（phase、status、
+provenance、hard gates、platform evidence 與 reproduction command），不能只靠 schema version。
+Publisher 的 passing consistency 也要求完整 Git／digest／雙市場 fixture／policy／manifest／E2E／
+failure matrix／golden 證據。Publisher 只建立新的 content-addressed bundle，不修改既有物件。
 
 跨平台彙整時，將另一平台保存的 `p1-acceptance-bundle.json` 放入 acceptance export mount，並以
 `P1_COUNTERPART_BUNDLE` 指向 container 內路徑。Runner 會重新計算其中 platform evidence 的內容
