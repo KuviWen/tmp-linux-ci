@@ -50,6 +50,9 @@ Status: ready-for-agent
   UUID 或 SHA-256 reference。Envelope validator 會區分完整 normal bundle 與固定形狀的 fail-closed
   bundle，重新計算每個 platform evidence reference，並核對 claims、hard gates、catalogs、provenance、
   OCI image 與 passing invariants；空殼或互相矛盾的 previous bundle 不會進入 chain。
+- Publisher 在持久化前以同一 envelope contract 自我驗證；不完整的 blocked／failed evidence 會正規化
+  為 `evidence_capture_failed` fail-closed bundle。Platform evidence 的結構與 passing 規則由單一 validator
+  同時供發布 gate 與 previous-chain 驗證使用，避免兩條路徑漂移。
 - 驗證：`python -m pytest tests/acceptance/test_acceptance_runner.py
   tests/contracts/test_acceptance_bundle.py tests/contracts/test_compose_contract.py
   tests/contracts/test_object_repository.py -q`；`python -m mypy src tests`；

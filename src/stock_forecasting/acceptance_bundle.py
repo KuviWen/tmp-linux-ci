@@ -473,7 +473,39 @@ def _platform_run_is_valid(
     }:
         return False
     evidence = result.get("evidence")
-    if not isinstance(evidence, Mapping) or set(evidence) != {
+    if not isinstance(evidence, Mapping):
+        return False
+    encoded = json.dumps(
+        {
+            "evidence": evidence,
+            "platform": platform,
+            "schema_version": "p1-platform-run-v1",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    expected_reference = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+    return (
+        result.get("status") == evidence.get("status")
+        and result.get("evidence_reference") == expected_reference
+        and _platform_evidence_is_valid(
+            platform=platform,
+            evidence=evidence,
+            provenance=provenance,
+            require_passing=False,
+        )
+    )
+
+
+def _platform_evidence_is_valid(
+    *,
+    platform: str,
+    evidence: Mapping[str, object],
+    provenance: Mapping[str, object],
+    require_passing: bool,
+) -> bool:
+    if set(evidence) != {
         "application_payload_digest",
         "container_image_digest",
         "contract_results",
@@ -487,25 +519,12 @@ def _platform_run_is_valid(
         "status",
     }:
         return False
-    encoded = json.dumps(
-        {
-            "evidence": evidence,
-            "platform": platform,
-            "schema_version": "p1-platform-run-v1",
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    expected_reference = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
     contracts = evidence.get("contract_results")
     scenarios = evidence.get("scenario_results")
     restarts = evidence.get("restart_results")
     resources = evidence.get("resource_smoke")
     if (
         platform not in _P1_PLATFORMS
-        or result.get("evidence_reference") != expected_reference
-        or result.get("status") != evidence.get("status")
         or evidence.get("status") not in {"passed", "blocked"}
         or evidence.get("git_commit") != provenance.get("git_commit")
         or evidence.get("application_payload_digest")
@@ -527,11 +546,14 @@ def _platform_run_is_valid(
         or not _resource_results_are_structurally_valid(resources)
     ):
         return False
-    return evidence.get("status") != "passed" or _results_are_passing(
+    results_are_passing = _results_are_passing(
         contracts=contracts,
         scenarios=scenarios,
         restarts=restarts,
         resources=resources,
+    )
+    return (evidence.get("status") != "passed" or results_are_passing) and (
+        not require_passing or evidence.get("status") == "passed" and results_are_passing
     )
 
 
@@ -753,64 +775,64 @@ class P1AcceptanceEvaluation:
     platform_results: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
 
-def _all_evidence_passed(results: object) -> bool:
-    return (
-        isinstance(results, Mapping)
-        and bool(results)
-        and all(_evidence_status(result) == "passed" for result in results.values())
-    )
-
-
-def _all_contract_evidence_passed(results: object) -> bool:
-    return (
-        isinstance(results, Mapping)
-        and bool(results)
-        and all(_contract_evidence_passed(result) for result in results.values())
-    )
-
-
-def _all_boolean_evidence_passed(results: object) -> bool:
-    return (
-        isinstance(results, Mapping)
-        and bool(results)
-        and all(result is True for result in results.values())
-    )
-
-
-def _platform_evidence_is_passing(
-    platform: str,
-    evidence: Mapping[str, object],
-    evaluation: P1AcceptanceEvaluation,
-) -> bool:
-    resources = evidence.get("resource_smoke")
-    meaningful_resources = (
-        {name: result for name, result in resources.items() if name != "formal_capacity_claim"}
-        if isinstance(resources, Mapping)
-        else {}
-    )
-    image_digest = evidence.get("container_image_digest")
-    return (
-        platform in _P1_PLATFORMS
-        and evidence.get("status") == "passed"
-        and evidence.get("git_commit") == evaluation.git_commit
-        and evidence.get("application_payload_digest") == evaluation.image_digest
-        and evidence.get("deployment_digest") == evaluation.deployment_digest
-        and evidence.get("migration_digest") == evaluation.migration_digest
-        and evidence.get("reproduction_command") == evaluation.reproduction_command
-        and is_sha256_reference(image_digest)
-        and _has_exact_catalog(evidence.get("contract_results"), P1_REQUIRED_CONTRACTS)
-        and _all_contract_evidence_passed(evidence.get("contract_results"))
-        and _has_exact_catalog(evidence.get("scenario_results"), P1_REQUIRED_SCENARIOS)
-        and _all_evidence_passed(evidence.get("scenario_results"))
-        and _has_exact_catalog(evidence.get("restart_results"), P1_REQUIRED_RESTART_CHECKS)
-        and _all_boolean_evidence_passed(evidence.get("restart_results"))
-        and _has_exact_catalog(resources, P1_REQUIRED_RESOURCES)
-        and all(result is True for result in meaningful_resources.values())
-        and (
-            not isinstance(resources, Mapping)
-            or resources.get("formal_capacity_claim", False) is False
-        )
-    )
+def _fail_closed_payload(evaluation: P1AcceptanceEvaluation) -> dict[str, object]:
+    reason = "evidence_capture_failed"
+    return {
+        "approval": {
+            "approved": False,
+            "kind": "automated_hard_gate_evaluation",
+        },
+        "attempt_id": evaluation.attempt_id,
+        "claims": P1_SCOPE_CLAIMS,
+        "contracts": {"acceptance_runner": {"status": "blocked"}},
+        "created_at": evaluation.created_at.isoformat().replace("+00:00", "Z"),
+        "end_to_end_ids": (),
+        "failure_evidence": (
+            {
+                "owner": "platform_owner",
+                "reason": reason,
+                "scenario": "acceptance_runner",
+                "stage": "orchestration",
+                "status": "exception",
+            },
+        ),
+        "goldens": {
+            "rest": "unavailable:evidence_capture_failed",
+            "ui": "unavailable:evidence_capture_failed",
+        },
+        "hard_gates": {
+            trace_id: {
+                "owner": owner,
+                "reason": reason,
+                "status": "blocked",
+            }
+            for trace_id, owner in P1_HARD_GATE_OWNERS.items()
+        },
+        "manifests": (),
+        "phase": "P1",
+        "platform_runs": {},
+        "previous_bundle_reference": (
+            evaluation.previous_bundle_reference
+            if is_sha256_reference(evaluation.previous_bundle_reference)
+            else None
+        ),
+        "provenance": {
+            "application_payload_digest": "unavailable:evidence_capture_failed",
+            "deployment_digest": "unavailable:evidence_capture_failed",
+            "fixture_digests": {},
+            "git_commit": "unavailable:evidence_capture_failed",
+            "images": {},
+            "migration_digest": "unavailable:evidence_capture_failed",
+        },
+        "reproduction_command": "docker compose --profile acceptance run --build --rm acceptance",
+        "resource_smoke": {},
+        "restart": {},
+        "scenario_results": {"acceptance_runner": {"status": "blocked"}},
+        "schema_version": "p1-acceptance-bundle-v1",
+        "source_policy_ids": (),
+        "status": "blocked",
+        "trace_ids": P1_TRACE_IDS,
+    }
 
 
 class P1AcceptanceBundlePublisher:
@@ -835,6 +857,12 @@ class P1AcceptanceBundlePublisher:
             and not _passing_evidence_is_consistent(evaluation)
         ):
             raise ValueError("passing_gate_evidence_inconsistent")
+        evaluation_provenance = {
+            "application_payload_digest": evaluation.image_digest,
+            "deployment_digest": evaluation.deployment_digest,
+            "git_commit": evaluation.git_commit,
+            "migration_digest": evaluation.migration_digest,
+        }
         platform_runs: dict[str, dict[str, object]] = {}
         for platform, evidence in evaluation.platform_results.items():
             if platform not in _P1_PLATFORMS:
@@ -867,7 +895,12 @@ class P1AcceptanceBundlePublisher:
             }
 
         dual_platform_passed = set(platform_runs) == _P1_PLATFORMS and all(
-            _platform_evidence_is_passing(platform, evidence, evaluation)
+            _platform_evidence_is_valid(
+                platform=platform,
+                evidence=evidence,
+                provenance=evaluation_provenance,
+                require_passing=True,
+            )
             for platform, evidence in evaluation.platform_results.items()
         )
         gate_results = tuple(
@@ -900,7 +933,7 @@ class P1AcceptanceBundlePublisher:
             status = "blocked"
         else:
             status = "failed"
-        payload = {
+        payload: dict[str, object] = {
             "approval": {
                 "approved": status == "passed",
                 "kind": "automated_hard_gate_evaluation",
@@ -952,6 +985,10 @@ class P1AcceptanceBundlePublisher:
             "status": status,
             "trace_ids": P1_TRACE_IDS,
         }
+        if not p1_acceptance_bundle_envelope_is_valid(payload):
+            payload = _fail_closed_payload(evaluation)
+        if not p1_acceptance_bundle_envelope_is_valid(payload):
+            raise ValueError("acceptance_bundle_envelope_invalid")
         content = json.dumps(
             payload,
             ensure_ascii=False,
@@ -966,6 +1003,6 @@ class P1AcceptanceBundlePublisher:
                 "attempt_id": evaluation.attempt_id,
                 "media_type": "application/vnd.stock-forecasting.p1-acceptance+json",
                 "phase": "P1",
-                "status": status,
+                "status": str(payload["status"]),
             },
         )

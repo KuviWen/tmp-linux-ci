@@ -340,9 +340,17 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
     )
     incomplete_bundle = json.loads(repository.open(incomplete_reference).read())
     assert incomplete_bundle["status"] == "blocked"
-    assert incomplete_bundle["hard_gates"]["GATE-DEPLOY-01"]["reason"] == (
-        "dual_platform_evidence_required"
-    )
+    assert p1_acceptance_bundle_envelope_is_valid(incomplete_bundle)
+    assert incomplete_bundle["contracts"] == {"acceptance_runner": {"status": "blocked"}}
+    assert incomplete_bundle["failure_evidence"] == [
+        {
+            "owner": "platform_owner",
+            "reason": "evidence_capture_failed",
+            "scenario": "acceptance_runner",
+            "stage": "orchestration",
+            "status": "exception",
+        }
+    ]
 
     def copy_bundle() -> dict[str, Any]:
         return cast(dict[str, Any], json.loads(json.dumps(bundle)))
@@ -405,19 +413,12 @@ def test_blocked_rerun_publishes_new_evidence_without_changing_previous_bundle(
         manifest_ids=("manifest-xtai-001", "manifest-xnas-001"),
         contract_results=_passing_contracts(),
         end_to_end_ids=("e2e-xtai-001", "e2e-xnas-001"),
-        scenario_results={"linux_ci": "blocked"},
-        failure_evidence=(
-            {
-                "scenario": "linux_ci",
-                "reason": "hosted_linux_run_unavailable",
-                "owner": "platform_owner",
-                "status": "blocked",
-            },
-        ),
+        scenario_results=_passing_scenarios(),
+        failure_evidence=_failure_evidence(),
         rest_golden_digest="sha256:" + "1" * 64,
         ui_golden_digest="sha256:" + "2" * 64,
-        restart_results={"outbox_recovered": True},
-        resource_smoke={"api_ready": True},
+        restart_results=_passing_restart_checks(),
+        resource_smoke=_passing_resources(),
         gate_results=(
             P1GateResult("GATE-POLICY-01", "passed", "policy_contract_passed", "source_steward"),
             P1GateResult("GATE-PIT-01", "passed", "pit_contract_passed", "data_owner"),
@@ -439,6 +440,7 @@ def test_blocked_rerun_publishes_new_evidence_without_changing_previous_bundle(
 
     first_reference = publisher.publish(first_evaluation)
     first_content = repository.open(first_reference).read()
+    assert p1_acceptance_bundle_envelope_is_valid(json.loads(first_content))
     second_evaluation = replace(
         first_evaluation,
         attempt_id="p1-attempt-blocked-002",
@@ -451,6 +453,7 @@ def test_blocked_rerun_publishes_new_evidence_without_changing_previous_bundle(
     assert second_reference != first_reference
     assert repository.open(first_reference).read() == first_content
     second_bundle = json.loads(repository.open(second_reference).read())
+    assert p1_acceptance_bundle_envelope_is_valid(second_bundle)
     assert second_bundle["status"] == "blocked"
     assert second_bundle["approval"] == {
         "approved": False,
@@ -566,11 +569,12 @@ def test_missing_hard_gate_result_is_recorded_as_blocked_instead_of_passing(
 
     bundle = json.loads(repository.open(reference).read())
     assert bundle["status"] == "blocked"
-    assert bundle["hard_gates"]["GATE-DEPLOY-01"] == {
-        "owner": "platform_owner",
-        "reason": "gate_result_missing",
-        "status": "blocked",
-    }
+    assert p1_acceptance_bundle_envelope_is_valid(bundle)
+    assert bundle["contracts"] == {"acceptance_runner": {"status": "blocked"}}
+    assert bundle["failure_evidence"][0]["reason"] == "evidence_capture_failed"
+    assert all(
+        result["reason"] == "evidence_capture_failed" for result in bundle["hard_gates"].values()
+    )
 
 
 def test_publisher_rejects_passing_gates_when_contract_evidence_failed(
