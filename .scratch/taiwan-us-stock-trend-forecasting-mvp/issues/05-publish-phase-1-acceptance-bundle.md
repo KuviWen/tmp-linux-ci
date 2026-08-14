@@ -53,6 +53,8 @@ Status: ready-for-agent
 - Publisher 在持久化前以同一 envelope contract 自我驗證；不完整的 blocked／failed evidence 會正規化
   為 `evidence_capture_failed` fail-closed bundle。Platform evidence 的結構與 passing 規則由單一 validator
   同時供發布 gate 與 previous-chain 驗證使用，避免兩條路徑漂移。
+- Contract results 只接受 canonical `status + checks + evidence_digest` envelope，且 digest 必須由 checks
+  的 canonical JSON 重算一致；裸 `passed` 或只有 status 的測試捷徑不能形成 passing evidence。
 - 驗證：`python -m pytest tests/acceptance/test_acceptance_runner.py
   tests/contracts/test_acceptance_bundle.py tests/contracts/test_compose_contract.py
   tests/contracts/test_object_repository.py -q`；`python -m mypy src tests`；

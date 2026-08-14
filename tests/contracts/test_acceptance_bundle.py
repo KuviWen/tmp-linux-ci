@@ -109,8 +109,17 @@ EXPECTED_P1_RESOURCES = (
 )
 
 
-def _passing_contracts() -> dict[str, str]:
-    return dict.fromkeys(EXPECTED_P1_CONTRACTS, "passed")
+def _passing_contracts() -> dict[str, dict[str, object]]:
+    return {
+        contract: {
+            "checks": {"verified": True},
+            "evidence_digest": (
+                "sha256:348f299cf43d57826c76c5ef7c8ccc37668b45161b857d4ef09f7125f3381be9"
+            ),
+            "status": "passed",
+        }
+        for contract in EXPECTED_P1_CONTRACTS
+    }
 
 
 def _passing_scenarios() -> dict[str, str]:
@@ -298,6 +307,10 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
 
     for incomplete_evaluation in (
         replace(evaluation, contract_results={"x": "passed"}),
+        replace(
+            evaluation,
+            contract_results=dict.fromkeys(EXPECTED_P1_CONTRACTS, "passed"),
+        ),
         replace(evaluation, scenario_results={"x": "passed"}),
         replace(evaluation, restart_results={"x": True}),
         replace(
@@ -367,6 +380,10 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
 
     candidate = copy_bundle()
     candidate["contracts"].pop("event")
+    contradictory_bundles.append(candidate)
+
+    candidate = copy_bundle()
+    candidate["contracts"]["event"] = "passed"
     contradictory_bundles.append(candidate)
 
     candidate = copy_bundle()

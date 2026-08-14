@@ -306,21 +306,32 @@ def _evidence_status(result: object) -> str | None:
     return None
 
 
-def _contract_evidence_passed(result: object) -> bool:
-    if isinstance(result, str):
-        return result == "passed"
-    if not isinstance(result, Mapping) or result.get("status") != "passed":
+def _contract_evidence_is_valid(result: object) -> bool:
+    if not isinstance(result, Mapping) or set(result) != {
+        "checks",
+        "evidence_digest",
+        "status",
+    }:
         return False
     checks = result.get("checks")
-    evidence_digest = result.get("evidence_digest")
-    if checks is None and evidence_digest is None:
-        return True
     if not isinstance(checks, Mapping) or not checks:
         return False
-    if not all(check is True for check in checks.values()):
+    if not all(isinstance(check, bool) for check in checks.values()):
         return False
     encoded = json.dumps(checks, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return evidence_digest == f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+    expected_status = "passed" if all(checks.values()) else "failed"
+    return (
+        result.get("status") == expected_status
+        and result.get("evidence_digest") == f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+    )
+
+
+def _contract_evidence_passed(result: object) -> bool:
+    return (
+        isinstance(result, Mapping)
+        and _contract_evidence_is_valid(result)
+        and result.get("status") == "passed"
+    )
 
 
 def _has_exact_catalog(results: object, required_names: tuple[str, ...]) -> bool:
@@ -335,13 +346,10 @@ def _catalog_results_are_structurally_valid(
 ) -> bool:
     if not isinstance(results, Mapping) or set(results) != set(required_names):
         return False
+    if contracts:
+        return all(_contract_evidence_is_valid(result) for result in results.values())
     return all(
         _evidence_status(result) in {"passed", "failed", "blocked", "policy_blocked"}
-        and (
-            not contracts
-            or _evidence_status(result) != "passed"
-            or _contract_evidence_passed(result)
-        )
         for result in results.values()
     )
 
