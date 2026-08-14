@@ -701,6 +701,20 @@ def test_publisher_rejects_passing_gates_when_contract_evidence_failed(
         P1AcceptanceBundlePublisher(repository).publish(evaluation)
 
 
+def test_required_tree_digest_is_stable_across_checkout_line_endings(tmp_path: Path) -> None:
+    linux_checkout = tmp_path / "linux"
+    windows_checkout = tmp_path / "windows"
+    linux_checkout.mkdir()
+    windows_checkout.mkdir()
+    (linux_checkout / "module.py").write_bytes(b"first\nsecond\n")
+    (windows_checkout / "module.py").write_bytes(b"first\r\nsecond\r\n")
+
+    assert digest_required_paths(linux_checkout, ("module.py",)) == digest_required_paths(
+        windows_checkout,
+        ("module.py",),
+    )
+
+
 def test_required_tree_digest_rejects_a_missing_or_empty_required_path(tmp_path: Path) -> None:
     (tmp_path / "present.txt").write_text("present", encoding="utf-8")
     (tmp_path / "empty").mkdir()

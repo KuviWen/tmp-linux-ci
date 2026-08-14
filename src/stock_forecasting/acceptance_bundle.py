@@ -322,7 +322,7 @@ def digest_required_paths(project_root: Path, relative_paths: tuple[str, ...]) -
     for path in sorted(files, key=lambda item: item.relative_to(project_root).as_posix()):
         digest.update(path.relative_to(project_root).as_posix().encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
         digest.update(b"\0")
     return f"sha256:{digest.hexdigest()}"
 
