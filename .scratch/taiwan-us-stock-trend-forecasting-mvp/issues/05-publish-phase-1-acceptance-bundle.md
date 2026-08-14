@@ -10,7 +10,7 @@ Status: ready-for-agent
 
 - [x] Acceptance runner 從無既有 state 的環境啟動 Compose，完成兩市場 fixture EOD、REST／UI 查詢、事故注入、重啟及結果驗證，不依賴手動步驟。
 - [x] 驗收涵蓋 duplicate collection、late data、必要／可選模態缺失、日曆／公司行動缺件、checksum、stale fencing、單市場失敗、fixture 升版企圖與 outbox 重送。
-- [ ] Windows Docker Desktop 與 Linux CI 使用相同 container 路徑及命令通過 PostgreSQL、filesystem ObjectRepository、Dagster wrapper、REST／event contract 與端到端驗收。
+- [x] Windows Docker Desktop 與 Linux CI 使用相同 container 路徑及命令通過 PostgreSQL、filesystem ObjectRepository、Dagster wrapper、REST／event contract 與端到端驗收。
 - [x] 繁中比較矩陣／標的頁、URL 重載、鍵盤操作、文字狀態、三期間機率、信心、支援、cutoff、fixture 標章與譜系全部可由外部觀察驗證。
 - [x] Bundle 綁定 trace IDs、Git／image／deployment／migration／fixture digests、來源政策、manifests、contracts、E2E IDs、failure evidence、UI／REST goldens、restart 與 resource smoke。
 - [x] Bundle 記錄每個未通過、degraded、policy-blocked 或例外的穩定原因、owner、前一 bundle reference 及完整重現命令。
@@ -28,10 +28,18 @@ Status: ready-for-agent
 - 每個平台 run 發布獨立的 content-addressed evidence，綁定實際 OCI image ID、Git、application
   payload、deployment、migration、contract、scenario、restart 與 resource 結果；只有同一
   provenance 的 Windows Docker Desktop 與 Linux CI evidence 都通過，P1-EXIT 才能 passing。
-- Windows Docker Desktop deployed path 已從不存在的 ticket-05 state 通過；目前 bundle 正確保持
-  `blocked`（`dual_platform_evidence_required`），等待同 commit 的 hosted Linux artifact。
-- Linux workflow 會執行真實 PostgreSQL opt-in suite，並在清理前 checksum 驗證及上傳匯出的
-  bundle；repo 無 remote／hosted run 證據，因此對應 criterion 保持未勾選。
+- GitHub hosted Ubuntu run `31851846154` 在 commit
+  `9ddefa723682faf1b9947841b3809d7409ccd29b` 通過 host suite、真實 PostgreSQL opt-in、mypy、Ruff、
+  Compose config、相同 deployed acceptance 命令與 checksum 驗證；artifact
+  `p1-linux-acceptance-evidence` 保留 Linux bundle `sha256:f44d90ae0c43e98390093057adaf409739a4229160f0a40c8fbd713024d2bc0a`。
+- Windows Docker Desktop 從清除 ticket-05 專屬 volumes 的乾淨 state，以同一命令及上述 Linux
+  artifact 聚合通過。最終 bundle
+  `sha256:74fd6dca75f1d3f7235189c417b250b9e95f4a19ebf9413c089143d3ae298c20`
+  的 envelope／bundle checksum／failure-object manifest 全部驗證有效，`linux_ci` 與
+  `windows_docker_desktop` platform runs、8 個 hard gates 及 14 個 scenarios 全為 `passed`。
+- Source provenance 對 CRLF／LF checkout 使用 canonical LF bytes，忽略並從 Docker context 排除
+  `*.egg-info` 生成 metadata；`.dockerignore` 本身納入 deployment digest 並 COPY 至 runtime，讓兩平台
+  可在同一 Git provenance 上獨立重算，而不放寬實際內容差異或 OCI image 驗證。
 - Failure matrix 由實際觀察建立，correction／withdrawal 分列；optional modalities 由 REST／UI
   公開 phase boundary 觀察；checksum／stale-fencing failure evidence 各自綁定其內容定址 probe；
   fixture digest 綁 raw artifact 而非 dataset manifest。
