@@ -699,7 +699,24 @@ def test_ticket_05_cli_rejects_a_structurally_incomplete_previous_bundle(
 ) -> None:
     export_directory = tmp_path / "exports"
     export_directory.mkdir()
-    incomplete_content = b'{"schema_version":"p1-acceptance-bundle-v1"}'
+    previous_report = run_ticket_05(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'previous.db'}",
+        object_root=tmp_path / "previous-objects",
+        information_cutoff=datetime(2026, 8, 12, 22, tzinfo=UTC),
+        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+        project_root=Path.cwd(),
+        git_dir=Path.cwd() / ".git",
+        previous_bundle_reference="invalid-reference",
+    )
+    incomplete_bundle = json.loads(
+        Path(previous_report["bundle"]["uri"]).read_text(encoding="utf-8")
+    )
+    incomplete_bundle["claims"] = {}
+    incomplete_content = json.dumps(
+        incomplete_bundle,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
     incomplete_checksum = hashlib.sha256(incomplete_content).hexdigest()
     (export_directory / "p1-acceptance-bundle.json").write_bytes(incomplete_content)
 

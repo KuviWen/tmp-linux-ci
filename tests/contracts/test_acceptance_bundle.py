@@ -4,10 +4,12 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from stock_forecasting.acceptance_bundle import (
+    P1_FAILURE_EVIDENCE_CATALOG,
     P1_REQUIRED_CONTRACTS,
     P1_REQUIRED_FAILURE_SCENARIOS,
     P1_REQUIRED_RESOURCES,
@@ -64,6 +66,40 @@ EXPECTED_P1_FAILURE_SCENARIOS = (
     "source_entitlement",
     "outbox_restart",
 )
+EXPECTED_P1_FAILURE_EVIDENCE_CATALOG = {
+    "late_data": ("blocked", "post_cutoff_evidence", "data_owner"),
+    "necessary_modality_missing": ("blocked", "missing_anchor_price", "data_owner"),
+    "optional_modalities_missing": (
+        "degraded",
+        "phase_1_optional_modality_out_of_scope",
+        "research_owner",
+    ),
+    "missing_calendar": ("blocked", "calendar_unresolved", "data_owner"),
+    "missing_company_action": ("blocked", "missing_company_action", "data_owner"),
+    "withdrawal": ("blocked", "source_withdrawn", "data_owner"),
+    "checksum_failure": ("blocked", "checksum_mismatch", "data_owner"),
+    "stale_fencing": (
+        "blocked_then_recovered",
+        "relay_lease_superseded",
+        "operations_owner",
+    ),
+    "one_market_failure": ("degraded", "market_failure_isolated", "operations_owner"),
+    "fixture_promotion_attempt": (
+        "policy_blocked",
+        "fixture_use_forbidden",
+        "model_governor",
+    ),
+    "source_entitlement": (
+        "policy_blocked",
+        "source_entitlement_revoked",
+        "source_steward",
+    ),
+    "outbox_restart": (
+        "failed_then_recovered",
+        "injected_relay_crash",
+        "operations_owner",
+    ),
+}
 EXPECTED_P1_RESOURCES = (
     "api_ready",
     "dagster_ready",
@@ -92,11 +128,11 @@ def _passing_resources() -> dict[str, bool]:
 def _failure_evidence() -> tuple[dict[str, object], ...]:
     return tuple(
         {
-            "evidence_ids": [f"evidence-{scenario}"],
-            "owner": "test_owner",
-            "reason": f"{scenario}_verified",
+            "evidence_ids": ["sha256:" + "9" * 64],
+            "owner": EXPECTED_P1_FAILURE_EVIDENCE_CATALOG[scenario][2],
+            "reason": EXPECTED_P1_FAILURE_EVIDENCE_CATALOG[scenario][1],
             "scenario": scenario,
-            "status": "blocked",
+            "status": EXPECTED_P1_FAILURE_EVIDENCE_CATALOG[scenario][0],
         }
         for scenario in EXPECTED_P1_FAILURE_SCENARIOS
     )
@@ -108,6 +144,7 @@ def test_required_p1_evidence_catalogs_match_the_ticket_contract() -> None:
     assert P1_REQUIRED_RESTART_CHECKS == EXPECTED_P1_RESTART_CHECKS
     assert P1_REQUIRED_RESOURCES == EXPECTED_P1_RESOURCES
     assert P1_REQUIRED_FAILURE_SCENARIOS == EXPECTED_P1_FAILURE_SCENARIOS
+    assert P1_FAILURE_EVIDENCE_CATALOG == EXPECTED_P1_FAILURE_EVIDENCE_CATALOG
 
 
 def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
@@ -282,6 +319,17 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
         with pytest.raises(ValueError, match="passing_gate_evidence_inconsistent"):
             publisher.publish(incomplete_evaluation)
 
+    for field_name, invalid_value in (
+        ("status", "passed"),
+        ("reason", "arbitrary_reason"),
+        ("owner", "arbitrary_owner"),
+        ("evidence_ids", ["arbitrary-evidence"]),
+    ):
+        invalid_failure_evidence = [dict(result) for result in _failure_evidence()]
+        invalid_failure_evidence[0][field_name] = invalid_value
+        with pytest.raises(ValueError, match="passing_gate_evidence_inconsistent"):
+            publisher.publish(replace(evaluation, failure_evidence=tuple(invalid_failure_evidence)))
+
     incomplete_platforms = {
         platform: dict(platform_evidence)
         for platform, platform_evidence in evaluation.platform_results.items()
@@ -294,6 +342,49 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
     assert incomplete_bundle["status"] == "blocked"
     assert incomplete_bundle["hard_gates"]["GATE-DEPLOY-01"]["reason"] == (
         "dual_platform_evidence_required"
+    )
+
+    def copy_bundle() -> dict[str, Any]:
+        return cast(dict[str, Any], json.loads(json.dumps(bundle)))
+
+    contradictory_bundles = []
+
+    candidate = copy_bundle()
+    candidate["platform_runs"] = {}
+    contradictory_bundles.append(candidate)
+
+    candidate = copy_bundle()
+    candidate["hard_gates"]["GATE-DATA-01"]["status"] = "failed"
+    contradictory_bundles.append(candidate)
+
+    candidate = copy_bundle()
+    candidate["contracts"].pop("event")
+    contradictory_bundles.append(candidate)
+
+    candidate = copy_bundle()
+    candidate["platform_runs"]["linux_ci"]["evidence_reference"] = "sha256:" + "0" * 64
+    contradictory_bundles.append(candidate)
+
+    candidate = copy_bundle()
+    candidate["claims"] = {}
+    contradictory_bundles.append(candidate)
+
+    candidate = copy_bundle()
+    candidate["provenance"]["images"] = {}
+    contradictory_bundles.append(candidate)
+
+    candidate = copy_bundle()
+    candidate["status"] = "blocked"
+    candidate["approval"]["approved"] = False
+    candidate["hard_gates"]["GATE-DEPLOY-01"] = {
+        "owner": "platform_owner",
+        "reason": "dual_platform_evidence_required",
+        "status": "blocked",
+    }
+    candidate["contracts"] = {}
+    contradictory_bundles.append(candidate)
+    assert not any(
+        p1_acceptance_bundle_envelope_is_valid(candidate) for candidate in contradictory_bundles
     )
 
 

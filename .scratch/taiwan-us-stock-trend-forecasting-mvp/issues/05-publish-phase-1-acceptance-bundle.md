@@ -46,6 +46,10 @@ Status: ready-for-agent
 - Publisher 的 passing consistency 會驗證完整 provenance、雙市場 fixture、policy／manifest／E2E、
   failure matrix 與 goldens；previous chain 使用相同 bundle envelope 契約，不接受只有 schema
   discriminator 的不完整 JSON。
+- Failure evidence 的 status／reason／owner 使用 ticket 對應的精確 catalog，evidence ID 必須是穩定
+  UUID 或 SHA-256 reference。Envelope validator 會區分完整 normal bundle 與固定形狀的 fail-closed
+  bundle，重新計算每個 platform evidence reference，並核對 claims、hard gates、catalogs、provenance、
+  OCI image 與 passing invariants；空殼或互相矛盾的 previous bundle 不會進入 chain。
 - 驗證：`python -m pytest tests/acceptance/test_acceptance_runner.py
   tests/contracts/test_acceptance_bundle.py tests/contracts/test_compose_contract.py
   tests/contracts/test_object_repository.py -q`；`python -m mypy src tests`；
