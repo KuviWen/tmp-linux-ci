@@ -312,6 +312,7 @@ def digest_required_paths(project_root: Path, relative_paths: tuple[str, ...]) -
             for path in candidate.rglob("*")
             if path.is_file()
             and "__pycache__" not in path.parts
+            and not any(part.endswith(".egg-info") for part in path.parts)
             and path.suffix not in {".pyc", ".pyo"}
         ]
         if not candidate_files:

@@ -309,6 +309,7 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
 
 def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
     dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (REPOSITORY_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
 
     assert dockerfile.startswith("FROM python:3.12.12-slim\n")
     assert "COPY requirements.lock pyproject.toml ./" in dockerfile
@@ -319,6 +320,7 @@ def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
     assert "USER app" in dockerfile
     assert '"--host", "127.0.0.1"' in dockerfile
     assert (REPOSITORY_ROOT / "requirements.lock").is_file()
+    assert "*.egg-info" in dockerignore
 
 
 def test_linux_ci_uses_the_same_compose_acceptance_command() -> None:

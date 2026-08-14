@@ -2025,7 +2025,7 @@ def _run_ticket_05(
     )
     deployment_digest = digest_required_paths(
         project_root,
-        ("Dockerfile", "compose.yaml", "docker", ".github/workflows"),
+        ("Dockerfile", "compose.yaml", ".dockerignore", "docker", ".github/workflows"),
     )
     migration_digest = digest_required_paths(project_root, ("alembic.ini", "migrations"))
     restart_results = {

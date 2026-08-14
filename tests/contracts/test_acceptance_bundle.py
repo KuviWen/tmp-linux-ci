@@ -715,6 +715,25 @@ def test_required_tree_digest_is_stable_across_checkout_line_endings(tmp_path: P
     )
 
 
+def test_required_tree_digest_ignores_generated_package_metadata(tmp_path: Path) -> None:
+    clean_checkout = tmp_path / "clean"
+    installed_checkout = tmp_path / "installed"
+    clean_package = clean_checkout / "package"
+    installed_package = installed_checkout / "package"
+    clean_package.mkdir(parents=True)
+    installed_package.mkdir(parents=True)
+    (clean_package / "module.py").write_text("value = 1\n", encoding="utf-8")
+    (installed_package / "module.py").write_text("value = 1\n", encoding="utf-8")
+    metadata = installed_package / "project.egg-info"
+    metadata.mkdir()
+    (metadata / "PKG-INFO").write_text("host-specific metadata\n", encoding="utf-8")
+
+    assert digest_required_paths(clean_checkout, ("package",)) == digest_required_paths(
+        installed_checkout,
+        ("package",),
+    )
+
+
 def test_required_tree_digest_rejects_a_missing_or_empty_required_path(tmp_path: Path) -> None:
     (tmp_path / "present.txt").write_text("present", encoding="utf-8")
     (tmp_path / "empty").mkdir()

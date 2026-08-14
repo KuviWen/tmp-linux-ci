@@ -21,6 +21,7 @@ from stock_forecasting.acceptance import (
     run_ticket_04,
     run_ticket_05,
 )
+from stock_forecasting.acceptance_bundle import digest_required_paths
 from stock_forecasting.dagster_deployment import (
     inspect_dagster_deployment,
     materialize_deployed_asset,
@@ -534,6 +535,10 @@ def test_ticket_05_runner_publishes_blocked_evidence_when_not_deployed(
             text=True,
             encoding="utf-8",
         ).stdout.strip()
+    )
+    assert bundle["provenance"]["deployment_digest"] == digest_required_paths(
+        Path.cwd(),
+        ("Dockerfile", "compose.yaml", ".dockerignore", "docker", ".github/workflows"),
     )
 
 
