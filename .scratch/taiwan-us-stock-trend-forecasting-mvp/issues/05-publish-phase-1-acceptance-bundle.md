@@ -55,6 +55,9 @@ Status: ready-for-agent
   同時供發布 gate 與 previous-chain 驗證使用，避免兩條路徑漂移。
 - Contract results 只接受 canonical `status + checks + evidence_digest` envelope，且 digest 必須由 checks
   的 canonical JSON 重算一致；裸 `passed` 或只有 status 的測試捷徑不能形成 passing evidence。
+- Scenario results 由單一 scenario-owner catalog 產生並驗證 canonical `status + reason + owner`；來源
+  policy 與 manifest 各要求兩個 canonical UUID，E2E IDs 要求台／美固定 tracer 加三個 UUID，避免測試
+  標籤被誤認為可發布 provenance。
 - 驗證：`python -m pytest tests/acceptance/test_acceptance_runner.py
   tests/contracts/test_acceptance_bundle.py tests/contracts/test_compose_contract.py
   tests/contracts/test_object_repository.py -q`；`python -m mypy src tests`；

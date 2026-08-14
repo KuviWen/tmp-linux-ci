@@ -66,6 +66,22 @@ P1_REQUIRED_SCENARIOS = (
     "stale_fencing",
     "withdrawal",
 )
+P1_SCENARIO_OWNERS = {
+    "checksum_failure": "data_owner",
+    "correction": "data_owner",
+    "duplicate_collection": "data_owner",
+    "fixture_promotion_attempt": "model_governor",
+    "late_data": "data_owner",
+    "missing_calendar": "data_owner",
+    "missing_company_action": "data_owner",
+    "necessary_modality_missing": "data_owner",
+    "one_market_failure": "operations_owner",
+    "optional_modalities_missing": "research_owner",
+    "outbox_redelivery": "operations_owner",
+    "outbox_restart": "operations_owner",
+    "stale_fencing": "operations_owner",
+    "withdrawal": "data_owner",
+}
 P1_REQUIRED_RESTART_CHECKS = (
     "outbox_recovered",
     "same_event_identity",
@@ -156,25 +172,39 @@ def _is_git_commit(value: object) -> bool:
     )
 
 
-def _nonempty_unique_strings(values: object, *, minimum: int) -> bool:
+def _is_uuid_reference(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = UUID(value)
+    except ValueError:
+        return False
+    return str(parsed) == value
+
+
+def _uuid_references_are_complete(values: object, *, count: int) -> bool:
     return (
         isinstance(values, (list, tuple))
-        and len(values) >= minimum
-        and all(isinstance(value, str) and bool(value) for value in values)
+        and len(values) == count
+        and all(_is_uuid_reference(value) for value in values)
         and len(set(values)) == len(values)
     )
 
 
+def _end_to_end_ids_are_complete(values: object) -> bool:
+    required_tracers = {"trace-p1-trace-tw-01", "trace-p1-trace-us-01"}
+    if (
+        not isinstance(values, (list, tuple))
+        or len(values) != 5
+        or len(set(values)) != len(values)
+        or not required_tracers <= set(values)
+    ):
+        return False
+    return all(_is_uuid_reference(value) for value in values if value not in required_tracers)
+
+
 def _is_stable_evidence_id(value: object) -> bool:
-    if is_sha256_reference(value):
-        return True
-    if not isinstance(value, str):
-        return False
-    try:
-        UUID(value)
-    except ValueError:
-        return False
-    return True
+    return is_sha256_reference(value) or _is_uuid_reference(value)
 
 
 def _failure_evidence_is_complete(
@@ -240,9 +270,9 @@ def _passing_provenance_is_complete(
         and isinstance(fixture_digests, Mapping)
         and set(fixture_digests) == {"XTAI", "XNAS"}
         and all(is_sha256_reference(value) for value in fixture_digests.values())
-        and _nonempty_unique_strings(source_policy_ids, minimum=2)
-        and _nonempty_unique_strings(manifest_ids, minimum=2)
-        and _nonempty_unique_strings(end_to_end_ids, minimum=2)
+        and _uuid_references_are_complete(source_policy_ids, count=2)
+        and _uuid_references_are_complete(manifest_ids, count=2)
+        and _end_to_end_ids_are_complete(end_to_end_ids)
         and _failure_evidence_is_complete(
             failure_evidence,
             require_observed=failure_evidence_require_observed,
@@ -298,8 +328,6 @@ def digest_required_paths(project_root: Path, relative_paths: tuple[str, ...]) -
 
 
 def _evidence_status(result: object) -> str | None:
-    if isinstance(result, str):
-        return result
     if isinstance(result, Mapping):
         status = result.get("status")
         return status if isinstance(status, str) else None
@@ -338,20 +366,30 @@ def _has_exact_catalog(results: object, required_names: tuple[str, ...]) -> bool
     return isinstance(results, Mapping) and set(results) == set(required_names)
 
 
-def _catalog_results_are_structurally_valid(
-    results: object,
-    required_names: tuple[str, ...],
-    *,
-    contracts: bool = False,
-) -> bool:
-    if not isinstance(results, Mapping) or set(results) != set(required_names):
-        return False
-    if contracts:
-        return all(_contract_evidence_is_valid(result) for result in results.values())
-    return all(
-        _evidence_status(result) in {"passed", "failed", "blocked", "policy_blocked"}
-        for result in results.values()
+def _contract_results_are_structurally_valid(results: object) -> bool:
+    return (
+        isinstance(results, Mapping)
+        and set(results) == set(P1_REQUIRED_CONTRACTS)
+        and all(_contract_evidence_is_valid(result) for result in results.values())
     )
+
+
+def _scenario_results_are_structurally_valid(results: object) -> bool:
+    if not isinstance(results, Mapping) or set(results) != set(P1_SCENARIO_OWNERS):
+        return False
+    for scenario, result in results.items():
+        if not isinstance(scenario, str) or not isinstance(result, Mapping):
+            return False
+        status = result.get("status")
+        if (
+            set(result) != {"owner", "reason", "status"}
+            or status not in {"passed", "failed"}
+            or result.get("owner") != P1_SCENARIO_OWNERS[scenario]
+            or result.get("reason")
+            != f"{scenario}_{'verified' if status == 'passed' else 'failed'}"
+        ):
+            return False
+    return True
 
 
 def _restart_results_are_structurally_valid(results: object) -> bool:
@@ -546,10 +584,8 @@ def _platform_evidence_is_valid(
         or not isinstance(scenarios, Mapping)
         or not isinstance(restarts, Mapping)
         or not isinstance(resources, Mapping)
-        or not _catalog_results_are_structurally_valid(
-            contracts, P1_REQUIRED_CONTRACTS, contracts=True
-        )
-        or not _catalog_results_are_structurally_valid(scenarios, P1_REQUIRED_SCENARIOS)
+        or not _contract_results_are_structurally_valid(contracts)
+        or not _scenario_results_are_structurally_valid(scenarios)
         or not _restart_results_are_structurally_valid(restarts)
         or not _resource_results_are_structurally_valid(resources)
     ):
@@ -592,10 +628,8 @@ def _normal_bundle_envelope_is_valid(payload: Mapping[str, object]) -> bool:
         or not isinstance(scenarios, Mapping)
         or not isinstance(restarts, Mapping)
         or not isinstance(resources, Mapping)
-        or not _catalog_results_are_structurally_valid(
-            contracts, P1_REQUIRED_CONTRACTS, contracts=True
-        )
-        or not _catalog_results_are_structurally_valid(scenarios, P1_REQUIRED_SCENARIOS)
+        or not _contract_results_are_structurally_valid(contracts)
+        or not _scenario_results_are_structurally_valid(scenarios)
         or not _restart_results_are_structurally_valid(restarts)
         or not _resource_results_are_structurally_valid(resources)
         or not _passing_provenance_is_complete(
@@ -730,11 +764,11 @@ def _passing_evidence_is_consistent(evaluation: P1AcceptanceEvaluation) -> bool:
             previous_bundle_reference=evaluation.previous_bundle_reference,
             reproduction_command=evaluation.reproduction_command,
         )
-        and _has_exact_catalog(evaluation.contract_results, P1_REQUIRED_CONTRACTS)
+        and _contract_results_are_structurally_valid(evaluation.contract_results)
         and all(
             _contract_evidence_passed(result) for result in evaluation.contract_results.values()
         )
-        and _has_exact_catalog(evaluation.scenario_results, P1_REQUIRED_SCENARIOS)
+        and _scenario_results_are_structurally_valid(evaluation.scenario_results)
         and all(
             _evidence_status(result) == "passed" for result in evaluation.scenario_results.values()
         )

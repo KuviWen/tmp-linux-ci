@@ -15,6 +15,7 @@ from stock_forecasting.acceptance_bundle import (
     P1_REQUIRED_RESOURCES,
     P1_REQUIRED_RESTART_CHECKS,
     P1_REQUIRED_SCENARIOS,
+    P1_SCENARIO_OWNERS,
     P1AcceptanceBundlePublisher,
     P1AcceptanceEvaluation,
     P1GateResult,
@@ -100,12 +101,43 @@ EXPECTED_P1_FAILURE_EVIDENCE_CATALOG = {
         "operations_owner",
     ),
 }
+EXPECTED_P1_SCENARIO_OWNERS = {
+    "checksum_failure": "data_owner",
+    "correction": "data_owner",
+    "duplicate_collection": "data_owner",
+    "fixture_promotion_attempt": "model_governor",
+    "late_data": "data_owner",
+    "missing_calendar": "data_owner",
+    "missing_company_action": "data_owner",
+    "necessary_modality_missing": "data_owner",
+    "one_market_failure": "operations_owner",
+    "optional_modalities_missing": "research_owner",
+    "outbox_redelivery": "operations_owner",
+    "outbox_restart": "operations_owner",
+    "stale_fencing": "operations_owner",
+    "withdrawal": "data_owner",
+}
 EXPECTED_P1_RESOURCES = (
     "api_ready",
     "dagster_ready",
     "filesystem_object_round_trip",
     "postgresql_ready",
     "formal_capacity_claim",
+)
+TEST_SOURCE_POLICY_IDS = (
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222",
+)
+TEST_MANIFEST_IDS = (
+    "33333333-3333-4333-8333-333333333333",
+    "44444444-4444-4444-8444-444444444444",
+)
+TEST_END_TO_END_IDS = (
+    "trace-p1-trace-tw-01",
+    "trace-p1-trace-us-01",
+    "55555555-5555-4555-8555-555555555555",
+    "66666666-6666-4666-8666-666666666666",
+    "77777777-7777-4777-8777-777777777777",
 )
 
 
@@ -122,8 +154,15 @@ def _passing_contracts() -> dict[str, dict[str, object]]:
     }
 
 
-def _passing_scenarios() -> dict[str, str]:
-    return dict.fromkeys(EXPECTED_P1_SCENARIOS, "passed")
+def _passing_scenarios() -> dict[str, dict[str, str]]:
+    return {
+        scenario: {
+            "owner": EXPECTED_P1_SCENARIO_OWNERS[scenario],
+            "reason": f"{scenario}_verified",
+            "status": "passed",
+        }
+        for scenario in EXPECTED_P1_SCENARIOS
+    }
 
 
 def _passing_restart_checks() -> dict[str, bool]:
@@ -154,6 +193,7 @@ def test_required_p1_evidence_catalogs_match_the_ticket_contract() -> None:
     assert P1_REQUIRED_RESOURCES == EXPECTED_P1_RESOURCES
     assert P1_REQUIRED_FAILURE_SCENARIOS == EXPECTED_P1_FAILURE_SCENARIOS
     assert P1_FAILURE_EVIDENCE_CATALOG == EXPECTED_P1_FAILURE_EVIDENCE_CATALOG
+    assert P1_SCENARIO_OWNERS == EXPECTED_P1_SCENARIO_OWNERS
 
 
 def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
@@ -169,10 +209,10 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
         deployment_digest="sha256:" + "c" * 64,
         migration_digest="sha256:" + "d" * 64,
         fixture_digests={"XNAS": "sha256:" + "e" * 64, "XTAI": "sha256:" + "f" * 64},
-        source_policy_ids=("fixture-source-policy-xtai-v1", "fixture-source-policy-xnas-v1"),
-        manifest_ids=("manifest-xtai-001", "manifest-xnas-001"),
+        source_policy_ids=TEST_SOURCE_POLICY_IDS,
+        manifest_ids=TEST_MANIFEST_IDS,
         contract_results=_passing_contracts(),
-        end_to_end_ids=("e2e-xtai-001", "e2e-xnas-001"),
+        end_to_end_ids=TEST_END_TO_END_IDS,
         scenario_results=_passing_scenarios(),
         failure_evidence=_failure_evidence(),
         rest_golden_digest="sha256:" + "1" * 64,
@@ -312,6 +352,10 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
             contract_results=dict.fromkeys(EXPECTED_P1_CONTRACTS, "passed"),
         ),
         replace(evaluation, scenario_results={"x": "passed"}),
+        replace(
+            evaluation,
+            scenario_results=dict.fromkeys(EXPECTED_P1_SCENARIOS, "passed"),
+        ),
         replace(evaluation, restart_results={"x": True}),
         replace(
             evaluation,
@@ -323,8 +367,18 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
         replace(evaluation, migration_digest=""),
         replace(evaluation, fixture_digests={}),
         replace(evaluation, source_policy_ids=()),
+        replace(evaluation, source_policy_ids=("not-a-uuid", "also-not-a-uuid")),
         replace(evaluation, manifest_ids=()),
+        replace(evaluation, manifest_ids=("not-a-uuid", "also-not-a-uuid")),
         replace(evaluation, end_to_end_ids=()),
+        replace(
+            evaluation,
+            end_to_end_ids=(
+                "trace-p1-trace-tw-01",
+                "missing-us-tracer",
+                *TEST_END_TO_END_IDS[2:],
+            ),
+        ),
         replace(evaluation, failure_evidence=()),
         replace(evaluation, rest_golden_digest=""),
         replace(evaluation, ui_golden_digest=""),
@@ -387,6 +441,10 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
     contradictory_bundles.append(candidate)
 
     candidate = copy_bundle()
+    candidate["scenario_results"]["late_data"] = "passed"
+    contradictory_bundles.append(candidate)
+
+    candidate = copy_bundle()
     candidate["platform_runs"]["linux_ci"]["evidence_reference"] = "sha256:" + "0" * 64
     contradictory_bundles.append(candidate)
 
@@ -426,10 +484,10 @@ def test_blocked_rerun_publishes_new_evidence_without_changing_previous_bundle(
         deployment_digest="sha256:" + "c" * 64,
         migration_digest="sha256:" + "d" * 64,
         fixture_digests={"XNAS": "sha256:" + "e" * 64, "XTAI": "sha256:" + "f" * 64},
-        source_policy_ids=("fixture-source-policy-xtai-v1", "fixture-source-policy-xnas-v1"),
-        manifest_ids=("manifest-xtai-001", "manifest-xnas-001"),
+        source_policy_ids=TEST_SOURCE_POLICY_IDS,
+        manifest_ids=TEST_MANIFEST_IDS,
         contract_results=_passing_contracts(),
-        end_to_end_ids=("e2e-xtai-001", "e2e-xnas-001"),
+        end_to_end_ids=TEST_END_TO_END_IDS,
         scenario_results=_passing_scenarios(),
         failure_evidence=_failure_evidence(),
         rest_golden_digest="sha256:" + "1" * 64,
@@ -495,10 +553,10 @@ def test_single_platform_evidence_cannot_approve_p1_exit(tmp_path: Path) -> None
         deployment_digest="sha256:" + "c" * 64,
         migration_digest="sha256:" + "d" * 64,
         fixture_digests={"XNAS": "sha256:" + "e" * 64, "XTAI": "sha256:" + "f" * 64},
-        source_policy_ids=("fixture-source-policy-xtai-v1", "fixture-source-policy-xnas-v1"),
-        manifest_ids=("manifest-xtai-001", "manifest-xnas-001"),
+        source_policy_ids=TEST_SOURCE_POLICY_IDS,
+        manifest_ids=TEST_MANIFEST_IDS,
         contract_results=_passing_contracts(),
-        end_to_end_ids=("e2e-xtai-001", "e2e-xnas-001"),
+        end_to_end_ids=TEST_END_TO_END_IDS,
         scenario_results=_passing_scenarios(),
         failure_evidence=_failure_evidence(),
         rest_golden_digest="sha256:" + "1" * 64,

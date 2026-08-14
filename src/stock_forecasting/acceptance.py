@@ -22,6 +22,7 @@ from sqlalchemy import text
 from stock_forecasting.acceptance_bundle import (
     P1_FAILURE_EVIDENCE_CATALOG,
     P1_HARD_GATE_OWNERS,
+    P1_SCENARIO_OWNERS,
     P1_TRACE_IDS,
     P1AcceptanceBundlePublisher,
     P1AcceptanceEvaluation,
@@ -1832,27 +1833,11 @@ def _run_ticket_05(
         "stale_fencing": stale_fencing_probe["verified"],
         "withdrawal": ticket_02["scenario_evidence"]["withdrawal"]["verified"],
     }
-    scenario_owners = {
-        "checksum_failure": "data_owner",
-        "correction": "data_owner",
-        "duplicate_collection": "data_owner",
-        "fixture_promotion_attempt": "model_governor",
-        "late_data": "data_owner",
-        "missing_calendar": "data_owner",
-        "missing_company_action": "data_owner",
-        "necessary_modality_missing": "data_owner",
-        "one_market_failure": "operations_owner",
-        "optional_modalities_missing": "research_owner",
-        "outbox_redelivery": "operations_owner",
-        "outbox_restart": "operations_owner",
-        "stale_fencing": "operations_owner",
-        "withdrawal": "data_owner",
-    }
     scenario_results = {
         scenario: {
             "status": "passed" if passed else "failed",
             "reason": f"{scenario}_{'verified' if passed else 'failed'}",
-            "owner": scenario_owners[scenario],
+            "owner": P1_SCENARIO_OWNERS[scenario],
         }
         for scenario, passed in scenario_checks.items()
     }
