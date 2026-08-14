@@ -16,7 +16,7 @@ RUN python -m pip install --no-cache-dir -r requirements.lock
 COPY src ./src
 COPY migrations ./migrations
 COPY openapi ./openapi
-COPY Dockerfile compose.yaml ./
+COPY Dockerfile compose.yaml .dockerignore ./
 COPY docker ./docker
 COPY .github ./.github
 COPY alembic.ini dagster-workspace.yaml ./

@@ -313,7 +313,7 @@ def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
 
     assert dockerfile.startswith("FROM python:3.12.12-slim\n")
     assert "COPY requirements.lock pyproject.toml ./" in dockerfile
-    assert "COPY Dockerfile compose.yaml ./" in dockerfile
+    assert "COPY Dockerfile compose.yaml .dockerignore ./" in dockerfile
     assert "COPY docker ./docker" in dockerfile
     assert "COPY .github ./.github" in dockerfile
     assert "/run/stock-forecasting" in dockerfile
