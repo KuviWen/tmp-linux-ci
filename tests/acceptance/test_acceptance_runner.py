@@ -583,6 +583,75 @@ def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
     assert (export_directory / "p1-acceptance-bundle.json.sha256").read_text(
         encoding="utf-8"
     ) == f"{report['bundle']['checksum']}  p1-acceptance-bundle.json\n"
+    failure_evidence = {result["scenario"]: result for result in bundle["failure_evidence"]}
+    preserved_lines = (export_directory / "p1-evidence-objects.sha256").read_text(encoding="utf-8")
+    for scenario in ("checksum_failure", "stale_fencing"):
+        reference = failure_evidence[scenario]["evidence_ids"][0]
+        checksum = reference.removeprefix("sha256:")
+        relative_path = Path("objects") / "sha256" / checksum[:2] / checksum
+        preserved = export_directory / relative_path
+        assert hashlib.sha256(preserved.read_bytes()).hexdigest() == checksum
+        assert f"{checksum}  {relative_path.as_posix()}\n" in preserved_lines
+
+
+def test_ticket_05_cli_preserves_and_reports_an_invalid_previous_bundle(
+    tmp_path: Path,
+) -> None:
+    export_directory = tmp_path / "exports"
+    export_directory.mkdir()
+    invalid_content = b"not-a-p1-bundle"
+    invalid_checksum = hashlib.sha256(invalid_content).hexdigest()
+    (export_directory / "p1-acceptance-bundle.json").write_bytes(invalid_content)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "stock_forecasting.cli",
+            "acceptance",
+            "ticket-05",
+            "--database-url",
+            f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+            "--object-root",
+            str(tmp_path / "objects"),
+            "--information-cutoff",
+            "2026-08-12T22:00:00Z",
+            "--observed-at",
+            "2026-08-12T21:55:00Z",
+            "--project-root",
+            str(Path.cwd()),
+            "--git-dir",
+            str(Path.cwd() / ".git"),
+            "--evidence-export-dir",
+            str(export_directory),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+
+    assert completed.returncode == 1, completed.stderr
+    report = json.loads(completed.stdout)
+    bundle = json.loads(Path(report["bundle"]["uri"]).read_text(encoding="utf-8"))
+    invalid_reference = f"sha256:{invalid_checksum}"
+    assert bundle["previous_bundle_reference"] == invalid_reference
+    assert bundle["failure_evidence"] == [
+        {
+            "evidence_ids": [invalid_reference],
+            "owner": "platform_owner",
+            "reason": "previous_acceptance_bundle_invalid",
+            "scenario": "acceptance_runner",
+            "stage": "previous_bundle_validation",
+            "status": "exception",
+        }
+    ]
+    preserved_relative_path = Path("previous") / "sha256" / invalid_checksum[:2] / invalid_checksum
+    assert (export_directory / preserved_relative_path).read_bytes() == invalid_content
+    assert f"{invalid_checksum}  {preserved_relative_path.as_posix()}\n" in (
+        export_directory / "p1-evidence-objects.sha256"
+    ).read_text(encoding="utf-8")
 
 
 def test_ticket_05_runner_publishes_fail_closed_bundle_when_a_stage_raises(
@@ -614,3 +683,22 @@ def test_ticket_05_runner_publishes_fail_closed_bundle_when_a_stage_raises(
     assert bundle["reproduction_command"] == (
         "docker compose --profile acceptance run --build --rm acceptance"
     )
+
+
+def test_ticket_05_runner_rejects_an_arbitrary_previous_bundle_reference(
+    tmp_path: Path,
+) -> None:
+    report = run_ticket_05(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'acceptance.db'}",
+        object_root=tmp_path / "objects",
+        information_cutoff=datetime(2026, 8, 12, 22, tzinfo=UTC),
+        observed_at=datetime(2026, 8, 12, 21, 55, tzinfo=UTC),
+        project_root=Path.cwd(),
+        git_dir=Path.cwd() / ".git",
+        previous_bundle_reference="arbitrary-reference",
+    )
+
+    bundle = json.loads(Path(report["bundle"]["uri"]).read_text(encoding="utf-8"))
+    assert report["status"] == "blocked"
+    assert bundle["previous_bundle_reference"] is None
+    assert bundle["failure_evidence"][0]["reason"] == ("previous_acceptance_bundle_invalid")

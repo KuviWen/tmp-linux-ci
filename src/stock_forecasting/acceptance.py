@@ -77,6 +77,26 @@ class HttpClient(Protocol):
     def close(self) -> None: ...
 
 
+class _PreviousAcceptanceBundleInvalid(RuntimeError):
+    def __init__(self, reference: str | None) -> None:
+        super().__init__("previous_acceptance_bundle_invalid")
+        self.reference = reference
+
+
+def _validated_previous_bundle_reference(path: Path) -> str:
+    content = path.read_bytes()
+    reference = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise _PreviousAcceptanceBundleInvalid(reference) from error
+    if not isinstance(payload, dict) or payload.get("schema_version") != (
+        "p1-acceptance-bundle-v1"
+    ):
+        raise _PreviousAcceptanceBundleInvalid(reference)
+    return reference
+
+
 @dataclass(frozen=True)
 class _AuthorizationMatrixCase:
     status: EntitlementStatus
@@ -2151,11 +2171,21 @@ def run_ticket_05(
     dagster_url: str | None = None,
     denied_base_url: str | None = None,
     previous_bundle_reference: str | None = None,
+    previous_bundle_path: Path | None = None,
     platform_name: str | None = None,
     container_image_digest: str | None = None,
     counterpart_bundle: Path | None = None,
 ) -> dict[str, Any]:
+    resolved_previous_bundle_reference = previous_bundle_reference
     try:
+        if resolved_previous_bundle_reference is not None and not is_sha256_reference(
+            resolved_previous_bundle_reference
+        ):
+            raise _PreviousAcceptanceBundleInvalid(None)
+        if resolved_previous_bundle_reference is None and previous_bundle_path is not None:
+            resolved_previous_bundle_reference = _validated_previous_bundle_reference(
+                previous_bundle_path
+            )
         return _run_ticket_05(
             database_url=database_url,
             object_root=object_root,
@@ -2166,12 +2196,20 @@ def run_ticket_05(
             base_url=base_url,
             dagster_url=dagster_url,
             denied_base_url=denied_base_url,
-            previous_bundle_reference=previous_bundle_reference,
+            previous_bundle_reference=resolved_previous_bundle_reference,
             platform_name=platform_name,
             container_image_digest=container_image_digest,
             counterpart_bundle=counterpart_bundle,
         )
-    except Exception:
+    except Exception as error:
+        previous_bundle_invalid = isinstance(error, _PreviousAcceptanceBundleInvalid)
+        failure_reason = (
+            "previous_acceptance_bundle_invalid"
+            if previous_bundle_invalid
+            else "evidence_capture_failed"
+        )
+        if isinstance(error, _PreviousAcceptanceBundleInvalid):
+            resolved_previous_bundle_reference = error.reference
         repository = FilesystemObjectRepository(object_root)
         reproduction_command = "docker compose --profile acceptance run --build --rm acceptance"
         evaluation = P1AcceptanceEvaluation(
@@ -2189,10 +2227,18 @@ def run_ticket_05(
             scenario_results={"acceptance_runner": {"status": "blocked"}},
             failure_evidence=(
                 {
+                    **(
+                        {"evidence_ids": [resolved_previous_bundle_reference]}
+                        if resolved_previous_bundle_reference is not None
+                        and previous_bundle_invalid
+                        else {}
+                    ),
                     "owner": "platform_owner",
-                    "reason": "evidence_capture_failed",
+                    "reason": failure_reason,
                     "scenario": "acceptance_runner",
-                    "stage": "orchestration",
+                    "stage": (
+                        "previous_bundle_validation" if previous_bundle_invalid else "orchestration"
+                    ),
                     "status": "exception",
                 },
             ),
@@ -2204,12 +2250,12 @@ def run_ticket_05(
                 P1GateResult(
                     trace_id=trace_id,
                     status="blocked",
-                    reason="evidence_capture_failed",
+                    reason=failure_reason,
                     owner=owner,
                 )
                 for trace_id, owner in P1_HARD_GATE_OWNERS.items()
             ),
-            previous_bundle_reference=previous_bundle_reference,
+            previous_bundle_reference=resolved_previous_bundle_reference,
             reproduction_command=reproduction_command,
         )
         bundle_reference = P1AcceptanceBundlePublisher(repository).publish(evaluation)

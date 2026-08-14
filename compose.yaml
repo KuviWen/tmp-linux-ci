@@ -333,29 +333,33 @@ services:
       database-grants:
         condition: service_completed_successfully
 
+  evidence-init:
+    image: alpine:3.22.1
+    profiles: ["acceptance"]
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - mkdir -p /evidence && chmod 0777 /evidence
+    volumes:
+      - ./.artifacts:/evidence
+
   image-provenance:
     image: docker:28.5.2-cli
     profiles: ["acceptance"]
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        while true; do
-          container_id="$$(docker ps --filter label=com.docker.compose.project=stock-forecasting-ticket-05 --filter label=com.docker.compose.service=api --format '{{.ID}}' | head -n 1)"
-          test -n "$$container_id"
-          docker inspect "$$container_id" --format '{{.Image}}' > /evidence/oci-image-id
-          sleep 1
-        done
+        container_id="$$(docker ps --filter label=com.docker.compose.project=stock-forecasting-ticket-05 --filter label=com.docker.compose.service=api --format '{{.ID}}' | head -n 1)"
+        test -n "$$container_id"
+        docker inspect "$$container_id" --format '{{.Image}}' > /evidence/oci-image-id.tmp
+        test -s /evidence/oci-image-id.tmp
+        mv /evidence/oci-image-id.tmp /evidence/oci-image-id
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - image-provenance:/evidence
     depends_on:
       api:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "test -s /evidence/oci-image-id"]
-      interval: 1s
-      timeout: 2s
-      retries: 30
 
   acceptance:
     <<: *application
@@ -392,6 +396,8 @@ services:
       - --git-dir
       - /workspace/.git
     depends_on:
+      evidence-init:
+        condition: service_completed_successfully
       api:
         condition: service_healthy
       api-ingress:
@@ -415,7 +421,7 @@ services:
       denied-api-ingress:
         condition: service_healthy
       image-provenance:
-        condition: service_healthy
+        condition: service_completed_successfully
 
 volumes:
   postgres-data:

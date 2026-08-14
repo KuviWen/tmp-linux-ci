@@ -39,6 +39,10 @@ Status: ready-for-agent
   restart 與 resource catalog。Acceptance-only `image-provenance` helper 由同一 Compose 命令讀取
   實際 `api` 容器 OCI image ID；不需要外部 prebuild／inspect。Export directory 的既有 stable
   bundle 會經 schema 驗證後自動串成 `previous_bundle_reference`。
+- Compose 內的 `evidence-init` 負責乾淨 Linux checkout 的 export directory 權限；OCI helper 以
+  temporary file／atomic rename 發布後結束。CLI 在清理 ObjectRepository volume 前匯出並 checksum
+  驗證 failure matrix 所引用的內容定址 probe objects。損毀或任意格式的 previous reference 會
+  fail closed 成新的 blocked bundle，而不在 runner 外中止。
 - 驗證：`python -m pytest tests/acceptance/test_acceptance_runner.py
   tests/contracts/test_acceptance_bundle.py tests/contracts/test_compose_contract.py
   tests/contracts/test_object_repository.py -q`；`python -m mypy src tests`；

@@ -26,6 +26,7 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "dagster-webserver",
         "dagster-daemon",
         "outbox-relay",
+        "evidence-init",
         "image-provenance",
         "acceptance",
     }
@@ -159,12 +160,25 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
     assert services["image-provenance"]["depends_on"]["api"]["condition"] == ("service_healthy")
     assert "docker ps" in services["image-provenance"]["command"][0]
     assert "docker inspect" in services["image-provenance"]["command"][0]
+    assert "oci-image-id.tmp" in services["image-provenance"]["command"][0]
+    assert (
+        "mv /evidence/oci-image-id.tmp /evidence/oci-image-id"
+        in services["image-provenance"]["command"][0]
+    )
+    assert "while true" not in services["image-provenance"]["command"][0]
     assert services["acceptance"]["depends_on"]["image-provenance"]["condition"] == (
-        "service_healthy"
+        "service_completed_successfully"
     )
     assert (
         "image-provenance:/run/stock-forecasting/image-provenance:ro"
         in services["acceptance"]["volumes"]
+    )
+    assert services["evidence-init"]["profiles"] == ["acceptance"]
+    assert services["evidence-init"]["image"] == "alpine:3.22.1"
+    assert "chmod 0777 /evidence" in services["evidence-init"]["command"][0]
+    assert "./.artifacts:/evidence" in services["evidence-init"]["volumes"]
+    assert services["acceptance"]["depends_on"]["evidence-init"]["condition"] == (
+        "service_completed_successfully"
     )
     for name in (
         "api",
@@ -344,6 +358,8 @@ def test_linux_ci_uses_the_same_compose_acceptance_command() -> None:
     assert "python -m ruff format --check ." in commands
     assert all("docker compose build api" not in str(command) for command in commands)
     assert all("docker image inspect" not in str(command) for command in commands)
+    assert all("chmod 0777 .artifacts" not in str(command) for command in commands)
+    assert all(step.get("name") != "Prepare acceptance evidence directory" for step in job["steps"])
     acceptance_index = next(
         index
         for index, step in enumerate(job["steps"])
@@ -367,7 +383,8 @@ def test_linux_ci_uses_the_same_compose_acceptance_command() -> None:
     assert acceptance_index < verify_index < upload_index < cleanup_index
     assert job["steps"][verify_index]["run"] == (
         "cd .artifacts && sha256sum --check contract-reports.sha256 && "
-        "sha256sum --check p1-acceptance-bundle.json.sha256"
+        "sha256sum --check p1-acceptance-bundle.json.sha256 && "
+        "sha256sum --check p1-evidence-objects.sha256"
     )
     assert job["steps"][upload_index]["with"]["path"] == ".artifacts/"
     cleanup = job["steps"][cleanup_index]

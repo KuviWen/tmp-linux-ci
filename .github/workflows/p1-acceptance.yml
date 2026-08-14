@@ -47,13 +47,11 @@ jobs:
         run: python -m ruff format --check .
       - name: Validate Compose
         run: docker compose config --quiet
-      - name: Prepare acceptance evidence directory
-        run: chmod 0777 .artifacts
       - name: Run deployed P1 acceptance
         run: docker compose --profile acceptance run --build --rm acceptance
       - name: Verify exported acceptance bundle
         if: always()
-        run: cd .artifacts && sha256sum --check contract-reports.sha256 && sha256sum --check p1-acceptance-bundle.json.sha256
+        run: cd .artifacts && sha256sum --check contract-reports.sha256 && sha256sum --check p1-acceptance-bundle.json.sha256 && sha256sum --check p1-evidence-objects.sha256
       - name: Preserve immutable P1 evidence
         if: always()
         uses: actions/upload-artifact@v4

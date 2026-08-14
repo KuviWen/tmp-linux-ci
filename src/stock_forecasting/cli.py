@@ -16,6 +16,7 @@ from stock_forecasting.acceptance import (
     run_ticket_04,
     run_ticket_05,
 )
+from stock_forecasting.acceptance_bundle import is_sha256_reference
 from stock_forecasting.authorization import LocalApiKeyIdentity
 from stock_forecasting.authorization_repository import (
     FIXTURE_REVOKED_POLICY_SET,
@@ -46,20 +47,74 @@ def _container_image_digest_from_environment() -> str | None:
     return None
 
 
-def _discover_previous_bundle_reference(export_directory: Path) -> str | None:
+def _preserve_previous_bundle_input(export_directory: Path) -> Path | None:
     stable_path = export_directory / "p1-acceptance-bundle.json"
     if not stable_path.is_file():
         return None
     content = stable_path.read_bytes()
-    try:
-        payload = json.loads(content)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise RuntimeError("previous_acceptance_bundle_invalid") from error
-    if not isinstance(payload, dict) or payload.get("schema_version") != (
-        "p1-acceptance-bundle-v1"
-    ):
-        raise RuntimeError("previous_acceptance_bundle_invalid")
-    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+    checksum = hashlib.sha256(content).hexdigest()
+    preserved_path = export_directory / "previous" / "sha256" / checksum[:2] / checksum
+    preserved_path.parent.mkdir(parents=True, exist_ok=True)
+    preserved_path.write_bytes(content)
+    return stable_path
+
+
+def _export_failure_evidence_objects(
+    *,
+    bundle: dict[str, object],
+    object_root: Path,
+    export_directory: Path,
+) -> None:
+    preserved: dict[str, str] = {}
+    preserved_scenarios: set[str] = set()
+    required_probe_scenarios: set[str] = set()
+    failure_evidence = bundle.get("failure_evidence")
+    if isinstance(failure_evidence, list):
+        for result in failure_evidence:
+            if not isinstance(result, dict):
+                continue
+            scenario = result.get("scenario")
+            evidence_ids = result.get("evidence_ids")
+            if scenario in {"checksum_failure", "stale_fencing"}:
+                required_probe_scenarios.add(str(scenario))
+            if not isinstance(scenario, str) or not isinstance(evidence_ids, list):
+                continue
+            for evidence_id in evidence_ids:
+                if not is_sha256_reference(evidence_id):
+                    continue
+                checksum = evidence_id.removeprefix("sha256:")
+                source_path = object_root / "sha256" / checksum[:2] / checksum
+                if not source_path.is_file():
+                    continue
+                content = source_path.read_bytes()
+                if hashlib.sha256(content).hexdigest() != checksum:
+                    raise RuntimeError("acceptance_evidence_object_checksum_mismatch")
+                relative_path = Path("objects") / "sha256" / checksum[:2] / checksum
+                destination = export_directory / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(content)
+                preserved[relative_path.as_posix()] = checksum
+                preserved_scenarios.add(scenario)
+
+    previous_root = export_directory / "previous" / "sha256"
+    if previous_root.is_dir():
+        for preserved_input in previous_root.glob("*/*"):
+            if not preserved_input.is_file():
+                continue
+            checksum = preserved_input.name
+            if hashlib.sha256(preserved_input.read_bytes()).hexdigest() != checksum:
+                raise RuntimeError("previous_acceptance_bundle_checksum_mismatch")
+            preserved[preserved_input.relative_to(export_directory).as_posix()] = checksum
+
+    if not required_probe_scenarios <= preserved_scenarios:
+        raise RuntimeError("acceptance_probe_export_missing")
+    manifest = "".join(
+        f"{checksum}  {relative_path}\n" for relative_path, checksum in sorted(preserved.items())
+    )
+    (export_directory / "p1-evidence-objects.sha256").write_text(
+        manifest,
+        encoding="utf-8",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -163,16 +218,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.denied_base_url is not None:
             parser.error("--denied-base-url is only valid for ticket-04 or ticket-05")
         if arguments.ticket == "ticket-05":
-            previous_bundle_reference = arguments.previous_bundle_reference
-            if previous_bundle_reference is None and arguments.evidence_export_dir is not None:
-                previous_bundle_reference = _discover_previous_bundle_reference(
+            previous_bundle_path = None
+            if arguments.evidence_export_dir is not None:
+                previous_bundle_path = _preserve_previous_bundle_input(
                     arguments.evidence_export_dir
                 )
             runner_arguments.update(
                 {
                     "project_root": arguments.project_root,
                     "git_dir": arguments.git_dir,
-                    "previous_bundle_reference": previous_bundle_reference,
+                    "previous_bundle_reference": arguments.previous_bundle_reference,
+                    "previous_bundle_path": (
+                        previous_bundle_path
+                        if arguments.previous_bundle_reference is None
+                        else None
+                    ),
                     "platform_name": arguments.platform_name,
                     "container_image_digest": arguments.container_image_digest,
                     "counterpart_bundle": arguments.counterpart_bundle,
@@ -199,6 +259,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             checksum_path.write_text(
                 f"{bundle_checksum}  p1-acceptance-bundle.json\n",
                 encoding="utf-8",
+            )
+            bundle_payload = json.loads(bundle_content)
+            if not isinstance(bundle_payload, dict):
+                raise RuntimeError("acceptance_bundle_export_invalid")
+            _export_failure_evidence_objects(
+                bundle=bundle_payload,
+                object_root=arguments.object_root,
+                export_directory=export_directory,
             )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         run_status = report.get("platform_run_status", report["status"])

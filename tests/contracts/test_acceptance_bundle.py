@@ -19,21 +19,65 @@ from stock_forecasting.acceptance_bundle import (
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 
+EXPECTED_P1_CONTRACTS = (
+    "dagster_wrapper",
+    "event",
+    "filesystem_object_repository",
+    "fixture_market_provider",
+    "postgresql",
+    "rest",
+)
+EXPECTED_P1_SCENARIOS = (
+    "checksum_failure",
+    "correction",
+    "duplicate_collection",
+    "fixture_promotion_attempt",
+    "late_data",
+    "missing_calendar",
+    "missing_company_action",
+    "necessary_modality_missing",
+    "one_market_failure",
+    "optional_modalities_missing",
+    "outbox_redelivery",
+    "outbox_restart",
+    "stale_fencing",
+    "withdrawal",
+)
+EXPECTED_P1_RESTART_CHECKS = (
+    "outbox_recovered",
+    "same_event_identity",
+    "single_consumer_effect",
+)
+EXPECTED_P1_RESOURCES = (
+    "api_ready",
+    "dagster_ready",
+    "filesystem_object_round_trip",
+    "postgresql_ready",
+    "formal_capacity_claim",
+)
+
 
 def _passing_contracts() -> dict[str, str]:
-    return dict.fromkeys(P1_REQUIRED_CONTRACTS, "passed")
+    return dict.fromkeys(EXPECTED_P1_CONTRACTS, "passed")
 
 
 def _passing_scenarios() -> dict[str, str]:
-    return dict.fromkeys(P1_REQUIRED_SCENARIOS, "passed")
+    return dict.fromkeys(EXPECTED_P1_SCENARIOS, "passed")
 
 
 def _passing_restart_checks() -> dict[str, bool]:
-    return dict.fromkeys(P1_REQUIRED_RESTART_CHECKS, True)
+    return dict.fromkeys(EXPECTED_P1_RESTART_CHECKS, True)
 
 
 def _passing_resources() -> dict[str, bool]:
-    return {resource: resource != "formal_capacity_claim" for resource in P1_REQUIRED_RESOURCES}
+    return {resource: resource != "formal_capacity_claim" for resource in EXPECTED_P1_RESOURCES}
+
+
+def test_required_p1_evidence_catalogs_match_the_ticket_contract() -> None:
+    assert P1_REQUIRED_CONTRACTS == EXPECTED_P1_CONTRACTS
+    assert P1_REQUIRED_SCENARIOS == EXPECTED_P1_SCENARIOS
+    assert P1_REQUIRED_RESTART_CHECKS == EXPECTED_P1_RESTART_CHECKS
+    assert P1_REQUIRED_RESOURCES == EXPECTED_P1_RESOURCES
 
 
 def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
