@@ -33,6 +33,35 @@ def _instant(value: str) -> datetime:
     return parsed
 
 
+def _container_image_digest_from_environment() -> str | None:
+    direct_digest = os.environ.get("P1_OCI_IMAGE_DIGEST")
+    if direct_digest:
+        return direct_digest
+    digest_file = os.environ.get("P1_OCI_IMAGE_DIGEST_FILE")
+    if digest_file:
+        path = Path(digest_file)
+        if path.is_file():
+            digest = path.read_text(encoding="utf-8").strip()
+            return digest or None
+    return None
+
+
+def _discover_previous_bundle_reference(export_directory: Path) -> str | None:
+    stable_path = export_directory / "p1-acceptance-bundle.json"
+    if not stable_path.is_file():
+        return None
+    content = stable_path.read_bytes()
+    try:
+        payload = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("previous_acceptance_bundle_invalid") from error
+    if not isinstance(payload, dict) or payload.get("schema_version") != (
+        "p1-acceptance-bundle-v1"
+    ):
+        raise RuntimeError("previous_acceptance_bundle_invalid")
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="stock-forecasting")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -58,7 +87,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     acceptance.add_argument(
         "--container-image-digest",
-        default=os.environ.get("P1_OCI_IMAGE_DIGEST"),
+        default=_container_image_digest_from_environment(),
     )
     acceptance.add_argument(
         "--counterpart-bundle",
@@ -134,11 +163,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.denied_base_url is not None:
             parser.error("--denied-base-url is only valid for ticket-04 or ticket-05")
         if arguments.ticket == "ticket-05":
+            previous_bundle_reference = arguments.previous_bundle_reference
+            if previous_bundle_reference is None and arguments.evidence_export_dir is not None:
+                previous_bundle_reference = _discover_previous_bundle_reference(
+                    arguments.evidence_export_dir
+                )
             runner_arguments.update(
                 {
                     "project_root": arguments.project_root,
                     "git_dir": arguments.git_dir,
-                    "previous_bundle_reference": arguments.previous_bundle_reference,
+                    "previous_bundle_reference": previous_bundle_reference,
                     "platform_name": arguments.platform_name,
                     "container_image_digest": arguments.container_image_digest,
                     "counterpart_bundle": arguments.counterpart_bundle,

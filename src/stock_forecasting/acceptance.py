@@ -1546,7 +1546,7 @@ def _p1_stale_fencing_probe(
     object_root: Path,
     information_cutoff: datetime,
     deployed: bool,
-) -> bool:
+) -> dict[str, object]:
     clock = _MutableRelayClock(information_cutoff)
     if deployed:
         key_file = os.environ.get("LOCAL_API_KEY_FILE")
@@ -1607,7 +1607,7 @@ def _p1_stale_fencing_probe(
     )
     recovered = replacement.relay_outbox(event_id=outcome.outbox_event_id)
     after_recovery = replacement.operations_control.get_outbox_recovery(outcome.outbox_event_id)
-    return (
+    verified = (
         lease_lost.status == "busy"
         and after_expiry["consumer_effect_counts"]
         == {"research_projection": 0, "operations_projection": 0}
@@ -1616,6 +1616,32 @@ def _p1_stale_fencing_probe(
         and after_recovery["consumer_effect_counts"]
         == {"research_projection": 1, "operations_projection": 1}
     )
+    probe_content = json.dumps(
+        {
+            "consumer_effect_counts": after_recovery["consumer_effect_counts"],
+            "event_id": outcome.outbox_event_id,
+            "fencing_tokens": [
+                attempt["fencing_token"] for attempt in after_recovery["delivery_attempts"]
+            ],
+            "scenario": "stale_fencing",
+            "verified": verified,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    probe_reference = replacement.object_repository.put_verified(
+        BytesIO(probe_content),
+        expected_checksum=hashlib.sha256(probe_content).hexdigest(),
+        metadata={
+            "event_id": outcome.outbox_event_id,
+            "media_type": "application/vnd.stock-forecasting.acceptance-probe+json",
+            "scenario": "stale_fencing",
+        },
+    )
+    return {
+        "evidence_reference": probe_reference.object_id,
+        "verified": verified,
+    }
 
 
 def _run_ticket_05(
@@ -1647,7 +1673,7 @@ def _run_ticket_05(
         base_url=base_url,
         dagster_url=dagster_url,
     )
-    stale_fencing = _p1_stale_fencing_probe(
+    stale_fencing_probe = _p1_stale_fencing_probe(
         database_url=database_url,
         object_root=object_root,
         information_cutoff=information_cutoff + timedelta(days=30),
@@ -1706,6 +1732,25 @@ def _run_ticket_05(
         )
     except ObjectIntegrityError as error:
         checksum_rejected = str(error) == "checksum_mismatch"
+    checksum_probe_content = json.dumps(
+        {
+            "actual_checksum": hashlib.sha256(b"p1-checksum-failure-probe").hexdigest(),
+            "expected_checksum": "0" * 64,
+            "reason": "checksum_mismatch",
+            "scenario": "checksum_failure",
+            "verified": checksum_rejected,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    checksum_probe_reference = application.object_repository.put_verified(
+        BytesIO(checksum_probe_content),
+        expected_checksum=hashlib.sha256(checksum_probe_content).hexdigest(),
+        metadata={
+            "media_type": "application/vnd.stock-forecasting.acceptance-probe+json",
+            "scenario": "checksum_failure",
+        },
+    )
     smoke_content = b'{"probe":"p1-resource-smoke"}'
     smoke_checksum = hashlib.sha256(smoke_content).hexdigest()
     smoke_reference = application.object_repository.put_verified(
@@ -1764,7 +1809,7 @@ def _run_ticket_05(
         "optional_modalities_missing": optional_absence_explicit,
         "outbox_redelivery": ticket_03["checks"]["duplicate_delivery_idempotent"],
         "outbox_restart": ticket_03["checks"]["original_event_identity_recovered"],
-        "stale_fencing": stale_fencing,
+        "stale_fencing": stale_fencing_probe["verified"],
         "withdrawal": ticket_02["scenario_evidence"]["withdrawal"]["verified"],
     }
     scenario_owners = {
@@ -1808,7 +1853,7 @@ def _run_ticket_05(
         "GATE-MODEL-01": scenario_checks["fixture_promotion_attempt"]
         and ticket_02["checks"]["no_production_prediction_records"],
         "GATE-SEC-01": ticket_04["status"] == "passed",
-        "GATE-OPS-01": ticket_03["status"] == "passed" and stale_fencing,
+        "GATE-OPS-01": ticket_03["status"] == "passed" and stale_fencing_probe["verified"] is True,
         "GATE-DEPLOY-01": deploy_passed,
         "GATE-UX-01": bool(goldens["observable"]) and optional_absence_explicit,
     }
@@ -1889,14 +1934,14 @@ def _run_ticket_05(
             "blocked",
             "checksum_mismatch",
             "data_owner",
-            [smoke_reference.object_id],
+            [checksum_probe_reference.object_id],
         ),
         "stale_fencing": (
             bool(scenario_checks["stale_fencing"]),
             "blocked_then_recovered",
             "relay_lease_superseded",
             "operations_owner",
-            [ticket_03["event_id"]],
+            [str(stale_fencing_probe["evidence_reference"])],
         ),
         "one_market_failure": (
             bool(scenario_checks["one_market_failure"]),
@@ -1981,7 +2026,7 @@ def _run_ticket_05(
             {
                 "authoritative_store": actual_postgresql,
                 "connection_ready": database_ready,
-                "lease_fencing": stale_fencing,
+                "lease_fencing": stale_fencing_probe["verified"] is True,
                 "transaction_rollback": bool(ticket_03["checks"]["consumer_transaction_recovered"]),
             }
         ),

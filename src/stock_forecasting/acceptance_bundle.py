@@ -41,6 +41,43 @@ P1_HARD_GATE_OWNERS = {
     "GATE-UX-01": "research_owner",
 }
 
+P1_REQUIRED_CONTRACTS = (
+    "dagster_wrapper",
+    "event",
+    "filesystem_object_repository",
+    "fixture_market_provider",
+    "postgresql",
+    "rest",
+)
+P1_REQUIRED_SCENARIOS = (
+    "checksum_failure",
+    "correction",
+    "duplicate_collection",
+    "fixture_promotion_attempt",
+    "late_data",
+    "missing_calendar",
+    "missing_company_action",
+    "necessary_modality_missing",
+    "one_market_failure",
+    "optional_modalities_missing",
+    "outbox_redelivery",
+    "outbox_restart",
+    "stale_fencing",
+    "withdrawal",
+)
+P1_REQUIRED_RESTART_CHECKS = (
+    "outbox_recovered",
+    "same_event_identity",
+    "single_consumer_effect",
+)
+P1_REQUIRED_RESOURCES = (
+    "api_ready",
+    "dagster_ready",
+    "filesystem_object_round_trip",
+    "postgresql_ready",
+    "formal_capacity_claim",
+)
+
 _P1_GATE_STATUSES = {"passed", "failed", "blocked", "policy_blocked"}
 _P1_PLATFORMS = {"linux_ci", "windows_docker_desktop"}
 
@@ -111,25 +148,28 @@ def _contract_evidence_passed(result: object) -> bool:
     return evidence_digest == f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def _has_exact_catalog(results: object, required_names: tuple[str, ...]) -> bool:
+    return isinstance(results, Mapping) and set(results) == set(required_names)
+
+
 def _passing_evidence_is_consistent(evaluation: P1AcceptanceEvaluation) -> bool:
-    meaningful_resource_results = {
-        name: result
-        for name, result in evaluation.resource_smoke.items()
-        if name != "formal_capacity_claim"
-    }
     return (
-        bool(evaluation.contract_results)
+        _has_exact_catalog(evaluation.contract_results, P1_REQUIRED_CONTRACTS)
         and all(
             _contract_evidence_passed(result) for result in evaluation.contract_results.values()
         )
-        and bool(evaluation.scenario_results)
+        and _has_exact_catalog(evaluation.scenario_results, P1_REQUIRED_SCENARIOS)
         and all(
             _evidence_status(result) == "passed" for result in evaluation.scenario_results.values()
         )
-        and bool(evaluation.restart_results)
+        and _has_exact_catalog(evaluation.restart_results, P1_REQUIRED_RESTART_CHECKS)
         and all(result is True for result in evaluation.restart_results.values())
-        and bool(meaningful_resource_results)
-        and all(result is True for result in meaningful_resource_results.values())
+        and _has_exact_catalog(evaluation.resource_smoke, P1_REQUIRED_RESOURCES)
+        and all(
+            result is True
+            for name, result in evaluation.resource_smoke.items()
+            if name != "formal_capacity_claim"
+        )
         and evaluation.resource_smoke.get("formal_capacity_claim", False) is False
     )
 
@@ -212,10 +252,13 @@ def _platform_evidence_is_passing(
         and evidence.get("migration_digest") == evaluation.migration_digest
         and evidence.get("reproduction_command") == evaluation.reproduction_command
         and is_sha256_reference(image_digest)
+        and _has_exact_catalog(evidence.get("contract_results"), P1_REQUIRED_CONTRACTS)
         and _all_contract_evidence_passed(evidence.get("contract_results"))
+        and _has_exact_catalog(evidence.get("scenario_results"), P1_REQUIRED_SCENARIOS)
         and _all_evidence_passed(evidence.get("scenario_results"))
+        and _has_exact_catalog(evidence.get("restart_results"), P1_REQUIRED_RESTART_CHECKS)
         and _all_boolean_evidence_passed(evidence.get("restart_results"))
-        and bool(meaningful_resources)
+        and _has_exact_catalog(resources, P1_REQUIRED_RESOURCES)
         and all(result is True for result in meaningful_resources.values())
         and (
             not isinstance(resources, Mapping)

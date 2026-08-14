@@ -26,6 +26,7 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "dagster-webserver",
         "dagster-daemon",
         "outbox-relay",
+        "image-provenance",
         "acceptance",
     }
     assert services["postgres"]["image"] == "postgres:17-alpine"
@@ -151,6 +152,20 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
     assert services["acceptance"]["depends_on"]["denied-api-ingress"]["condition"] == (
         "service_healthy"
     )
+    assert services["image-provenance"]["profiles"] == ["acceptance"]
+    assert services["image-provenance"]["image"] == "docker:28.5.2-cli"
+    assert services["image-provenance"]["entrypoint"] == ["/bin/sh", "-ec"]
+    assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["image-provenance"]["volumes"]
+    assert services["image-provenance"]["depends_on"]["api"]["condition"] == ("service_healthy")
+    assert "docker ps" in services["image-provenance"]["command"][0]
+    assert "docker inspect" in services["image-provenance"]["command"][0]
+    assert services["acceptance"]["depends_on"]["image-provenance"]["condition"] == (
+        "service_healthy"
+    )
+    assert (
+        "image-provenance:/run/stock-forecasting/image-provenance:ro"
+        in services["acceptance"]["volumes"]
+    )
     for name in (
         "api",
         "dagster-code",
@@ -239,6 +254,7 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "AUTHORIZATION_POLICY_SET_ID": "fixture-active-v1",
         "P1_ACCEPTANCE_PLATFORM": "${P1_ACCEPTANCE_PLATFORM:-windows_docker_desktop}",
         "P1_OCI_IMAGE_DIGEST": "${P1_OCI_IMAGE_DIGEST:-}",
+        "P1_OCI_IMAGE_DIGEST_FILE": ("/run/stock-forecasting/image-provenance/oci-image-id"),
         "P1_ACCEPTANCE_EXPORT_DIR": "/var/lib/stock-forecasting/exports",
         "P1_COUNTERPART_BUNDLE": "${P1_COUNTERPART_BUNDLE:-}",
     }
@@ -252,7 +268,11 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
     assert compose["x-application-environment"]["P1_ACCEPTANCE_EXPORT_DIR"] == (
         "/var/lib/stock-forecasting/exports"
     )
+    assert compose["x-application-environment"]["P1_OCI_IMAGE_DIGEST_FILE"] == (
+        "/run/stock-forecasting/image-provenance/oci-image-id"
+    )
     assert "local-api-key" in compose["volumes"]
+    assert "image-provenance" in compose["volumes"]
     role_grant_sql = (
         REPOSITORY_ROOT / "docker" / "postgres" / "grant-application-role.sql"
     ).read_text(encoding="utf-8")
@@ -298,7 +318,10 @@ def test_linux_ci_uses_the_same_compose_acceptance_command() -> None:
     job = workflow["jobs"]["p1-acceptance"]
 
     assert job["runs-on"] == "ubuntu-24.04"
-    assert job["env"] == {"BUILDX_NO_DEFAULT_ATTESTATIONS": "1"}
+    assert job["env"] == {
+        "BUILDX_NO_DEFAULT_ATTESTATIONS": "1",
+        "P1_ACCEPTANCE_PLATFORM": "linux_ci",
+    }
     assert workflow["permissions"] == {"contents": "read"}
     commands = [step.get("run") for step in job["steps"]]
     assert "docker compose --profile acceptance run --build --rm acceptance" in commands
@@ -319,6 +342,8 @@ def test_linux_ci_uses_the_same_compose_acceptance_command() -> None:
     assert "python -m mypy src tests" in commands
     assert "python -m ruff check ." in commands
     assert "python -m ruff format --check ." in commands
+    assert all("docker compose build api" not in str(command) for command in commands)
+    assert all("docker image inspect" not in str(command) for command in commands)
     acceptance_index = next(
         index
         for index, step in enumerate(job["steps"])

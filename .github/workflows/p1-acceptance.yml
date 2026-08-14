@@ -14,6 +14,7 @@ jobs:
     timeout-minutes: 45
     env:
       BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
+      P1_ACCEPTANCE_PLATFORM: linux_ci
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -46,12 +47,8 @@ jobs:
         run: python -m ruff format --check .
       - name: Validate Compose
         run: docker compose config --quiet
-      - name: Prepare immutable acceptance provenance
-        run: |
-          chmod 0777 .artifacts
-          docker compose build api
-          echo "P1_ACCEPTANCE_PLATFORM=linux_ci" >> "$GITHUB_ENV"
-          echo "P1_OCI_IMAGE_DIGEST=$(docker image inspect stock-forecasting-ticket-05-app:0.1.0 --format '{{.Id}}')" >> "$GITHUB_ENV"
+      - name: Prepare acceptance evidence directory
+        run: chmod 0777 .artifacts
       - name: Run deployed P1 acceptance
         run: docker compose --profile acceptance run --build --rm acceptance
       - name: Verify exported acceptance bundle

@@ -33,7 +33,12 @@ Status: ready-for-agent
 - Linux workflow 會執行真實 PostgreSQL opt-in suite，並在清理前 checksum 驗證及上傳匯出的
   bundle；repo 無 remote／hosted run 證據，因此對應 criterion 保持未勾選。
 - Failure matrix 由實際觀察建立，correction／withdrawal 分列；optional modalities 由 REST／UI
-  公開 phase boundary 觀察；fixture digest 綁 raw artifact 而非 dataset manifest。
+  公開 phase boundary 觀察；checksum／stale-fencing failure evidence 各自綁定其內容定址 probe；
+  fixture digest 綁 raw artifact 而非 dataset manifest。
+- Passing bundle 與 platform evidence 必須提供精確、無缺漏也無未知項目的 contract、scenario、
+  restart 與 resource catalog。Acceptance-only `image-provenance` helper 由同一 Compose 命令讀取
+  實際 `api` 容器 OCI image ID；不需要外部 prebuild／inspect。Export directory 的既有 stable
+  bundle 會經 schema 驗證後自動串成 `previous_bundle_reference`。
 - 驗證：`python -m pytest tests/acceptance/test_acceptance_runner.py
   tests/contracts/test_acceptance_bundle.py tests/contracts/test_compose_contract.py
   tests/contracts/test_object_repository.py -q`；`python -m mypy src tests`；

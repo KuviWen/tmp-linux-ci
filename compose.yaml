@@ -17,6 +17,7 @@ x-application-environment: &application-environment
   AUTHORIZATION_POLICY_SET_ID: fixture-active-v1
   P1_ACCEPTANCE_PLATFORM: ${P1_ACCEPTANCE_PLATFORM:-windows_docker_desktop}
   P1_OCI_IMAGE_DIGEST: ${P1_OCI_IMAGE_DIGEST:-}
+  P1_OCI_IMAGE_DIGEST_FILE: /run/stock-forecasting/image-provenance/oci-image-id
   P1_ACCEPTANCE_EXPORT_DIR: /var/lib/stock-forecasting/exports
   P1_COUNTERPART_BUNDLE: ${P1_COUNTERPART_BUNDLE:-}
 
@@ -332,6 +333,30 @@ services:
       database-grants:
         condition: service_completed_successfully
 
+  image-provenance:
+    image: docker:28.5.2-cli
+    profiles: ["acceptance"]
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        while true; do
+          container_id="$$(docker ps --filter label=com.docker.compose.project=stock-forecasting-ticket-05 --filter label=com.docker.compose.service=api --format '{{.ID}}' | head -n 1)"
+          test -n "$$container_id"
+          docker inspect "$$container_id" --format '{{.Image}}' > /evidence/oci-image-id
+          sleep 1
+        done
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - image-provenance:/evidence
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /evidence/oci-image-id"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
   acceptance:
     <<: *application
     profiles: ["acceptance"]
@@ -341,6 +366,7 @@ services:
       - local-api-key:/run/stock-forecasting
       - ./.git:/workspace/.git:ro
       - ./.artifacts:/var/lib/stock-forecasting/exports
+      - image-provenance:/run/stock-forecasting/image-provenance:ro
     command:
       - python
       - -m
@@ -388,9 +414,12 @@ services:
         condition: service_healthy
       denied-api-ingress:
         condition: service_healthy
+      image-provenance:
+        condition: service_healthy
 
 volumes:
   postgres-data:
   fixture-objects:
   dagster-home:
   local-api-key:
+  image-provenance:

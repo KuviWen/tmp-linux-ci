@@ -516,6 +516,15 @@ def test_ticket_05_runner_publishes_blocked_evidence_when_not_deployed(
     assert all(
         result["reason"] != "evidence_capture_failed" for result in failure_evidence.values()
     )
+    object_root = Path(report["bundle"]["uri"]).parents[2]
+    for scenario in ("checksum_failure", "stale_fencing"):
+        evidence_reference = failure_evidence[scenario]["evidence_ids"][0]
+        checksum = evidence_reference.removeprefix("sha256:")
+        probe = json.loads(
+            (object_root / "sha256" / checksum[:2] / checksum).read_text(encoding="utf-8")
+        )
+        assert probe["scenario"] == scenario
+        assert probe["verified"] is True
     assert (
         bundle["provenance"]["git_commit"]
         == subprocess.run(
@@ -530,6 +539,10 @@ def test_ticket_05_runner_publishes_blocked_evidence_when_not_deployed(
 
 def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
     export_directory = tmp_path / "exports"
+    export_directory.mkdir()
+    previous_content = b'{"schema_version":"p1-acceptance-bundle-v1"}'
+    previous_reference = f"sha256:{hashlib.sha256(previous_content).hexdigest()}"
+    (export_directory / "p1-acceptance-bundle.json").write_bytes(previous_content)
     completed = subprocess.run(
         [
             sys.executable,
@@ -563,6 +576,8 @@ def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
     report = json.loads(completed.stdout)
     assert report["status"] == "blocked"
     assert report["bundle"]["object_id"].startswith("sha256:")
+    bundle = json.loads(Path(report["bundle"]["uri"]).read_text(encoding="utf-8"))
+    assert bundle["previous_bundle_reference"] == previous_reference
     exported_bundle = export_directory / "p1-acceptance-bundle.json"
     assert hashlib.sha256(exported_bundle.read_bytes()).hexdigest() == report["bundle"]["checksum"]
     assert (export_directory / "p1-acceptance-bundle.json.sha256").read_text(

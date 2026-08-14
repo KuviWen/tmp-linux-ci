@@ -8,12 +8,32 @@ from pathlib import Path
 import pytest
 
 from stock_forecasting.acceptance_bundle import (
+    P1_REQUIRED_CONTRACTS,
+    P1_REQUIRED_RESOURCES,
+    P1_REQUIRED_RESTART_CHECKS,
+    P1_REQUIRED_SCENARIOS,
     P1AcceptanceBundlePublisher,
     P1AcceptanceEvaluation,
     P1GateResult,
     digest_required_paths,
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
+
+
+def _passing_contracts() -> dict[str, str]:
+    return dict.fromkeys(P1_REQUIRED_CONTRACTS, "passed")
+
+
+def _passing_scenarios() -> dict[str, str]:
+    return dict.fromkeys(P1_REQUIRED_SCENARIOS, "passed")
+
+
+def _passing_restart_checks() -> dict[str, bool]:
+    return dict.fromkeys(P1_REQUIRED_RESTART_CHECKS, True)
+
+
+def _passing_resources() -> dict[str, bool]:
+    return {resource: resource != "formal_capacity_claim" for resource in P1_REQUIRED_RESOURCES}
 
 
 def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
@@ -31,14 +51,9 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
         fixture_digests={"XNAS": "sha256:" + "e" * 64, "XTAI": "sha256:" + "f" * 64},
         source_policy_ids=("fixture-source-policy-xtai-v1", "fixture-source-policy-xnas-v1"),
         manifest_ids=("manifest-xtai-001", "manifest-xnas-001"),
-        contract_results={
-            "event": "passed",
-            "filesystem_object_repository": "passed",
-            "postgresql": "passed",
-            "rest": "passed",
-        },
+        contract_results=_passing_contracts(),
         end_to_end_ids=("e2e-xtai-001", "e2e-xnas-001"),
-        scenario_results={"duplicate_collection": "passed", "late_data": "passed"},
+        scenario_results=_passing_scenarios(),
         failure_evidence=(
             {
                 "scenario": "policy_blocked",
@@ -48,8 +63,8 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
         ),
         rest_golden_digest="sha256:" + "1" * 64,
         ui_golden_digest="sha256:" + "2" * 64,
-        restart_results={"outbox_recovered": True, "same_event_identity": True},
-        resource_smoke={"api_ready": True, "object_round_trip": True, "postgresql_ready": True},
+        restart_results=_passing_restart_checks(),
+        resource_smoke=_passing_resources(),
         gate_results=(
             P1GateResult("GATE-POLICY-01", "passed", "policy_contract_passed", "source_steward"),
             P1GateResult("GATE-PIT-01", "passed", "pit_contract_passed", "data_owner"),
@@ -68,28 +83,16 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
             platform: {
                 "application_payload_digest": "sha256:" + "b" * 64,
                 "container_image_digest": "sha256:" + image_character * 64,
-                "contract_results": {
-                    "event": "passed",
-                    "filesystem_object_repository": "passed",
-                    "postgresql": "passed",
-                    "rest": "passed",
-                },
+                "contract_results": _passing_contracts(),
                 "deployment_digest": "sha256:" + "c" * 64,
                 "git_commit": "a" * 40,
                 "migration_digest": "sha256:" + "d" * 64,
                 "reproduction_command": (
                     "docker compose --profile acceptance run --build --rm acceptance"
                 ),
-                "resource_smoke": {
-                    "api_ready": True,
-                    "object_round_trip": True,
-                    "postgresql_ready": True,
-                },
-                "restart_results": {"outbox_recovered": True, "same_event_identity": True},
-                "scenario_results": {
-                    "duplicate_collection": "passed",
-                    "late_data": "passed",
-                },
+                "resource_smoke": _passing_resources(),
+                "restart_results": _passing_restart_checks(),
+                "scenario_results": _passing_scenarios(),
                 "status": "passed",
             }
             for platform, image_character in (
@@ -187,6 +190,32 @@ def test_passing_p1_evaluation_publishes_content_addressed_scope_limited_bundle(
         ],
     }
 
+    for incomplete_evaluation in (
+        replace(evaluation, contract_results={"x": "passed"}),
+        replace(evaluation, scenario_results={"x": "passed"}),
+        replace(evaluation, restart_results={"x": True}),
+        replace(
+            evaluation,
+            resource_smoke={"x": True, "formal_capacity_claim": False},
+        ),
+    ):
+        with pytest.raises(ValueError, match="passing_gate_evidence_inconsistent"):
+            publisher.publish(incomplete_evaluation)
+
+    incomplete_platforms = {
+        platform: dict(platform_evidence)
+        for platform, platform_evidence in evaluation.platform_results.items()
+    }
+    incomplete_platforms["linux_ci"]["scenario_results"] = {"x": "passed"}
+    incomplete_reference = publisher.publish(
+        replace(evaluation, platform_results=incomplete_platforms)
+    )
+    incomplete_bundle = json.loads(repository.open(incomplete_reference).read())
+    assert incomplete_bundle["status"] == "blocked"
+    assert incomplete_bundle["hard_gates"]["GATE-DEPLOY-01"]["reason"] == (
+        "dual_platform_evidence_required"
+    )
+
 
 def test_blocked_rerun_publishes_new_evidence_without_changing_previous_bundle(
     tmp_path: Path,
@@ -203,7 +232,7 @@ def test_blocked_rerun_publishes_new_evidence_without_changing_previous_bundle(
         fixture_digests={"XNAS": "sha256:" + "e" * 64, "XTAI": "sha256:" + "f" * 64},
         source_policy_ids=("fixture-source-policy-xtai-v1", "fixture-source-policy-xnas-v1"),
         manifest_ids=("manifest-xtai-001", "manifest-xnas-001"),
-        contract_results={"postgresql": "passed"},
+        contract_results=_passing_contracts(),
         end_to_end_ids=("e2e-xtai-001", "e2e-xnas-001"),
         scenario_results={"linux_ci": "blocked"},
         failure_evidence=(
@@ -277,14 +306,14 @@ def test_single_platform_evidence_cannot_approve_p1_exit(tmp_path: Path) -> None
         fixture_digests={"XNAS": "sha256:" + "e" * 64},
         source_policy_ids=("fixture-source-policy-xnas-v1",),
         manifest_ids=("manifest-xnas-001",),
-        contract_results={"postgresql": "passed"},
+        contract_results=_passing_contracts(),
         end_to_end_ids=("e2e-xnas-001",),
-        scenario_results={"duplicate_collection": "passed"},
+        scenario_results=_passing_scenarios(),
         failure_evidence=(),
         rest_golden_digest="sha256:" + "1" * 64,
         ui_golden_digest="sha256:" + "2" * 64,
-        restart_results={"outbox_recovered": True},
-        resource_smoke={"api_ready": True},
+        restart_results=_passing_restart_checks(),
+        resource_smoke=_passing_resources(),
         gate_results=tuple(
             P1GateResult(trace_id, "passed", "verified", owner)
             for trace_id, owner in {
@@ -304,16 +333,16 @@ def test_single_platform_evidence_cannot_approve_p1_exit(tmp_path: Path) -> None
             "windows_docker_desktop": {
                 "application_payload_digest": "sha256:" + "b" * 64,
                 "container_image_digest": "sha256:" + "3" * 64,
-                "contract_results": {"postgresql": "passed"},
+                "contract_results": _passing_contracts(),
                 "deployment_digest": "sha256:" + "c" * 64,
                 "git_commit": "a" * 40,
                 "migration_digest": "sha256:" + "d" * 64,
                 "reproduction_command": (
                     "docker compose --profile acceptance run --build --rm acceptance"
                 ),
-                "resource_smoke": {"api_ready": True},
-                "restart_results": {"outbox_recovered": True},
-                "scenario_results": {"duplicate_collection": "passed"},
+                "resource_smoke": _passing_resources(),
+                "restart_results": _passing_restart_checks(),
+                "scenario_results": _passing_scenarios(),
                 "status": "passed",
             }
         },
