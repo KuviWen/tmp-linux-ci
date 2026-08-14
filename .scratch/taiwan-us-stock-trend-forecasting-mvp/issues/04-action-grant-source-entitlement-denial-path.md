@@ -40,10 +40,19 @@ Status: ready-for-agent
 - 驗證：以 `TEST_DATABASE_URL` 連接 `127.0.0.1:55432` 執行 `python -m pytest -q`
   （111 passed，包含真實 PostgreSQL integration）、`python -m mypy src tests`、
   `python -m ruff check .` 與 `python -m ruff format --check .` 均通過。
-- 2026-08-14 以 Docker Compose v5.3.1 執行 `docker compose config --quiet`，接著刪除
-  ticket-04 的 disposable volumes，從零啟動 acceptance profile 並執行 runner。結果 exit 0、
-  `status: passed`，12 項檢查全為 `true`，包含真實 REST、Dagster GraphQL、CLI、
-  platform-admin denial 與 PostgreSQL `stock` role least-privilege 證據。
+- 2026-08-14 以 Docker Compose v5.3.1 執行以下命令：
+
+  ```powershell
+  $dockerExe = Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin\docker.exe'
+  & $dockerExe compose -f compose.yaml config --quiet
+  & $dockerExe compose -f compose.yaml --profile acceptance down --volumes --remove-orphans
+  & $dockerExe compose -f compose.yaml --profile acceptance up -d --build --wait api-ingress denied-api-ingress dagster-webserver dagster-daemon
+  & $dockerExe compose -f compose.yaml --profile acceptance run --rm acceptance
+  ```
+
+  從零啟動的 runner 結果為 exit 0、`status: passed`，12 項檢查全為 `true`，包含真實
+  REST、Dagster GraphQL、CLI、platform-admin denial 與 PostgreSQL `stock` role
+  least-privilege 證據。
 - 首次 deployed runner 揭露 Dagster GraphQL selector 使用不存在的 `__ASSET_JOB__`；實際
   repository job 為 `__ASSET_JOB`。以回歸測試固定 selector 後修正，clean-container 重建與
   deployed runner 隨即通過。

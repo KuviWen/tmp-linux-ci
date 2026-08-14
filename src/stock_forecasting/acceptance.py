@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -57,6 +58,16 @@ class HttpClient(Protocol):
     ) -> Any: ...
 
     def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class _AuthorizationMatrixCase:
+    status: EntitlementStatus
+    purposes: frozenset[str]
+    expected_reason: str
+    policy_set_id: str
+    grant_actions: frozenset[str] | None = None
+    policy_markets: frozenset[str] | None = None
 
 
 class _CrashOperationsProjection(RelayFault):
@@ -1020,88 +1031,61 @@ def run_ticket_04(
             policy_markets=policy_markets,
         )
 
-    matrix_cases: tuple[
-        tuple[
-            EntitlementStatus,
-            frozenset[str],
-            str,
-            frozenset[str] | None,
-            frozenset[str] | None,
-            str,
-        ],
-        ...,
-    ] = (
-        (
-            "suspended",
-            frozenset({"fixture_research"}),
-            "source_entitlement_suspended",
-            None,
-            None,
-            FIXTURE_SUSPENDED_POLICY_SET,
+    matrix_cases = (
+        _AuthorizationMatrixCase(
+            status="suspended",
+            purposes=frozenset({"fixture_research"}),
+            expected_reason="source_entitlement_suspended",
+            policy_set_id=FIXTURE_SUSPENDED_POLICY_SET,
         ),
-        (
-            "expired",
-            frozenset({"fixture_research"}),
-            "source_entitlement_expired",
-            None,
-            None,
-            FIXTURE_EXPIRED_POLICY_SET,
+        _AuthorizationMatrixCase(
+            status="expired",
+            purposes=frozenset({"fixture_research"}),
+            expected_reason="source_entitlement_expired",
+            policy_set_id=FIXTURE_EXPIRED_POLICY_SET,
         ),
-        (
-            "revoked",
-            frozenset({"fixture_research"}),
-            "source_entitlement_revoked",
-            None,
-            None,
-            FIXTURE_REVOKED_POLICY_SET,
+        _AuthorizationMatrixCase(
+            status="revoked",
+            purposes=frozenset({"fixture_research"}),
+            expected_reason="source_entitlement_revoked",
+            policy_set_id=FIXTURE_REVOKED_POLICY_SET,
         ),
-        (
-            "active",
-            frozenset(),
-            "source_entitlement_purpose_denied",
-            None,
-            None,
-            FIXTURE_PURPOSE_REMOVED_POLICY_SET,
+        _AuthorizationMatrixCase(
+            status="active",
+            purposes=frozenset(),
+            expected_reason="source_entitlement_purpose_denied",
+            policy_set_id=FIXTURE_PURPOSE_REMOVED_POLICY_SET,
         ),
-        (
-            "active",
-            frozenset({"fixture_research"}),
-            "action_grant_missing",
-            frozenset(),
-            None,
-            FIXTURE_GRANT_MISSING_POLICY_SET,
+        _AuthorizationMatrixCase(
+            status="active",
+            purposes=frozenset({"fixture_research"}),
+            expected_reason="action_grant_missing",
+            policy_set_id=FIXTURE_GRANT_MISSING_POLICY_SET,
+            grant_actions=frozenset(),
         ),
-        (
-            "active",
-            frozenset({"fixture_research"}),
-            "source_policy_unknown",
-            None,
-            frozenset({"XNAS"}),
-            FIXTURE_POLICY_UNKNOWN_SET,
+        _AuthorizationMatrixCase(
+            status="active",
+            purposes=frozenset({"fixture_research"}),
+            expected_reason="source_policy_unknown",
+            policy_set_id=FIXTURE_POLICY_UNKNOWN_SET,
+            policy_markets=frozenset({"XNAS"}),
         ),
     )
     matrix_results: dict[str, bool] = {}
     matrix_audits: list[dict[str, Any]] = []
     denied_traces: list[str] = []
     revoked_application: Application | None = None
-    for (
-        status,
-        purposes,
-        expected_reason,
-        grant_actions,
-        policy_markets,
-        policy_set_id,
-    ) in matrix_cases:
+    for case in matrix_cases:
         candidate = policy_application(
-            policy_set_id=policy_set_id,
-            status=status,
-            purposes=purposes,
-            grant_actions=grant_actions,
-            policy_markets=policy_markets,
+            policy_set_id=case.policy_set_id,
+            status=case.status,
+            purposes=case.purposes,
+            grant_actions=case.grant_actions,
+            policy_markets=case.policy_markets,
         )
-        if status == "revoked":
+        if case.status == "revoked":
             revoked_application = candidate
-        trace_id = f"trace-p1-trace-auth-01-{expected_reason}"
+        trace_id = f"trace-p1-trace-auth-01-{case.expected_reason}"
         denied_traces.append(trace_id)
         outcome = candidate.run_fixture_eod(
             FixtureEodCommand(
@@ -1114,13 +1098,13 @@ def run_ticket_04(
         if isinstance(outcome, PolicyDeniedOutcome):
             event = candidate.security_audit.list_events(trace_id=trace_id)[0]
             matrix_audits.append(event)
-            matrix_results[expected_reason] = (
+            matrix_results[case.expected_reason] = (
                 outcome.code == "authorization_denied"
                 and outcome.correlation_id == trace_id
-                and event["reason_code"] == expected_reason
+                and event["reason_code"] == case.expected_reason
             )
         else:
-            matrix_results[expected_reason] = False
+            matrix_results[case.expected_reason] = False
     assert revoked_application is not None
 
     if deployed:
@@ -1257,7 +1241,7 @@ def run_ticket_04(
             )
         ),
         "decision_matrix_fail_closed": all(matrix_results.values())
-        and set(matrix_results) == {case[2] for case in matrix_cases},
+        and set(matrix_results) == {case.expected_reason for case in matrix_cases},
         "administrative_identity_denied": isinstance(administrative_outcome, PolicyDeniedOutcome)
         and len(administrative_audit) == 1
         and administrative_audit[0]["outcome"] == "denied"

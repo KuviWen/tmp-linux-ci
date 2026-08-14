@@ -100,5 +100,4 @@ class RuntimeSettings:
             relay_fault=relay_fault,
             local_identity=local_identity,
             authorization_policy_set_id=self.authorization_policy_set_id,
-            public_bind_host=self.public_bind_host,
         )

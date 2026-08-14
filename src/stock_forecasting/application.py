@@ -51,7 +51,6 @@ class Application:
         local_identity: LocalApiKeyIdentity,
         authorization_policy_set_id: str,
         authorization_policy_bootstrap: AuthorizationPolicy | None,
-        public_bind_host: str,
         fixed_security_time: datetime | None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
@@ -67,7 +66,6 @@ class Application:
             authorization_policy_set_id,
             principal_id=self.security_context.principal_id,
         )
-        self.public_bind_host = public_bind_host
         self._fixed_security_time = fixed_security_time
         self.research_query = ResearchQuery(
             self.state_store,
@@ -140,7 +138,6 @@ def build_test_application(
     entitlement_purposes: Mapping[str, frozenset[str]] | None = None,
     grant_actions: frozenset[str] | None = None,
     policy_markets: frozenset[str] | None = None,
-    public_bind_host: str = "127.0.0.1",
     authorization_time: datetime | None = None,
     authorization_policy_set_id: str | None = None,
 ) -> Application:
@@ -173,7 +170,6 @@ def build_test_application(
         local_identity=resolved_identity,
         authorization_policy_set_id=authorization_policy_set_id or f"test-policy-{uuid4()}",
         authorization_policy_bootstrap=authorization_policy_bootstrap,
-        public_bind_host=public_bind_host,
         fixed_security_time=authorization_time or observed_at,
     )
 
@@ -189,7 +185,6 @@ def build_application(
     relay_worker_id: str | None = None,
     local_identity: LocalApiKeyIdentity,
     authorization_policy_set_id: str,
-    public_bind_host: str = "127.0.0.1",
 ) -> Application:
     return Application(
         observed_at=observed_at,
@@ -203,6 +198,5 @@ def build_application(
         local_identity=local_identity,
         authorization_policy_set_id=authorization_policy_set_id,
         authorization_policy_bootstrap=None,
-        public_bind_host=public_bind_host,
         fixed_security_time=None,
     )
