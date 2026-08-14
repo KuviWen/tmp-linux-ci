@@ -162,8 +162,6 @@ services:
       context: .
       args:
         SOURCE_DATE_EPOCH: "0"
-      provenance: false
-      sbom: false
     command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "127.0.0.1", "--port", "8000"]
     ports:
       - '127.0.0.1:18005:8080'

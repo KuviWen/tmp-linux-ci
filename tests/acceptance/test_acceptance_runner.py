@@ -552,6 +552,17 @@ def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
     previous_content = Path(previous_report["bundle"]["uri"]).read_bytes()
     previous_reference = f"sha256:{hashlib.sha256(previous_content).hexdigest()}"
     (export_directory / "p1-acceptance-bundle.json").write_bytes(previous_content)
+    isolated_environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "P1_ACCEPTANCE_PLATFORM",
+            "P1_COUNTERPART_BUNDLE",
+            "P1_OCI_IMAGE_DIGEST",
+            "P1_OCI_IMAGE_DIGEST_FILE",
+        }
+    }
     completed = subprocess.run(
         [
             sys.executable,
@@ -578,7 +589,7 @@ def test_ticket_05_cli_invokes_the_bundle_runner(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         encoding="utf-8",
-        env={**os.environ, "PYTHONUTF8": "1"},
+        env={**isolated_environment, "PYTHONUTF8": "1"},
     )
 
     assert completed.returncode == 1, completed.stderr

@@ -67,8 +67,6 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
     assert services["api"]["build"] == {
         "context": ".",
         "args": {"SOURCE_DATE_EPOCH": "0"},
-        "provenance": False,
-        "sbom": False,
     }
     assert all("build" not in services[name] for name in application_services if name != "api")
     assert services["outbox-relay"]["profiles"] == ["relay"]
