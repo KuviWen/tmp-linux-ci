@@ -1,10 +1,20 @@
 {
   "manifest_id": "p2-stock-pool-10-plus-10-v1",
+  "selection_evidence_version": "twse-10-selection-evidence-v1",
+  "selection_as_of": "2026-08-15",
   "market_targets": {
     "XTAI": 10,
     "US": 10
   },
   "market_calendar_cases": ["half_day_session"],
+  "market_calendar_evidence": {
+    "coverage_case": "half_day_session",
+    "regime": "historical_saturday_shortened_session",
+    "valid_from": "1998-04-04",
+    "valid_to": "2000-12-30",
+    "modern_training_window_applicability": "not_applicable",
+    "evidence_id": "twse-calendar-saturday-shortened-session"
+  },
   "taiwan_sources": {
     "current": "twse-open-data-current",
     "historical": "twse-contracted-history"
@@ -15,43 +25,277 @@
   "taiwan_listings": [
     {
       "listing_id": "10000000-0000-4000-8000-000000000001",
-      "coverage_cases": ["ordinary_share", "ticker_change"]
-    },
-    {
-      "listing_id": "10000000-0000-4000-8000-000000000002",
+      "issuer_id": "6cf9d41b-5926-4c34-b55f-a3525c158b7c",
+      "security_id": "aaf72134-902f-4dbe-bbc3-f415fa18f9d7",
+      "external_security_code": "2330",
+      "external_aliases": [
+        {
+          "security_code": "2330",
+          "security_name": "台積電",
+          "valid_from": "1994-09-05",
+          "valid_to": null
+        }
+      ],
+      "selection_evidence_ids": [
+        "twse-factbook-2026-common-stocks",
+        "twse-2330-cash-dividend"
+      ],
       "coverage_cases": ["ordinary_share", "company_action"]
     },
     {
-      "listing_id": "10000000-0000-4000-8000-000000000003",
+      "listing_id": "10000000-0000-4000-8000-000000000002",
+      "issuer_id": "7fa15b55-b58e-4afc-bdbb-e43dd6312871",
+      "security_id": "d1a08510-be45-49cc-b557-1ad7dc3f1522",
+      "external_security_code": "2317",
+      "external_aliases": [
+        {
+          "security_code": "2317",
+          "security_name": "鴻海",
+          "valid_from": "1991-06-18",
+          "valid_to": null
+        }
+      ],
+      "selection_evidence_ids": [
+        "twse-factbook-2026-common-stocks",
+        "twse-2317-trading-halt"
+      ],
       "coverage_cases": ["ordinary_share", "suspension"]
     },
     {
+      "listing_id": "10000000-0000-4000-8000-000000000003",
+      "issuer_id": "3f4e4f47-8263-4995-bcd4-83a508087bdf",
+      "security_id": "e6c32661-0a57-48fd-b216-a3ecff66c983",
+      "external_security_code": "2308",
+      "external_aliases": [
+        {
+          "security_code": "2308",
+          "security_name": "台達電",
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "selection_evidence_ids": ["twse-factbook-2026-common-stocks"],
+      "coverage_cases": ["ordinary_share"]
+    },
+    {
       "listing_id": "10000000-0000-4000-8000-000000000004",
-      "coverage_cases": ["ordinary_share", "historical_delisting"]
+      "issuer_id": "7eb48447-33a9-436e-b768-c9d535a1f0ce",
+      "security_id": "064c911e-37e7-4d9a-befb-b2e54b01a12d",
+      "external_security_code": "2454",
+      "external_aliases": [
+        {
+          "security_code": "2454",
+          "security_name": "聯發科",
+          "valid_from": "2001-07-23",
+          "valid_to": null
+        }
+      ],
+      "selection_evidence_ids": ["twse-factbook-2026-common-stocks"],
+      "coverage_cases": ["ordinary_share"]
     },
     {
       "listing_id": "10000000-0000-4000-8000-000000000005",
+      "issuer_id": "79eb96b2-a625-46b9-a8c6-cbdd890364c6",
+      "security_id": "e854b3f8-c389-4c91-ad91-5b8601186fbb",
+      "external_security_code": "2881",
+      "external_aliases": [
+        {
+          "security_code": "2881",
+          "security_name": "富邦金",
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "selection_evidence_ids": ["twse-factbook-2026-common-stocks"],
       "coverage_cases": ["ordinary_share"]
     },
     {
       "listing_id": "10000000-0000-4000-8000-000000000006",
-      "coverage_cases": ["ordinary_share"]
+      "issuer_id": "d06316fc-5fde-434c-a7f6-d3f1e725fa8b",
+      "security_id": "ecedd033-afa3-4124-8516-00a56fa6215d",
+      "external_security_code": "3714",
+      "external_aliases": [
+        {
+          "security_code": "3714",
+          "security_name": "富采",
+          "valid_from": "2021-01-06",
+          "valid_to": null
+        }
+      ],
+      "selection_evidence_ids": [
+        "twse-3714-common-share",
+        "twse-2448-3714-share-exchange"
+      ],
+      "coverage_cases": ["ordinary_share", "company_action"]
     },
     {
       "listing_id": "10000000-0000-4000-8000-000000000007",
+      "issuer_id": "85945573-0d2e-4e38-a874-a34a6f20ceb7",
+      "security_id": "5c857b8b-1e95-4a06-9ba3-9c24be7fb7ed",
+      "external_security_code": "3711",
+      "external_aliases": [
+        {
+          "security_code": "3711",
+          "security_name": "日月光投控",
+          "valid_from": "2018-04-30",
+          "valid_to": null
+        }
+      ],
+      "selection_evidence_ids": ["twse-factbook-2026-common-stocks"],
       "coverage_cases": ["ordinary_share"]
     },
     {
       "listing_id": "10000000-0000-4000-8000-000000000008",
+      "issuer_id": "f73fb390-be21-484f-b7a3-943497bee777",
+      "security_id": "572cea0b-790f-4188-8511-b3ed0f9b1bfc",
+      "external_security_code": "2382",
+      "external_aliases": [
+        {
+          "security_code": "2382",
+          "security_name": "廣達",
+          "valid_from": null,
+          "valid_to": null
+        }
+      ],
+      "selection_evidence_ids": ["twse-factbook-2026-common-stocks"],
       "coverage_cases": ["ordinary_share"]
     },
     {
       "listing_id": "10000000-0000-4000-8000-000000000009",
-      "coverage_cases": ["ordinary_share"]
+      "issuer_id": "3c0161ad-5dbc-4ec3-a7db-c68af484015c",
+      "security_id": "72ed6b8f-068c-42fa-a008-59af97f0f5ac",
+      "external_security_code": "2887",
+      "external_aliases": [
+        {
+          "security_code": "2887",
+          "security_name": "台新金",
+          "valid_from": "2002-02-18",
+          "valid_to": "2025-07-23"
+        },
+        {
+          "security_code": "2887",
+          "security_name": "台新新光金",
+          "valid_from": "2025-07-24",
+          "valid_to": null
+        }
+      ],
+      "selection_evidence_ids": [
+        "twse-factbook-2026-common-stocks",
+        "tsh-2887-name-change"
+      ],
+      "coverage_cases": ["ordinary_share", "ticker_change"]
     },
     {
       "listing_id": "10000000-0000-4000-8000-000000000010",
-      "coverage_cases": ["ordinary_share"]
+      "issuer_id": "5e2b3070-1075-443c-8430-93d910ffc6fb",
+      "security_id": "414fa46f-b02d-46e6-8bba-964ae9112ee6",
+      "external_security_code": "2448",
+      "external_aliases": [
+        {
+          "security_code": "2448",
+          "security_name": "晶電",
+          "valid_from": "2001-05-25",
+          "valid_to": "2021-01-05"
+        }
+      ],
+      "selection_evidence_ids": [
+        "twse-2448-common-share",
+        "twse-2448-3714-share-exchange",
+        "twse-2448-delisting"
+      ],
+      "coverage_cases": ["ordinary_share", "company_action", "historical_delisting"]
+    }
+  ],
+  "listing_relationships": [
+    {
+      "relationship_type": "share_exchange_successor",
+      "predecessor_listing_id": "10000000-0000-4000-8000-000000000010",
+      "successor_listing_id": "10000000-0000-4000-8000-000000000006",
+      "effective_on": "2021-01-06",
+      "evidence_id": "twse-2448-3714-share-exchange"
+    }
+  ],
+  "selection_evidence": [
+    {
+      "evidence_id": "twse-factbook-2026-common-stocks",
+      "coverage_case": "ordinary_share",
+      "publisher": "TWSE",
+      "source_url": "https://www.twse.com.tw/downloads/zh/about/company/factbook/2026/1.04.html",
+      "source_content_sha256": "08e3ff2c79770e21fd436be605014b4cfbf8830894661693c84c52f345a2f6fb",
+      "occurred_on": "2025-12-31",
+      "retrieved_on": "2026-08-15"
+    },
+    {
+      "evidence_id": "twse-2330-cash-dividend",
+      "coverage_case": "company_action",
+      "publisher": "TWSE",
+      "source_url": "https://wwwc.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69a3d6cf9019b078b883d0440.pdf",
+      "source_content_sha256": "2a7228de0e64fa135d61053a58ee309711db7e3e5d57618b7d41635c9e856ec9",
+      "occurred_on": "2025-12-11",
+      "retrieved_on": "2026-08-15"
+    },
+    {
+      "evidence_id": "twse-2317-trading-halt",
+      "coverage_case": "suspension",
+      "publisher": "TWSE",
+      "source_url": "https://wwwc.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d697fc438f01985582a3690192.pdf",
+      "source_content_sha256": "bacc86f2b2d5949b638e12485d407618be0ffef8d2b6f443509aa9259eb0040f",
+      "occurred_on": "2025-07-30",
+      "retrieved_on": "2026-08-15"
+    },
+    {
+      "evidence_id": "tsh-2887-name-change",
+      "coverage_case": "ticker_change",
+      "publisher": "issuer",
+      "source_url": "https://www.tsholdings.com.tw/tsh/relations/major/1743420780000/",
+      "source_content_sha256": "2ce74c7d4296b84f1ec4c3c7c8d258abbf0873dd1e3d04f237007d0de656e96e",
+      "occurred_on": "2025-07-24",
+      "retrieved_on": "2026-08-15"
+    },
+    {
+      "evidence_id": "twse-3714-common-share",
+      "coverage_case": "ordinary_share",
+      "publisher": "TWSE",
+      "source_url": "https://investoredu.twse.com.tw/Mobile_pages/..%2FFileSystem%2FFileUpload%2F3b0709ec-90bf-4051-975b-8f28b6c035aa.pdf",
+      "source_content_sha256": "c5170640828b61a12e4d9c5ca41666a42491c562ef60e3846be0dcf2d3fa7003",
+      "occurred_on": "2021-01-06",
+      "retrieved_on": "2026-08-15"
+    },
+    {
+      "evidence_id": "twse-2448-common-share",
+      "coverage_case": "ordinary_share",
+      "publisher": "TWSE",
+      "source_url": "https://investoredu.twse.com.tw/Mobile_pages/..%2FFileSystem%2FFileUpload%2F3b0709ec-90bf-4051-975b-8f28b6c035aa.pdf",
+      "source_content_sha256": "c5170640828b61a12e4d9c5ca41666a42491c562ef60e3846be0dcf2d3fa7003",
+      "occurred_on": "2021-01-06",
+      "retrieved_on": "2026-08-15"
+    },
+    {
+      "evidence_id": "twse-2448-3714-share-exchange",
+      "coverage_case": "company_action",
+      "publisher": "TWSE",
+      "source_url": "https://investoredu.twse.com.tw/Mobile_pages/..%2FFileSystem%2FFileUpload%2F3b0709ec-90bf-4051-975b-8f28b6c035aa.pdf",
+      "source_content_sha256": "c5170640828b61a12e4d9c5ca41666a42491c562ef60e3846be0dcf2d3fa7003",
+      "occurred_on": "2021-01-06",
+      "retrieved_on": "2026-08-15"
+    },
+    {
+      "evidence_id": "twse-2448-delisting",
+      "coverage_case": "historical_delisting",
+      "publisher": "TWSE",
+      "source_url": "https://investoredu.twse.com.tw/Mobile_pages/..%2FFileSystem%2FFileUpload%2F3b0709ec-90bf-4051-975b-8f28b6c035aa.pdf",
+      "source_content_sha256": "c5170640828b61a12e4d9c5ca41666a42491c562ef60e3846be0dcf2d3fa7003",
+      "occurred_on": "2021-01-06",
+      "retrieved_on": "2026-08-15"
+    },
+    {
+      "evidence_id": "twse-calendar-saturday-shortened-session",
+      "coverage_case": "half_day_session",
+      "publisher": "TWSE",
+      "source_url": "https://www.twse.com.tw/staticFiles/product/publication/twse60/html/178/",
+      "source_content_sha256": "6287d5e48d111edd2842aaa274545f30a3bc8d4207c548bbb4adef7ade2daceb",
+      "occurred_on": "1998-04-04",
+      "retrieved_on": "2026-08-15"
     }
   ]
 }

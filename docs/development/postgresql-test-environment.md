@@ -10,6 +10,11 @@
 - Docker Compose v2（`docker compose`）
 - 專案的 Python 3.12 virtual environment（執行 host-side pytest 時使用）
 
+Windows／Codex 環境若 `docker` 不在 `PATH`，不得據此判定 Docker 未安裝，也不要改走 WSL。先依
+[`docs/agents/docker-acceptance.md`](../agents/docker-acceptance.md) 解析 Docker Desktop CLI；預設候選為
+`$env:LOCALAPPDATA\Programs\DockerDesktop\resources\bin\docker.exe`。以下命令中的 `docker` 可改為
+`& $dockerExe`，並在 workspace sandbox 要求時使用核准的 shell escalation。
+
 確認工具：
 
 ```powershell

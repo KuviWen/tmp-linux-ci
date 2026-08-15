@@ -29,6 +29,14 @@ StockPoolCoverageCase = Literal[
     "suspension",
     "historical_delisting",
 ]
+SelectionEvidenceCoverageCase = Literal[
+    "ordinary_share",
+    "ticker_change",
+    "company_action",
+    "suspension",
+    "historical_delisting",
+    "half_day_session",
+]
 ManifestEvidenceStatus = Literal["qualification_candidate", "qualified"]
 TaiwanPriceSourceMode = Literal["current", "historical"]
 SourceRevisionKind = Literal["original", "late_arrival", "correction", "withdrawal"]
@@ -906,23 +914,110 @@ def _quarantine_reason(
 
 
 @dataclass(frozen=True)
+class ExternalSecurityAlias:
+    security_code: str
+    security_name: str
+    valid_from: date | None
+    valid_to: date | None
+
+    def __post_init__(self) -> None:
+        if (
+            self.valid_from is not None
+            and self.valid_to is not None
+            and self.valid_from > self.valid_to
+        ):
+            raise ValueError("taiwan_stock_pool_external_alias_invalid")
+
+
+@dataclass(frozen=True)
+class ListingSelectionEvidence:
+    evidence_id: str
+    coverage_case: SelectionEvidenceCoverageCase
+    publisher: Literal["TWSE", "issuer"]
+    source_url: str
+    source_content_sha256: str
+    occurred_on: date
+    retrieved_on: date
+
+    def __post_init__(self) -> None:
+        try:
+            digest = bytes.fromhex(self.source_content_sha256)
+        except ValueError as error:
+            raise ValueError("taiwan_stock_pool_evidence_digest_invalid") from error
+        if (
+            len(digest) != 32
+            or not self.source_url.startswith("https://")
+            or self.occurred_on > self.retrieved_on
+        ):
+            raise ValueError("taiwan_stock_pool_evidence_invalid")
+
+
+@dataclass(frozen=True)
+class MarketCalendarSelectionEvidence:
+    coverage_case: Literal["half_day_session"]
+    regime: Literal["historical_saturday_shortened_session"]
+    valid_from: date
+    valid_to: date
+    modern_training_window_applicability: Literal["not_applicable"]
+    evidence_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.coverage_case != "half_day_session"
+            or self.regime != "historical_saturday_shortened_session"
+            or self.modern_training_window_applicability != "not_applicable"
+            or self.valid_from > self.valid_to
+        ):
+            raise ValueError("taiwan_stock_pool_calendar_evidence_invalid")
+
+
+@dataclass(frozen=True)
+class ListingSelectionRelationship:
+    relationship_type: Literal["share_exchange_successor"]
+    predecessor_listing_id: str
+    successor_listing_id: str
+    effective_on: date
+    evidence_id: str
+
+    def __post_init__(self) -> None:
+        if self.relationship_type != "share_exchange_successor":
+            raise ValueError("taiwan_stock_pool_listing_relationship_invalid")
+
+
+@dataclass(frozen=True)
 class StockPoolListing:
     listing_id: str
+    issuer_id: str
+    security_id: str
     market: Literal["XTAI"]
     security_kind: Literal["ordinary_share"]
+    external_security_code: str
+    external_aliases: tuple[ExternalSecurityAlias, ...]
+    selection_evidence_ids: tuple[str, ...]
     coverage_cases: frozenset[StockPoolCoverageCase]
 
     def __post_init__(self) -> None:
         UUID(self.listing_id)
+        UUID(self.issuer_id)
+        UUID(self.security_id)
+        if not self.external_aliases or any(
+            alias.security_code != self.external_security_code for alias in self.external_aliases
+        ):
+            raise ValueError("taiwan_stock_pool_external_alias_invalid")
 
 
 @dataclass(frozen=True)
 class TaiwanStockPoolManifest:
     manifest_id: str
+    selection_evidence_version: str
+    selection_as_of: date
     taiwan_target: int
     united_states_target: int
     listings: tuple[StockPoolListing, ...]
     market_calendar_cases: frozenset[Literal["half_day_session"]]
+    market_calendar_evidence: MarketCalendarSelectionEvidence
+    evidence: tuple[ListingSelectionEvidence, ...]
+    listing_relationships: tuple[ListingSelectionRelationship, ...]
     current_source_id: str
     historical_source_id: str
     formal_qualification_artifact_id: str | None
@@ -934,6 +1029,38 @@ class TaiwanStockPoolManifest:
             raise ValueError("taiwan_stock_pool_target_mismatch")
         if len({listing.listing_id for listing in self.listings}) != len(self.listings):
             raise ValueError("taiwan_stock_pool_listing_id_reused")
+        if len({listing.issuer_id for listing in self.listings}) != len(self.listings):
+            raise ValueError("taiwan_stock_pool_issuer_id_reused")
+        if len({listing.security_id for listing in self.listings}) != len(self.listings):
+            raise ValueError("taiwan_stock_pool_security_id_reused")
+        evidence_by_id = {item.evidence_id: item for item in self.evidence}
+        if len(evidence_by_id) != len(self.evidence):
+            raise ValueError("taiwan_stock_pool_evidence_id_reused")
+        if self.market_calendar_evidence.evidence_id not in evidence_by_id:
+            raise ValueError("taiwan_stock_pool_calendar_evidence_missing")
+        if any(item.retrieved_on > self.selection_as_of for item in self.evidence):
+            raise ValueError("taiwan_stock_pool_future_evidence")
+        listing_ids = {listing.listing_id for listing in self.listings}
+        for relationship in self.listing_relationships:
+            if (
+                relationship.predecessor_listing_id not in listing_ids
+                or relationship.successor_listing_id not in listing_ids
+                or relationship.predecessor_listing_id == relationship.successor_listing_id
+                or relationship.evidence_id not in evidence_by_id
+            ):
+                raise ValueError("taiwan_stock_pool_listing_relationship_invalid")
+        for listing in self.listings:
+            if (
+                not listing.selection_evidence_ids
+                or not set(listing.selection_evidence_ids) <= evidence_by_id.keys()
+            ):
+                raise ValueError("taiwan_stock_pool_listing_evidence_missing")
+            evidenced_cases = {
+                evidence_by_id[evidence_id].coverage_case
+                for evidence_id in listing.selection_evidence_ids
+            }
+            if not listing.coverage_cases <= evidenced_cases:
+                raise ValueError("taiwan_stock_pool_coverage_evidence_missing")
 
     @property
     def market_targets(self) -> dict[str, int]:
@@ -978,18 +1105,44 @@ def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
     targets = cast(dict[str, int], payload["market_targets"])
     source_ids = cast(dict[str, str], payload["taiwan_sources"])
     listing_payloads = cast(list[dict[str, object]], payload["taiwan_listings"])
+    evidence_payloads = cast(list[dict[str, object]], payload["selection_evidence"])
+    relationship_payloads = cast(list[dict[str, object]], payload["listing_relationships"])
+    calendar_payload = cast(dict[str, object], payload["market_calendar_evidence"])
     market_calendar_cases = cast(
         list[Literal["half_day_session"]], payload["market_calendar_cases"]
     )
     return TaiwanStockPoolManifest(
         manifest_id=str(payload["manifest_id"]),
+        selection_evidence_version=str(payload["selection_evidence_version"]),
+        selection_as_of=date.fromisoformat(str(payload["selection_as_of"])),
         taiwan_target=targets["XTAI"],
         united_states_target=targets["US"],
         listings=tuple(
             StockPoolListing(
                 listing_id=str(listing["listing_id"]),
+                issuer_id=str(listing["issuer_id"]),
+                security_id=str(listing["security_id"]),
                 market="XTAI",
                 security_kind="ordinary_share",
+                external_security_code=str(listing["external_security_code"]),
+                external_aliases=tuple(
+                    ExternalSecurityAlias(
+                        security_code=str(alias["security_code"]),
+                        security_name=str(alias["security_name"]),
+                        valid_from=(
+                            date.fromisoformat(str(alias["valid_from"]))
+                            if alias["valid_from"] is not None
+                            else None
+                        ),
+                        valid_to=(
+                            date.fromisoformat(str(alias["valid_to"]))
+                            if alias["valid_to"] is not None
+                            else None
+                        ),
+                    )
+                    for alias in cast(list[dict[str, object]], listing["external_aliases"])
+                ),
+                selection_evidence_ids=tuple(cast(list[str], listing["selection_evidence_ids"])),
                 coverage_cases=frozenset(
                     cast(list[StockPoolCoverageCase], listing["coverage_cases"])
                 ),
@@ -997,6 +1150,45 @@ def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
             for listing in listing_payloads
         ),
         market_calendar_cases=frozenset(market_calendar_cases),
+        market_calendar_evidence=MarketCalendarSelectionEvidence(
+            coverage_case=cast(Literal["half_day_session"], calendar_payload["coverage_case"]),
+            regime=cast(
+                Literal["historical_saturday_shortened_session"],
+                calendar_payload["regime"],
+            ),
+            valid_from=date.fromisoformat(str(calendar_payload["valid_from"])),
+            valid_to=date.fromisoformat(str(calendar_payload["valid_to"])),
+            modern_training_window_applicability=cast(
+                Literal["not_applicable"],
+                calendar_payload["modern_training_window_applicability"],
+            ),
+            evidence_id=str(calendar_payload["evidence_id"]),
+        ),
+        evidence=tuple(
+            ListingSelectionEvidence(
+                evidence_id=str(evidence["evidence_id"]),
+                coverage_case=cast(SelectionEvidenceCoverageCase, evidence["coverage_case"]),
+                publisher=cast(Literal["TWSE", "issuer"], evidence["publisher"]),
+                source_url=str(evidence["source_url"]),
+                source_content_sha256=str(evidence["source_content_sha256"]),
+                occurred_on=date.fromisoformat(str(evidence["occurred_on"])),
+                retrieved_on=date.fromisoformat(str(evidence["retrieved_on"])),
+            )
+            for evidence in evidence_payloads
+        ),
+        listing_relationships=tuple(
+            ListingSelectionRelationship(
+                relationship_type=cast(
+                    Literal["share_exchange_successor"],
+                    relationship["relationship_type"],
+                ),
+                predecessor_listing_id=str(relationship["predecessor_listing_id"]),
+                successor_listing_id=str(relationship["successor_listing_id"]),
+                effective_on=date.fromisoformat(str(relationship["effective_on"])),
+                evidence_id=str(relationship["evidence_id"]),
+            )
+            for relationship in relationship_payloads
+        ),
         current_source_id=source_ids["current"],
         historical_source_id=source_ids["historical"],
         formal_qualification_artifact_id=cast(
