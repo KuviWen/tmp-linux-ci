@@ -13,6 +13,7 @@ from stock_forecasting.authorization import (
     ActionGrant,
     AuthorizationPolicy,
     LocalApiKeyIdentity,
+    SourceDistribution,
     SourceEntitlement,
     SourcePolicyVersion,
     SourceUseRight,
@@ -35,6 +36,11 @@ from stock_forecasting.platform.object_repository import FilesystemObjectReposit
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
 from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
+
+TWSE_EOD_DISTRIBUTION_ID = "11549"
+TWSE_EOD_DISTRIBUTION_URL = (
+    "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data"
+)
 
 
 class ForbiddenPriceAdapter:
@@ -124,6 +130,12 @@ def _qualified_price_policy(
                 terms_url="https://data.gov.tw/license",
                 terms_content_sha256="1" * 64,
                 attribution="政府資料開放授權條款－第1版（OGDL 1.0）",
+                distributions=(
+                    SourceDistribution(
+                        dataset_id=TWSE_EOD_DISTRIBUTION_ID,
+                        distribution_url=TWSE_EOD_DISTRIBUTION_URL,
+                    ),
+                ),
             ),
         ),
         source_entitlements=(),
@@ -213,7 +225,7 @@ def _loaded_partition(
         request_id=request_id,
         source_id="twse-current-qualified-price",
         acquired_at=now,
-        sanitized_source_uri="provider://qualified-price/bounded-partition",
+        sanitized_source_uri=TWSE_EOD_DISTRIBUTION_URL,
         media_type="application/json",
         raw_payload=raw_payload,
         checkpoint_before=None,
@@ -340,43 +352,61 @@ def test_unverified_taiwan_market_dependency_blocks_before_provider_access(
         },
     }
     assert adapter.calls == 0
-    assert state_store.list_audit_events(trace_id=request.trace_id) == [
-        {
-            "action": "market_data.collect",
-            "outcome": "denied",
-            "reason_code": "source_policy_unknown",
-            "trace_id": request.trace_id,
-            "authentication_method": "local_api_key",
-            "correlation_id": request.request_id,
-            "credential_id": identity.context.credential_id,
-            "data_protection_class": None,
-            "dataset_id": request.source_id,
-            "decision_id": outcome.policy_decision_id,
-            "environment": "development",
-            "evaluated_at": "2026-08-15T01:00:00Z",
-            "evaluation_id": state_store.list_audit_events(trace_id=request.trace_id)[0][
-                "evaluation_id"
-            ],
-            "grant_version_id": "grant-price-v1",
-            "principal_id": identity.context.principal_id,
-            "purpose": "price_research",
-            "required_uses": [
-                "backup_restore",
-                "ingest",
-                "internal_display",
-                "model",
-                "retain_7_years",
-                "transform",
-            ],
-            "source_entitlement_version_id": None,
-            "source_policy_version_id": None,
-            "valid_until": "2026-08-15T01:00:00Z",
-        }
-    ]
+    audit = state_store.list_audit_events(trace_id=request.trace_id)
+    assert len(audit) == 1
+    assert audit[0]["action"] == "market_data.collect"
+    assert audit[0]["outcome"] == "denied"
+    assert audit[0]["reason_code"] == "source_policy_unknown"
     assert (
         state_store.get_price_research_eligibility(listing_id=request.listing_ids[0])
         == outcome.as_payload()
     )
+
+
+def test_unlisted_open_data_distribution_blocks_before_provider_access(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-open-data-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    adapter = ForbiddenPriceAdapter()
+    data_supply = DataSupply(
+        authorization_policy=_qualified_price_policy(identity, now),
+        security_context=identity.context,
+        adapters={"twse-current-qualified-price": adapter},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=StateStore(
+            f"sqlite+pysqlite:///{tmp_path / 'unlisted-distribution.db'}",
+            create_schema=True,
+        ),
+        clock=lambda: now,
+    )
+
+    outcome = data_supply.materialize(
+        SourcePartitionRequest(
+            request_id="request-unlisted-distribution",
+            trace_id="trace-unlisted-distribution",
+            source_id="twse-current-qualified-price",
+            distribution_id="11549",
+            distribution_url="https://www.twse.com.tw/interactive-page",
+            mode="current",
+            listing_ids=("10000000-0000-4000-8000-000000000001",),
+            start_date=date(2026, 8, 14),
+            end_date=date(2026, 8, 14),
+            expected_checkpoint=None,
+        )
+    )
+
+    assert outcome.status == "policy_blocked"
+    assert outcome.reason_code == "source_basis_unverified"
+    assert outcome.policy_reason_code == "source_distribution_not_authorized"
+    assert adapter.calls == 0
 
 
 def test_qualified_source_materializes_immutable_unadjusted_and_internal_adjustment_versions(
@@ -403,7 +433,7 @@ def test_qualified_source_materializes_immutable_unadjusted_and_internal_adjustm
         request_id="request-ticket-06-qualified",
         source_id="twse-current-qualified-price",
         acquired_at=now,
-        sanitized_source_uri="provider://qualified-price/bounded-partition",
+        sanitized_source_uri=TWSE_EOD_DISTRIBUTION_URL,
         media_type="application/json",
         raw_payload=b'{"unadjusted":true,"providerAdjustedClose":[995,1010]}',
         checkpoint_before=None,
@@ -475,6 +505,8 @@ def test_qualified_source_materializes_immutable_unadjusted_and_internal_adjustm
         request_id=collection.request_id,
         trace_id="trace-p2-trace-tw-01-qualified",
         source_id=collection.source_id,
+        distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+        distribution_url=TWSE_EOD_DISTRIBUTION_URL,
         mode="current",
         listing_ids=(listing_id,),
         start_date=coverage.requested_start,
@@ -501,6 +533,7 @@ def test_qualified_source_materializes_immutable_unadjusted_and_internal_adjustm
     assert first.dataset_version_id is not None
     assert first.adjustment_version_id is not None
     assert first.raw_object_id is not None
+    assert first.retrieval_receipt_id is not None
     assert first.normalized_object_id is not None
     normalized_payload = json.loads(object_repository.open_by_id(first.normalized_object_id).read())
     assert "providerAdjustedClose" not in json.dumps(normalized_payload)
@@ -525,6 +558,10 @@ def test_qualified_source_materializes_immutable_unadjusted_and_internal_adjustm
     assert dataset["payload"]["schema_version"] == "taiwan-unadjusted-eod-v1"
     assert dataset["payload"]["source_revision"] == "source-revision-2026-08-15"
     assert dataset["payload"]["policy_decision_id"] == first.policy_decision_id
+    receipt = state_store.get_canonical_artifact(first.retrieval_receipt_id)
+    assert receipt["payload"]["distribution_id"] == TWSE_EOD_DISTRIBUTION_ID
+    assert receipt["payload"]["distribution_url"] == TWSE_EOD_DISTRIBUTION_URL
+    assert receipt["payload"]["sanitized_source_uri"] == TWSE_EOD_DISTRIBUTION_URL
     adjustment = state_store.get_canonical_artifact(first.adjustment_version_id)
     assert adjustment["artifact_kind"] == "adjustment_version"
     assert adjustment["payload"]["method"] == "internal_total_return_adjustment_v1"
@@ -627,6 +664,8 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
                     request_id=loaded.collection.request_id,
                     trace_id=f"trace-candidate-{mode}",
                     source_id=loaded.collection.source_id,
+                    distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+                    distribution_url=TWSE_EOD_DISTRIBUTION_URL,
                     mode=mode,  # type: ignore[arg-type]
                     listing_ids=(listing_id,),
                     start_date=loaded.collection.coverage.requested_start,
@@ -639,7 +678,8 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
             )
         )
 
-    assert [outcome.status for outcome in outcomes] == ["published", "published"]
+    assert [outcome.status for outcome in outcomes] == ["published", "quarantined"]
+    assert outcomes[1].reason_code == "historical_evidence_unverified"
     assert outcomes[1].historical_availability_claim_id == historical_claim_id
 
     current_source_policy = [_combined_price_policy(identity, now)]
@@ -656,10 +696,10 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
     )
 
     assert isinstance(result, dict)
-    assert result["status"] == "policy_blocked"
-    assert result["reason_code"] == "qualification_evidence_unverified"
+    assert result["status"] == "quarantined"
+    assert result["reason_code"] == "historical_evidence_unverified"
     assert result["formally_qualified"] is False
-    assert result["checks"]["policy"] == "blocked"  # type: ignore[index]
+    assert result["checks"]["depth"] == "blocked"  # type: ignore[index]
 
     current_source_policy[0] = AuthorizationPolicy(
         action_grants=current_source_policy[0].action_grants,
@@ -735,7 +775,7 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
             (),
             "historical",
             date(2025, 8, 14),
-            "insufficient_history_depth",
+            "historical_evidence_unverified",
         ),
         (
             True,
@@ -794,6 +834,8 @@ def test_invalid_source_partitions_are_quarantined_with_raw_evidence(
         request_id=loaded.collection.request_id,
         trace_id=f"trace-{expected_reason}",
         source_id=loaded.collection.source_id,
+        distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+        distribution_url=TWSE_EOD_DISTRIBUTION_URL,
         mode=mode,  # type: ignore[arg-type]
         listing_ids=(listing_id,),
         start_date=loaded.collection.coverage.requested_start,
@@ -861,6 +903,8 @@ def test_missing_requested_listing_is_quarantined_instead_of_published(
             request_id=loaded.collection.request_id,
             trace_id="trace-missing-listing",
             source_id=loaded.collection.source_id,
+            distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+            distribution_url=TWSE_EOD_DISTRIBUTION_URL,
             mode="current",
             listing_ids=(first_listing, missing_listing),
             start_date=loaded.collection.coverage.requested_start,
@@ -915,6 +959,8 @@ def test_unapproved_price_schema_is_quarantined_and_reported_as_blocked(
             request_id=loaded.collection.request_id,
             trace_id="trace-schema-drift",
             source_id=loaded.collection.source_id,
+            distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+            distribution_url=TWSE_EOD_DISTRIBUTION_URL,
             mode="current",
             listing_ids=(listing_id,),
             start_date=loaded.collection.coverage.requested_start,
@@ -973,6 +1019,8 @@ def test_provider_adjusted_close_mismatch_blocks_integrity_publication(
             request_id=loaded.collection.request_id,
             trace_id="trace-adjustment-mismatch",
             source_id=loaded.collection.source_id,
+            distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+            distribution_url=TWSE_EOD_DISTRIBUTION_URL,
             mode="current",
             listing_ids=(listing_id,),
             start_date=loaded.collection.coverage.requested_start,
@@ -1033,6 +1081,8 @@ def test_rate_limited_collection_is_deferred_without_advancing_the_checkpoint(
         request_id=loaded.collection.request_id,
         trace_id="trace-rate-limited-first",
         source_id=loaded.collection.source_id,
+        distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+        distribution_url=TWSE_EOD_DISTRIBUTION_URL,
         mode="current",
         listing_ids=(listing_id,),
         start_date=loaded.collection.coverage.requested_start,
@@ -1175,6 +1225,8 @@ def test_collection_must_continue_from_the_durable_checkpoint(
         request_id=first_loaded.collection.request_id,
         trace_id="trace-checkpoint-first",
         source_id=first_loaded.collection.source_id,
+        distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+        distribution_url=TWSE_EOD_DISTRIBUTION_URL,
         mode="current",
         listing_ids=(listing_id,),
         start_date=first_loaded.collection.coverage.requested_start,
@@ -1256,6 +1308,8 @@ def test_retrieval_receipts_are_append_only_when_raw_content_is_reobserved(
         request_id=first_loaded.collection.request_id,
         trace_id="trace-receipt-first",
         source_id=first_loaded.collection.source_id,
+        distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+        distribution_url=TWSE_EOD_DISTRIBUTION_URL,
         mode="current",
         listing_ids=(listing_id,),
         start_date=first_loaded.collection.coverage.requested_start,
@@ -1334,6 +1388,8 @@ def test_late_and_corrected_partitions_publish_new_versions_without_overwrite(
         request_id=original.collection.request_id,
         trace_id=f"trace-{revision_kind}-original",
         source_id=original.collection.source_id,
+        distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+        distribution_url=TWSE_EOD_DISTRIBUTION_URL,
         mode="current",
         listing_ids=(listing_id,),
         start_date=original.collection.coverage.requested_start,

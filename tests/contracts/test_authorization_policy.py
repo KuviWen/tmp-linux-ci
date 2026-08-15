@@ -15,6 +15,7 @@ from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
     LocalApiKeyVerifier,
     OperationIntent,
+    SourceDistribution,
     SourceEntitlement,
     SourcePolicyVersion,
     SourceRightsEvidenceError,
@@ -491,6 +492,15 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
                 terms_url="https://data.gov.tw/license",
                 terms_content_sha256="1" * 64,
                 attribution="政府資料開放授權條款－第1版（OGDL 1.0）",
+                distributions=(
+                    SourceDistribution(
+                        dataset_id="11549",
+                        distribution_url=(
+                            "https://www.twse.com.tw/exchangeReport/"
+                            "STOCK_DAY_ALL?response=open_data"
+                        ),
+                    ),
+                ),
             ),
         ),
         source_entitlements=(
@@ -529,6 +539,10 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
                     "backup_restore",
                 }
             ),
+            distribution_id="11549",
+            distribution_url=(
+                "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data"
+            ),
         ),
     )
 
@@ -559,6 +573,14 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
             "attribution": "政府資料開放授權條款－第1版（OGDL 1.0）",
             "data_protection_class": "public_source",
             "dataset_id": "twse-open-data-current",
+            "distributions": [
+                {
+                    "dataset_id": "11549",
+                    "distribution_url": (
+                        "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data"
+                    ),
+                }
+            ],
             "environments": ["development"],
             "license_id": "OGDL-1.0",
             "purposes": ["price_research"],
@@ -603,6 +625,36 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
     assert current_rights.reason_code == "authorized"
     assert current_rights.source_policy_version_id == "policy-twse-ogdl-current-v1"
     assert current_rights.source_entitlement_version_id is None
+
+    denied = policy.evaluate(
+        identity.context,
+        replace(
+            OperationIntent(
+                action="market_data.collect",
+                dataset_id="twse-open-data-current",
+                purpose="price_research",
+                environment="development",
+                resource_state="active",
+                evaluated_at=now,
+                trace_id="trace-unlisted-distribution",
+                correlation_id="trace-unlisted-distribution",
+                required_uses=frozenset(
+                    {
+                        "ingest",
+                        "retain_7_years",
+                        "transform",
+                        "model",
+                        "internal_display",
+                        "backup_restore",
+                    }
+                ),
+            ),
+            distribution_id="11549",
+            distribution_url="https://www.twse.com.tw/interactive-page",
+        ),
+    )
+    assert denied.allowed is False
+    assert denied.reason_code == "source_distribution_not_authorized"
 
 
 def test_conflicting_entitlement_versions_fail_closed_instead_of_using_tuple_order() -> None:

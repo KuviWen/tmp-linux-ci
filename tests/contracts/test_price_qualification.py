@@ -12,6 +12,7 @@ from stock_forecasting.authorization import (
     ActionGrant,
     AuthorizationPolicy,
     LocalApiKeyIdentity,
+    SourceDistribution,
     SourceEntitlement,
     SourcePolicyVersion,
     SourceUseRight,
@@ -59,7 +60,7 @@ def test_historical_claim_cannot_be_minted_without_qualification_authorization()
         state_store.get_trace_evidence("trace-unauthorized-candidate-claim")
 
 
-def test_open_data_qualification_evidence_is_derived_from_the_authorized_policy(
+def test_open_data_source_basis_is_derived_without_qualifying_history(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
@@ -109,6 +110,13 @@ def test_open_data_qualification_evidence_is_derived_from_the_authorized_policy(
                 terms_url="https://data.gov.tw/license",
                 terms_content_sha256=terms_sha256,
                 attribution="政府資料開放授權條款－第1版（OGDL 1.0）",
+                distributions=tuple(
+                    SourceDistribution(
+                        dataset_id=dataset.dataset_id,
+                        distribution_url=dataset.distribution_url,
+                    )
+                    for dataset in manifest.source_basis.datasets
+                ),
             ),
         ),
         source_entitlements=(),
@@ -123,27 +131,33 @@ def test_open_data_qualification_evidence_is_derived_from_the_authorized_policy(
         object_repository=repository,
     )
 
-    evidence_id = workflow.register_open_data_qualification_evidence(
+    evidence_id = workflow.register_open_data_source_basis_evidence(
+        manifest=manifest,
         source_id=manifest.historical_source_id,
-        evidence_level="platform_observed",
         terms_content=terms_content,
         trace_id="trace-open-data-evidence",
     )
 
     assert state_store.get_verified_governance_artifact(
         artifact_id=evidence_id,
-        artifact_kind="open_data_qualification_evidence",
+        artifact_kind="open_data_source_basis_evidence",
     ) == {
         "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",
         "source_id": manifest.historical_source_id,
-        "evidence_level": "platform_observed",
-        "evidence_status": "qualified",
+        "verification_status": "verified",
         "license_id": "OGDL-1.0",
         "terms_url": "https://data.gov.tw/license",
         "terms_content_sha256": terms_sha256,
         "terms_object_id": f"sha256:{terms_sha256}",
         "attribution": "政府資料開放授權條款－第1版（OGDL 1.0）",
         "source_policy_version_id": "policy-open-data-history-v1",
+        "distributions": [
+            {
+                "dataset_id": dataset.dataset_id,
+                "distribution_url": dataset.distribution_url,
+            }
+            for dataset in manifest.source_basis.datasets
+        ],
     }
     claim = HistoricalAvailabilityClaim(
         source_id=manifest.historical_source_id,
@@ -158,23 +172,17 @@ def test_open_data_qualification_evidence_is_derived_from_the_authorized_policy(
         listing_lifecycle_verified=True,
         qualification_artifact_id=evidence_id,
     )
-    claim_id = workflow.register_historical_availability_claim(
-        claim,
-        trace_id="trace-open-data-qualified-history",
-    )
-    assert (
-        state_store.get_verified_governance_artifact(
-            artifact_id=claim_id,
-            artifact_kind="historical_availability_claim",
+    with pytest.raises(ValueError, match="qualified_claim_requires_historical_evidence"):
+        workflow.register_historical_availability_claim(
+            claim,
+            trace_id="trace-terms-cannot-qualify-history",
         )
-        == claim.as_payload()
-    )
-    with pytest.raises(ValueError, match="open_data_qualification_evidence_invalid"):
-        workflow.register_open_data_qualification_evidence(
+    with pytest.raises(ValueError, match="open_data_source_basis_evidence_invalid"):
+        workflow.register_open_data_source_basis_evidence(
+            manifest=manifest,
             source_id=manifest.historical_source_id,
-            evidence_level="invented",  # type: ignore[arg-type]
-            terms_content=terms_content,
-            trace_id="trace-open-data-invalid-level",
+            terms_content=b"",
+            trace_id="trace-open-data-empty-terms",
         )
 
 

@@ -75,6 +75,17 @@ class SourcePartitionRequest:
     expected_checkpoint: str | None
     policy_decision_id: str | None = None
     historical_availability_claim_id: str | None = None
+    distribution_id: str | None = None
+    distribution_url: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.distribution_id is None) != (self.distribution_url is None):
+            raise ValueError("source_distribution_request_incomplete")
+        if self.distribution_id is not None and (
+            not self.distribution_id.strip()
+            or not cast(str, self.distribution_url).startswith("https://")
+        ):
+            raise ValueError("source_distribution_request_invalid")
 
 
 @dataclass(frozen=True)
@@ -260,6 +271,11 @@ class TaiwanPriceSourceAdapter:
             raise
         if collection.request_id != request.request_id or collection.source_id != request.source_id:
             raise ValueError("source_collection_request_mismatch")
+        if (
+            request.distribution_url is not None
+            and collection.sanitized_source_uri != request.distribution_url
+        ):
+            raise ValueError("source_collection_distribution_mismatch")
         if collection.checkpoint_before != request.expected_checkpoint:
             raise ValueError("source_checkpoint_mismatch")
         decoded = self._decoder.decode(collection)
@@ -374,6 +390,8 @@ class DataSupply:
                 trace_id=request.trace_id,
                 correlation_id=request.request_id,
                 required_uses=PRICE_RESEARCH_REQUIRED_USES,
+                distribution_id=request.distribution_id,
+                distribution_url=request.distribution_url,
             ),
         )
         if decision.allowed:
@@ -653,6 +671,8 @@ class DataSupply:
 def _public_policy_reason(policy_reason_code: str) -> str:
     if policy_reason_code in {"source_policy_unknown", "source_entitlement_missing"}:
         return "source_basis_unverified"
+    if policy_reason_code == "source_distribution_not_authorized":
+        return "source_basis_unverified"
     if policy_reason_code in {
         "source_policy_use_denied",
         "source_entitlement_use_denied",
@@ -702,7 +722,6 @@ def _source_qualification_checks(status: str, reason_code: str) -> dict[str, str
     elif reason_code == "schema_incompatible":
         checks["schema"] = "blocked"
     elif reason_code in {
-        "insufficient_history_depth",
         "historical_evidence_unverified",
         "historical_evidence_reconstruction_only",
         "published_current_only",
@@ -851,6 +870,8 @@ def _source_retrieval_receipt_artifact(
         "source_id": request.source_id,
         "source_mode": request.mode,
         "source_revision": collection.source_revision,
+        "distribution_id": request.distribution_id,
+        "distribution_url": request.distribution_url,
         "sanitized_source_uri": collection.sanitized_source_uri,
         "acquired_at": _instant(collection.acquired_at),
         "checkpoint_before": collection.checkpoint_before,
@@ -883,27 +904,16 @@ def _quarantine_reason(
     ):
         return "incomplete_coverage"
     if request.mode == "historical":
-        try:
-            depth_boundary = request.end_date.replace(year=request.end_date.year - 7)
-        except ValueError:
-            depth_boundary = request.end_date.replace(
-                year=request.end_date.year - 7,
-                day=28,
-            )
-        if (
-            request.start_date > depth_boundary
-            or collection.coverage.observed_start > depth_boundary
-            or collection.coverage.observed_end < request.end_date
-        ):
-            return "insufficient_history_depth"
         if historical_claim is None:
             return "historical_evidence_unverified"
         if historical_claim.source_id != request.source_id:
             return "historical_evidence_unverified"
+        if historical_claim.evidence_status != "qualified":
+            return "historical_evidence_unverified"
         if historical_claim.evidence_level == "published_current_only":
             return "published_current_only"
         if (
-            historical_claim.observed_start > depth_boundary
+            historical_claim.observed_start > request.start_date
             or historical_claim.observed_end < request.end_date
             or historical_claim.schema_version != decoded.schema_version
             or not historical_claim.exact_sessions_verified
@@ -1075,6 +1085,7 @@ class ListingSelectionRelationship:
 class OpenDataDatasetBasis:
     dataset_id: str
     dataset_url: str
+    distribution_url: str
     qualification_scope: Literal[
         "current_eod",
         "current_corporate_action",
@@ -1087,6 +1098,7 @@ class OpenDataDatasetBasis:
         if (
             not self.dataset_id
             or self.dataset_url != f"https://data.gov.tw/dataset/{self.dataset_id}"
+            or not self.distribution_url.startswith("https://")
         ):
             raise ValueError("taiwan_open_data_dataset_basis_invalid")
 
@@ -1094,6 +1106,7 @@ class OpenDataDatasetBasis:
         return {
             "dataset_id": self.dataset_id,
             "dataset_url": self.dataset_url,
+            "distribution_url": self.distribution_url,
             "qualification_scope": self.qualification_scope,
         }
 
@@ -1525,6 +1538,7 @@ def load_taiwan_stock_pool_manifest(
                 OpenDataDatasetBasis(
                     dataset_id=str(dataset["dataset_id"]),
                     dataset_url=str(dataset["dataset_url"]),
+                    distribution_url=str(dataset["distribution_url"]),
                     qualification_scope=cast(
                         Literal[
                             "current_eod",

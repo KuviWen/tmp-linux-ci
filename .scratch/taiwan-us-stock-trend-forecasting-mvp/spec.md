@@ -84,7 +84,7 @@ Trace IDs: `P1-ENTRY-01`, `P1-TRACE-TW-01`, `P1-TRACE-US-01`, `P1-TRACE-OUTBOX-0
 
 ## Out of Scope
 
-- Formal market-data ingestion, seven-year historical qualification, trainable class-prior or logistic models, model promotion, and production prediction records.
+- Formal market-data ingestion, observed-history qualification, trainable class-prior or logistic models, model promotion, and production prediction records.
 - DocumentIntelligence, ForecastLab, news, filings, fundamentals, macro vintages, embeddings, and neural forecasting.
 - Formal OIDC, external SecretProvider, SeaweedFS, MLflow, the complete telemetry stack, Kubernetes production topology, HA, and disaster recovery.
 - Any claim that fixture evidence satisfies a source contract, unlocks a formal route, or demonstrates predictive value.
@@ -136,7 +136,7 @@ Qualify a representative 10＋10 eligibility manifest, activate only market path
 21. As a researcher, I want optional fundamentals, macro, and documents to be explicitly unavailable while price support remains eligible, so that missing modalities are not represented as zeros.
 22. As an operations engineer, I want T+90 data selection, feature construction, pinned assignment, forecast, validation, and atomic publication to finish by T+120, so that the daily service objective has a concrete workflow.
 23. As an operations engineer, I want each listing and horizon to publish a result or a machine-readable unavailable reason, so that partial success is complete and observable.
-24. As an operations engineer, I want source health, retries, circuits, quarantine, recovery, deadline incidents, webhook／SMTP delivery, and clock checks on the formal path, so that production behavior is not inferred from fixture success.
+24. As an operations engineer, I want source health, retries, circuits, quarantine, recovery, deadline incidents, locally configured notification delivery, and clock checks on the formal path, so that production behavior is not inferred from fixture success or an external notification account.
 25. As a security administrator, I want local trusted identity, local secret handling, and the same AuthorizationPolicy on workflow and research queries, so that official open sources cannot be exposed through a weaker path or require an external identity service.
 26. As a delivery owner, I want a content-addressed P2 bundle containing market qualification, model governance, shadow, rollback, policy, failure, and Compose evidence, so that the first eligible assignment is independently reviewable with zero-cost tools.
 
@@ -208,8 +208,8 @@ Add the deep DocumentIntelligence implementation and qualified Taiwan／United S
 2. As a source steward, I want the product to operate in official-documents-only mode, so that useful work never depends on paid news or a false news-integration claim.
 3. As a data engineer, I want Taiwan MOPS／OGDL announcements, monthly revenue, and financial summaries to form versioned document and FinancialFact datasets, so that official Taiwan evidence is reproducible.
 4. As a data engineer, I want SEC 8-K, 6-K, 10-Q, 10-K, and company facts to use the same deep document contract, so that United States filings do not create a separate pipeline vocabulary.
-5. As a data engineer, I want Taiwan CBC／DGBAS, United States BLS／BEA, and an approved OECD Economic Outlook dataflow to preserve release and vintage, so that later revisions do not rewrite old feature snapshots.
-6. As a source steward, I want FRED series allowlisted individually and unqualified IMF data held, so that public availability is not mistaken for blanket model rights.
+5. As a data engineer, I want Taiwan CBC／DGBAS, the unregistered BLS v1 interface, and any independently verified no-key OECD distribution to preserve release and vintage, so that later revisions do not rewrite old feature snapshots.
+6. As a source steward, I want BEA API、FRED／ALFRED and IMF interfaces that require an account, API key, sign-in or separate approval marked `excluded`／`unavailable`, so that their absence never becomes an external gate.
 7. As a document operator, I want Document, DocumentVersion, Rendition, and Segment identities separated, so that corrections, formats, attachments, and source rights remain traceable.
 8. As a document operator, I want hostile or malformed documents parsed without network, secrets, macros, scripts, or unbounded resources, so that one object cannot compromise the formal pipeline.
 9. As a document operator, I want extraction failures, low OCR quality, missing required attachments, and archive bombs to abstain or quarantine one object, so that coverage pressure never fabricates evidence.
@@ -245,7 +245,7 @@ Add the deep DocumentIntelligence implementation and qualified Taiwan／United S
 - EventMention remains an extracted claim; MarketEvent is a versioned projection that may retain disputed facts. MarketImpactAssessment is a non-causal association for a confirmed target, segment, and horizon.
 - ProcessingBundleVersion fixes parser, normalization, segmentation, language, linking, duplication, taxonomy, classifier, embedding, event, impact, quality, source-priority, runtime, code, and policy versions. Production work never resolves a latest model at run time.
 - Historical document reconstruction requires platform-observed or qualified archive-attested evidence plus a reconstruction bundle whose training cutoff, rules, models, review knowledge, and feature-freeze budget do not leak future information.
-- Taiwan paths cover MOPS／OGDL material information, monthly revenue, and financial summaries. United States paths cover SEC forms and company facts. Macro paths cover CBC＋DGBAS, BLS＋BEA, and an approved OECD forecast dataflow; FRED is per-series allowlist and IMF stays on legal hold until qualified.
+- Taiwan paths cover MOPS／OGDL material information, monthly revenue, and financial summaries. United States paths cover SEC forms and company facts. Macro paths cover CBC＋DGBAS, unregistered BLS v1 and an optional independently verified no-key OECD forecast distribution. BEA API、FRED／ALFRED and IMF account／key／sign-in interfaces are excluded rather than held for later qualification.
 - Commercial news adapters are excluded. A future official open-news dataset may enter only through a new versioned source policy and normal qualification, without account, application, separate contract or fee; its absence never blocks this product.
 - Expand only to the versioned support pool actually covered by qualified zero-cost sources and available local capacity; stratify it by industry, size, liquidity, listing age, share class／ADR, reporting regime, document density, and support status.
 - Train multimodal logistic candidates against price-only and each single-modality ablation using the same point-in-time folds, calibrators, cost scenarios, governance ledger, human approval, and five shadow cycles. Failure to improve leaves the P2 baseline assigned.

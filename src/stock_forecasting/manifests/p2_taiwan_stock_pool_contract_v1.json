@@ -34,26 +34,31 @@
       {
         "dataset_id": "11549",
         "dataset_url": "https://data.gov.tw/dataset/11549",
+        "distribution_url": "https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=open_data",
         "qualification_scope": "current_eod"
       },
       {
         "dataset_id": "89748",
         "dataset_url": "https://data.gov.tw/dataset/89748",
+        "distribution_url": "https://www.twse.com.tw/exchangeReport/TWT48U_ALL?response=open_data",
         "qualification_scope": "current_corporate_action"
       },
       {
         "dataset_id": "31612",
         "dataset_url": "https://data.gov.tw/dataset/31612",
+        "distribution_url": "https://mopsfin.twse.com.tw/opendata/t187ap45_L.csv",
         "qualification_scope": "current_dividend"
       },
       {
         "dataset_id": "18419",
         "dataset_url": "https://data.gov.tw/dataset/18419",
+        "distribution_url": "https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv",
         "qualification_scope": "current_listing_reference"
       },
       {
         "dataset_id": "11542",
         "dataset_url": "https://data.gov.tw/dataset/11542",
+        "distribution_url": "https://www.twse.com.tw/company/newlisting?response=open_data",
         "qualification_scope": "selection_support"
       }
     ]

@@ -15,7 +15,6 @@ from stock_forecasting.authorization import (
 from stock_forecasting.data_supply import (
     PRICE_RESEARCH_REQUIRED_USES,
     HistoricalAvailabilityClaim,
-    HistoricalEvidenceLevel,
     TaiwanStockPoolManifest,
 )
 from stock_forecasting.platform.object_repository import (
@@ -47,18 +46,18 @@ class TaiwanPriceQualificationWorkflow:
         self._clock = clock
         self._object_repository = object_repository
 
-    def register_open_data_qualification_evidence(
+    def register_open_data_source_basis_evidence(
         self,
         *,
+        manifest: TaiwanStockPoolManifest,
         source_id: str,
-        evidence_level: HistoricalEvidenceLevel,
         terms_content: bytes,
         trace_id: str,
     ) -> str:
         authorizations = self._authorize_sources(
             (source_id,),
             trace_id=trace_id,
-            operation="register_open_data_qualification_evidence",
+            operation="register_open_data_source_basis_evidence",
         )
         try:
             authorization = authorizations[0]
@@ -81,10 +80,17 @@ class TaiwanPriceQualificationWorkflow:
                 or not isinstance(policies[0].attribution, str)
                 or self._object_repository is None
                 or not terms_content
-                or evidence_level
-                not in {"platform_observed", "archive_attested", "published_current_only"}
+                or source_id not in {manifest.current_source_id, manifest.historical_source_id}
+                or {
+                    (distribution.dataset_id, distribution.distribution_url)
+                    for distribution in policies[0].distributions
+                }
+                != {
+                    (dataset.dataset_id, dataset.distribution_url)
+                    for dataset in manifest.source_basis.datasets
+                }
             ):
-                raise ValueError("open_data_qualification_evidence_invalid")
+                raise ValueError("open_data_source_basis_evidence_invalid")
             policy = policies[0]
             license_id = cast(str, policy.license_id)
             terms_url = cast(str, policy.terms_url)
@@ -105,7 +111,7 @@ class TaiwanPriceQualificationWorkflow:
         except ValueError as error:
             self._state_store._publish_governance_rejection(
                 payload={
-                    "operation": "register_open_data_qualification_evidence",
+                    "operation": "register_open_data_source_basis_evidence",
                     "reason_code": str(error),
                 },
                 trace_id=trace_id,
@@ -113,18 +119,24 @@ class TaiwanPriceQualificationWorkflow:
             )
             raise
         return self._state_store._publish_authorized_governance_artifact(
-            artifact_kind="open_data_qualification_evidence",
+            artifact_kind="open_data_source_basis_evidence",
             payload={
                 "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",
                 "source_id": source_id,
-                "evidence_level": evidence_level,
-                "evidence_status": "qualified",
+                "verification_status": "verified",
                 "license_id": license_id,
                 "terms_url": terms_url,
                 "terms_content_sha256": terms_sha256,
                 "terms_object_id": terms_object.object_id,
                 "attribution": attribution,
                 "source_policy_version_id": policy.version_id,
+                "distributions": [
+                    {
+                        "dataset_id": dataset.dataset_id,
+                        "distribution_url": dataset.distribution_url,
+                    }
+                    for dataset in manifest.source_basis.datasets
+                ],
             },
             trace_id=trace_id,
             authorizations=authorizations,
@@ -146,7 +158,7 @@ class TaiwanPriceQualificationWorkflow:
                 if claim.qualification_artifact_id is not None:
                     raise ValueError("candidate_claim_cannot_assert_qualification_evidence")
             else:
-                self._validate_source_basis_evidence(claim, authorization=authorizations[0])
+                self._validate_historical_evidence(claim)
         except ValueError as error:
             self._state_store._publish_governance_rejection(
                 payload={
@@ -164,23 +176,54 @@ class TaiwanPriceQualificationWorkflow:
             authorizations=authorizations,
         )
 
-    def _validate_source_basis_evidence(
+    def _validate_historical_evidence(
         self,
         claim: HistoricalAvailabilityClaim,
-        *,
-        authorization: Mapping[str, object] | None = None,
     ) -> None:
         evidence_id = claim.qualification_artifact_id
         if evidence_id is None:
-            raise ValueError("qualified_claim_requires_source_basis_evidence")
+            raise ValueError("qualified_claim_requires_historical_evidence")
         try:
             payload = self._state_store.get_verified_governance_artifact(
                 artifact_id=evidence_id,
-                artifact_kind="open_data_qualification_evidence",
+                artifact_kind="historical_qualification_evidence",
             )
         except KeyError as error:
-            raise ValueError("qualified_claim_requires_source_basis_evidence") from error
+            raise ValueError("qualified_claim_requires_historical_evidence") from error
         evidence = cast(dict[str, Any], payload)
+        if (
+            evidence.get("source_id") != claim.source_id
+            or evidence.get("evidence_level") != claim.evidence_level
+            or evidence.get("verification_status") != "verified"
+            or evidence.get("observed_start") != claim.observed_start.isoformat()
+            or evidence.get("observed_end") != claim.observed_end.isoformat()
+            or evidence.get("schema_version") != claim.schema_version
+            or evidence.get("exact_sessions_verified") is not True
+            or evidence.get("integrity_verified") is not True
+            or evidence.get("company_actions_verified") is not True
+            or evidence.get("listing_lifecycle_verified") is not True
+            or not isinstance(evidence.get("materialization_artifact_ids"), list)
+            or not evidence["materialization_artifact_ids"]
+        ):
+            raise ValueError("qualified_claim_requires_historical_evidence")
+
+    def _validate_source_basis_evidence(
+        self,
+        *,
+        source_id: str,
+        evidence_id: str,
+        manifest: TaiwanStockPoolManifest | None = None,
+        authorization: Mapping[str, object] | None = None,
+    ) -> None:
+        try:
+            payload = self._state_store.get_verified_governance_artifact(
+                artifact_id=evidence_id,
+                artifact_kind="open_data_source_basis_evidence",
+            )
+        except KeyError as error:
+            raise ValueError("formal_gate_requires_verified_source_basis") from error
+        evidence = cast(dict[str, Any], payload)
+        distributions = evidence.get("distributions")
         evidence_fields = (
             "license_id",
             "terms_url",
@@ -191,18 +234,26 @@ class TaiwanPriceQualificationWorkflow:
         )
         if (
             evidence.get("source_basis_id") != "TWSE-OGDL-OPEN-DATA-01"
-            or evidence.get("source_id") != claim.source_id
-            or evidence.get("evidence_level") != claim.evidence_level
-            or evidence.get("evidence_status") != "qualified"
+            or evidence.get("source_id") != source_id
+            or evidence.get("verification_status") != "verified"
             or evidence.get("license_id") != "OGDL-1.0"
             or evidence.get("terms_url") != "https://data.gov.tw/license"
             or len(str(evidence.get("terms_content_sha256", ""))) != 64
+            or not isinstance(distributions, list)
+            or not distributions
             or any(
                 not isinstance(evidence.get(field), str) or not evidence[field]
                 for field in evidence_fields
             )
+            or any(
+                not isinstance(distribution, dict)
+                or set(distribution) != {"dataset_id", "distribution_url"}
+                or not isinstance(distribution.get("dataset_id"), str)
+                or not isinstance(distribution.get("distribution_url"), str)
+                for distribution in distributions
+            )
         ):
-            raise ValueError("qualified_claim_requires_source_basis_evidence")
+            raise ValueError("formal_gate_requires_verified_source_basis")
         try:
             if self._object_repository is None:
                 raise ValueError
@@ -211,16 +262,25 @@ class TaiwanPriceQualificationWorkflow:
             ).read()
             if hashlib.sha256(terms_content).hexdigest() != evidence["terms_content_sha256"]:
                 raise ValueError
-        except (OSError, ObjectIntegrityError, ValueError):
-            raise ValueError("qualified_claim_requires_source_basis_evidence") from None
+        except (KeyError, OSError, ObjectIntegrityError, ValueError):
+            raise ValueError("formal_gate_requires_verified_source_basis") from None
+        if manifest is not None:
+            expected_distributions = [
+                {
+                    "dataset_id": dataset.dataset_id,
+                    "distribution_url": dataset.distribution_url,
+                }
+                for dataset in manifest.source_basis.datasets
+            ]
+            if distributions != expected_distributions:
+                raise ValueError("formal_gate_requires_verified_source_basis")
         if authorization is not None:
             policy_version_id = authorization.get("source_policy_version_id")
             policies = (
                 tuple(
                     policy
                     for policy in self._authorization_policy.source_policies
-                    if policy.version_id == policy_version_id
-                    and policy.dataset_id == claim.source_id
+                    if policy.version_id == policy_version_id and policy.dataset_id == source_id
                 )
                 if self._authorization_policy is not None
                 else ()
@@ -233,9 +293,11 @@ class TaiwanPriceQualificationWorkflow:
                 or evidence["terms_url"] != policies[0].terms_url
                 or evidence["terms_content_sha256"] != policies[0].terms_content_sha256
                 or evidence["attribution"] != policies[0].attribution
+                or {(item["dataset_id"], item["distribution_url"]) for item in distributions}
+                != {(item.dataset_id, item.distribution_url) for item in policies[0].distributions}
                 or authorization.get("source_entitlement_version_id") is not None
             ):
-                raise ValueError("qualified_claim_requires_source_basis_evidence")
+                raise ValueError("formal_gate_requires_verified_source_basis")
 
     def formal_qualification_available(
         self,
@@ -265,10 +327,18 @@ class TaiwanPriceQualificationWorkflow:
                 or claim.source_id != manifest.historical_source_id
             ):
                 return False
-            self._validate_source_basis_evidence(claim)
+            self._validate_historical_evidence(claim)
             gate_payload = self._state_store.get_verified_governance_artifact(
                 artifact_id=gate_id,
                 artifact_kind="taiwan_price_qualification_gate",
+            )
+            source_basis_evidence_id = gate_payload.get("source_basis_evidence_id")
+            if not isinstance(source_basis_evidence_id, str):
+                return False
+            self._validate_source_basis_evidence(
+                source_id=manifest.historical_source_id,
+                evidence_id=source_basis_evidence_id,
+                manifest=manifest,
             )
         except (KeyError, ValueError):
             return False
@@ -278,7 +348,8 @@ class TaiwanPriceQualificationWorkflow:
             "current_source_id": manifest.current_source_id,
             "historical_source_id": manifest.historical_source_id,
             "historical_availability_claim_id": claim_id,
-            "source_basis_qualification_artifact_id": claim.qualification_artifact_id,
+            "historical_qualification_artifact_id": claim.qualification_artifact_id,
+            "source_basis_evidence_id": source_basis_evidence_id,
             "selection_source_archive_bindings": source_archive_bindings,
             "evidence_status": "qualified",
             "permitted_use": "historical_training_backtest_and_internal_research",
@@ -289,6 +360,7 @@ class TaiwanPriceQualificationWorkflow:
         *,
         manifest: TaiwanStockPoolManifest,
         historical_availability_claim_id: str,
+        source_basis_evidence_id: str | None = None,
         trace_id: str,
     ) -> str:
         authorizations = self._authorize_sources(
@@ -322,15 +394,7 @@ class TaiwanPriceQualificationWorkflow:
                 or claim.source_id != manifest.historical_source_id
             ):
                 raise ValueError("formal_gate_requires_qualified_historical_claim")
-            historical_authorization = next(
-                authorization
-                for authorization in authorizations
-                if authorization["dataset_id"] == manifest.historical_source_id
-            )
-            self._validate_source_basis_evidence(
-                claim,
-                authorization=historical_authorization,
-            )
+            self._validate_historical_evidence(claim)
         except (KeyError, ValueError) as error:
             self._state_store._publish_governance_rejection(
                 payload={
@@ -341,6 +405,30 @@ class TaiwanPriceQualificationWorkflow:
                 authorizations=authorizations,
             )
             raise ValueError("formal_gate_requires_qualified_historical_claim") from error
+        try:
+            if source_basis_evidence_id is None:
+                raise ValueError("formal_gate_requires_verified_source_basis")
+            historical_authorization = next(
+                authorization
+                for authorization in authorizations
+                if authorization["dataset_id"] == manifest.historical_source_id
+            )
+            self._validate_source_basis_evidence(
+                source_id=manifest.historical_source_id,
+                evidence_id=source_basis_evidence_id,
+                manifest=manifest,
+                authorization=historical_authorization,
+            )
+        except (KeyError, ValueError) as error:
+            self._state_store._publish_governance_rejection(
+                payload={
+                    "operation": "register_formal_qualification_gate",
+                    "reason_code": "formal_gate_requires_verified_source_basis",
+                },
+                trace_id=trace_id,
+                authorizations=authorizations,
+            )
+            raise ValueError("formal_gate_requires_verified_source_basis") from error
         return self._state_store._publish_authorized_governance_artifact(
             artifact_kind="taiwan_price_qualification_gate",
             payload={
@@ -349,7 +437,8 @@ class TaiwanPriceQualificationWorkflow:
                 "current_source_id": manifest.current_source_id,
                 "historical_source_id": manifest.historical_source_id,
                 "historical_availability_claim_id": historical_availability_claim_id,
-                "source_basis_qualification_artifact_id": claim.qualification_artifact_id,
+                "historical_qualification_artifact_id": claim.qualification_artifact_id,
+                "source_basis_evidence_id": source_basis_evidence_id,
                 "selection_source_archive_bindings": source_archive_bindings,
                 "evidence_status": "qualified",
                 "permitted_use": "historical_training_backtest_and_internal_research",

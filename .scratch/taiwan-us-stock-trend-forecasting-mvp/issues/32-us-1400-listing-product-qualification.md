@@ -15,7 +15,7 @@ Status: ready-for-agent
 - [ ] 版本化美國支援池依官方零成本來源的實際 listing coverage 建立，記錄產業、規模、流動性、掛牌年齡、普通股／股別／ADR、ticker changes、delistings、document density 及支援狀態，不承諾固定 1,400。
 - [ ] 每個掛牌通過 issuer／security／listing、CIK／其他外部識別碼有效期、交易日曆、symbol history、unadjusted sessions、company actions、AdjustmentVersion、公開來源 policy 及 coverage qualification，不要求 principal entitlement。
 - [ ] Price support 使用相同 240／60 boundaries，半日市、暫停、臨時休市及 anchor 缺價不因方便而順延或移除掛牌。
-- [ ] SEC／fundamentals、BLS／BEA／official international macro 等 optional partitions 均區分 valid empty、uncovered、late、policy blocked 與 processing failure；商業新聞固定為 excluded／not-applicable。
+- [ ] SEC／fundamentals、免註冊 BLS v1／合格 no-key official international macro 等 optional partitions 均區分 valid empty、uncovered、late、policy blocked 與 processing failure；BEA API、FRED／ALFRED、IMF account interfaces 與商業新聞固定為 excluded／not-applicable。
 - [ ] 無合格官方零成本 EOD 或其他承諾來源時，相關 dataset／feature／掛牌資格明確 unavailable／blocked，不使用網站、測試帳號、付費 feed 或採購 fallback。
 - [ ] 支援池變更後建立新 FeatureSnapshots、support profile、training／evaluation evidence；前一 support-profile artifact 只能隔離 OOD／shadow，不能自動服務新增掛牌。
 - [ ] 正式／shadow EOD、REST／繁中矩陣與標的頁對支援池每個掛牌逐一展示結果或原因、support、cutoff、assignment、datasets、document evidence 及 policy。

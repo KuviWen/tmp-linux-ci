@@ -389,6 +389,16 @@ class ActionGrant:
 
 
 @dataclass(frozen=True)
+class SourceDistribution:
+    dataset_id: str
+    distribution_url: str
+
+    def __post_init__(self) -> None:
+        if not self.dataset_id.strip() or not self.distribution_url.startswith("https://"):
+            raise ValueError("source_distribution_invalid")
+
+
+@dataclass(frozen=True)
 class SourcePolicyVersion:
     version_id: str
     dataset_id: str
@@ -405,6 +415,7 @@ class SourcePolicyVersion:
     terms_url: str | None = None
     terms_content_sha256: str | None = None
     attribution: str | None = None
+    distributions: tuple[SourceDistribution, ...] = ()
 
     def __post_init__(self) -> None:
         if self.access_basis not in {"principal_entitlement", "open_data_terms"}:
@@ -428,6 +439,8 @@ class SourcePolicyVersion:
                 )
                 or not isinstance(self.attribution, str)
                 or not self.attribution.strip()
+                or not self.distributions
+                or len(set(self.distributions)) != len(self.distributions)
             ):
                 raise ValueError("open_data_terms_evidence_invalid")
         elif any(value is not None for value in terms_fields):
@@ -459,6 +472,14 @@ class OperationIntent:
     trace_id: str
     correlation_id: str
     required_uses: frozenset[SourceUseRight] = frozenset()
+    distribution_id: str | None = None
+    distribution_url: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.distribution_id is None) != (self.distribution_url is None):
+            raise ValueError("source_distribution_intent_incomplete")
+        if self.distribution_id is not None:
+            SourceDistribution(self.distribution_id, cast(str, self.distribution_url))
 
 
 @dataclass(frozen=True)
@@ -475,6 +496,8 @@ class AuthorizationDecision:
     purpose: AuthorizationPurpose
     environment: RuntimeEnvironment
     required_uses: frozenset[SourceUseRight]
+    distribution_id: str | None
+    distribution_url: str | None
     grant_version_id: str | None
     source_policy_version_id: str | None
     source_entitlement_version_id: str | None
@@ -617,6 +640,16 @@ def source_policy_version_payload(policy: SourcePolicyVersion) -> dict[str, obje
                 "terms_url": policy.terms_url,
                 "terms_content_sha256": policy.terms_content_sha256,
                 "attribution": policy.attribution,
+                "distributions": [
+                    {
+                        "dataset_id": distribution.dataset_id,
+                        "distribution_url": distribution.distribution_url,
+                    }
+                    for distribution in sorted(
+                        policy.distributions,
+                        key=lambda item: (item.dataset_id, item.distribution_url),
+                    )
+                ],
             }
         )
     return payload
@@ -663,6 +696,9 @@ def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, ob
     }
     if decision.required_uses:
         payload["required_uses"] = sorted(decision.required_uses)
+    if decision.distribution_id is not None or decision.distribution_url is not None:
+        payload["distribution_id"] = decision.distribution_id
+        payload["distribution_url"] = decision.distribution_url
     return payload
 
 
@@ -800,6 +836,8 @@ class AuthorizationPolicy:
         protection_class = prior_authorization.get("data_protection_class")
         environment = prior_authorization.get("environment")
         principal_id = prior_authorization.get("principal_id")
+        distribution_id = prior_authorization.get("distribution_id")
+        distribution_url = prior_authorization.get("distribution_url")
         if (
             prior_authorization.get("outcome") != "allowed"
             or prior_authorization.get("reason_code") != "authorized"
@@ -816,6 +854,9 @@ class AuthorizationPolicy:
             not in {"public_source", "internal", "licensed", "restricted", "secret"}
             or not isinstance(prior_required_uses, list)
             or required_uses != set(prior_required_uses)
+            or (distribution_id is not None and not isinstance(distribution_id, str))
+            or (distribution_url is not None and not isinstance(distribution_url, str))
+            or (distribution_id is None) != (distribution_url is None)
         ):
             raise SourceRightsEvidenceError("source_rights_prior_evidence_mismatch")
         try:
@@ -842,6 +883,8 @@ class AuthorizationPolicy:
             trace_id=trace_id,
             correlation_id=correlation_id,
             required_uses=required_uses,
+            distribution_id=distribution_id,
+            distribution_url=distribution_url,
         )
         rights = self._resolve_rights(
             principal_id=principal_id,
@@ -978,6 +1021,16 @@ class AuthorizationPolicy:
             reason_code = "source_policy_resource_state_denied"
         elif not intent.required_uses <= source_policy.allowed_uses:
             reason_code = "source_policy_use_denied"
+        elif (
+            source_policy.access_basis == "open_data_terms"
+            and intent.action == "market_data.collect"
+            and not any(
+                distribution.dataset_id == intent.distribution_id
+                and distribution.distribution_url == intent.distribution_url
+                for distribution in source_policy.distributions
+            )
+        ):
+            reason_code = "source_distribution_not_authorized"
         elif source_policy.data_protection_class not in data_protection_classes:
             reason_code = "data_protection_class_denied"
         elif source_policy.access_basis == "open_data_terms":
@@ -1046,6 +1099,9 @@ class AuthorizationPolicy:
         ]
         if intent.required_uses:
             decision_identity_parts.append(f"uses:{','.join(sorted(intent.required_uses))}")
+        if intent.distribution_id is not None or intent.distribution_url is not None:
+            decision_identity_parts.append(f"distribution:{intent.distribution_id}")
+            decision_identity_parts.append(f"distribution-url:{intent.distribution_url}")
         decision_identity = "/".join(decision_identity_parts)
         valid_until = intent.evaluated_at
         if allowed and grant is not None and source_policy is not None:
@@ -1066,6 +1122,8 @@ class AuthorizationPolicy:
             purpose=intent.purpose,
             environment=intent.environment,
             required_uses=intent.required_uses,
+            distribution_id=intent.distribution_id,
+            distribution_url=intent.distribution_url,
             grant_version_id=grant.version_id if grant is not None else None,
             source_policy_version_id=(
                 source_policy.version_id if source_policy is not None else None

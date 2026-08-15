@@ -14,6 +14,7 @@ from stock_forecasting.authorization import (
     RuntimeEnvironment,
     SecurityContext,
     SourceAccessBasis,
+    SourceDistribution,
     SourceEntitlement,
     SourcePolicyVersion,
     SourceUseRight,
@@ -140,6 +141,16 @@ def _policy_from_payload(payload: dict[str, Any]) -> AuthorizationPolicy:
                         item.get("terms_content_sha256"),
                     ),
                     attribution=cast(str | None, item.get("attribution")),
+                    distributions=tuple(
+                        SourceDistribution(
+                            dataset_id=str(distribution["dataset_id"]),
+                            distribution_url=str(distribution["distribution_url"]),
+                        )
+                        for distribution in cast(
+                            list[dict[str, object]],
+                            item.get("distributions", []),
+                        )
+                    ),
                 )
                 for item in policies_payload
             ),

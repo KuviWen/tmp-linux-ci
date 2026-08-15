@@ -1,18 +1,18 @@
 # 美國與全球市場資料來源盤點
 
-> **2026-08-15 product decision:** ADR 0017 排除部署者自備付費行情／新聞 adapter、個別申請與 external entitlement。SEC／官方總體等零成本來源只在其實際範圍內啟用；找不到完整官方零成本 EOD 時，美股價格模態保持 unavailable，而不是等待契約。
+> **2026-08-15 product decision:** ADR 0017 排除部署者自備付費行情／新聞 adapter、個別申請與 external entitlement。SEC／官方總體等零成本來源只在其實際範圍內啟用；找不到完整官方零成本 EOD 時，美股價格模態保持 unavailable，而不是等待契約。需要 account／API key／sign-in 的 BEA API、FRED／ALFRED 與 IMF interfaces 也固定 excluded；本文件下方的舊候選、白名單、法務／採購欄只保留為排除理由，不能轉成後續需求或 gate。
 
 查核日期：2026-08-13
 
 ## 結論
 
-生產導向 MVP 可以用官方免費來源完成 SEC 申報與大部分美國／全球總體特徵，但**不能只靠公開免費端點，便宣稱已取得美股調整後行情、完整公司行動、新聞原文及法人個股預測的七年保存與團隊使用權**。行情、公司行動與新聞應做成部署者自備授權的 adapter；沒有相符書面授權時停用，而不是退回未查明權利的網頁或非官方套件。
+生產導向 MVP 只使用不需帳號、API key、申請或付費的官方來源完成其實際可支援的 SEC 申報與總體特徵；**不能只靠公開免費端點，便宣稱已取得美股調整後行情、完整公司行動、新聞原文及法人個股預測的七年保存與團隊使用權**。缺少的行情、公司行動、新聞與總體來源直接標記 unavailable／excluded，不建立部署者自備授權 adapter 或申請待辦。
 
 建議的初始政策如下：
 
-- 預設可啟用：SEC EDGAR 的申報索引與 XBRL 事實、BLS、BEA，以及逐資料集確認授權後的 World Bank、OECD、BIS 統計。
-- 白名單後啟用：FRED／ALFRED、IMF 與發行人 IR。它們各有第三方資料、終止後刪除、或未查得明確再利用權等問題，不能以來源網域整體放行。
-- 簽約後啟用：NYSE、Nasdaq／Nasdaq Data Link、Alpha Vantage 等行情、公司行動、新聞與法人預測服務。訂單必須明載非顯示分析、衍生特徵、內部多人使用、七年原始資料保存、備份／災難復原、模型訓練與預測結果呈現權。
+- 預設可啟用：SEC EDGAR 的免 key 申報索引與 XBRL 事實、BLS unregistered v1，以及逐資料集驗證為免帳號／免 key 的 World Bank、OECD、BIS distributions。
+- 固定排除：BEA API、FRED／ALFRED、IMF 與任何需要帳號、API key、sign-in、個別申請或書面許可的介面；不保留等待資格的 adapter。
+- 固定排除：NYSE、Nasdaq／Nasdaq Data Link、Alpha Vantage 等付費行情、公司行動、新聞與法人預測服務；產品支援範圍不以採購補足。
 - 新聞的安全預設只保存不可變的索引證據（來源、URL、標題、作者、發布／首次取得時間、雜湊、語言、標的映射）；全文只有在逐來源授權明示允許時保存。SEC 申報與公司新聞不是一般新聞媒體全文授權的替代品。
 
 本文件是工程授權盤點，不是法律意見；表中的「可用」是依查核日公開一手文件所做的保守產品判斷。

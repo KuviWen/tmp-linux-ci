@@ -155,20 +155,20 @@ Gate 的數值與細節只存在於權威領域契約；後續規格引用 trace
 ### Entry
 
 - `P3-ENTRY-01`：P2 bundle通過；台美官方文件、基本面與總體來源已有合格政策、時間點及歷史證據。
-- `P3-ENTRY-02`：新聞權利依賴可未完成，但系統及bundle必須明確標為 `official-documents-only`，不得宣稱新聞整合完成。
+- `P3-ENTRY-02`：文字模態以 `official-documents-only` 為完整範圍；商業新聞固定 `excluded`／`not-applicable`，不建立權利依賴或等待狀態。
 
 ### Tracer bullets
 
 - `P3-TRACE-DOC-TW-01`：台灣 MOPS／OGDL 重大訊息、月營收及財報摘要形成版本化文件、FinancialFact、標的連結、annotation與證據。
 - `P3-TRACE-DOC-US-01`：SEC 8-K／6-K／10-Q／10-K／company facts經相同深 `DocumentPipeline.process` interface形成美國路徑。
-- `P3-TRACE-MACRO-01`：CBC＋DGBAS、BLS＋BEA及一個權利核准的OECD Economic Outlook dataflow保存release／vintage；FRED只allowlist，IMF未確認前legal hold。
-- `P3-TRACE-NEWS-01`：若台美各有合格來源，contract-required新聞adapter驗證保存、模型／embedding、情緒、展示及刪除模式；缺任一市場則正式產品gate阻斷。
+- `P3-TRACE-MACRO-01`：CBC＋DGBAS、免註冊 BLS v1 及任一獨立驗證為 no-key 的 OECD distribution 保存 release／vintage；BEA API、FRED／ALFRED 與 IMF account interfaces 固定 excluded／unavailable。
+- `P3-TRACE-NEWS-01`：台美商業新聞以相同 policy／feature／REST 契約呈現 `excluded`／`not-applicable`；不建立 collector、credential、申請或產品 gate。
 - `P3-TRACE-NLP-01`：安全sandbox、去重、confirmed連結、taxonomy、事件、凍結多語embedding、影響評估及版本化review queue通過中英文golden corpus。
 - `P3-TRACE-MODEL-01`：multimodal logistic對價量only與各單模態做ablation；只有完整gate、人工核准與五次shadow通過才可取代價量baseline。
 
 ### Exit
 
-- `P3-EXIT-01`：100＋100代表性manifest、五次EOD shadow、T+120／REST SLO、文件sandbox／刪除／修訂／裁決與golden品質全部通過；完整研究介面展示機率、信心、支援、影響因素、允許證據、vintage、回測及譜系。
+- `P3-EXIT-01`：實際合格支援池 manifest、五次EOD shadow、T+120／REST SLO、文件sandbox／刪除／修訂／裁決與golden品質全部通過；完整研究介面展示機率、信心、支援、影響因素、允許證據、vintage、回測及譜系。
 - 結構化fact exact match `>=99.5%`、confirmed link precision `>=99%`、taxonomy macro-F1 `>=0.80`且ECE `<=0.10`、事件macro-F1 `>=0.75`；錯公司、錯證據或繞政策是hard failure。
 
 ## P4：受治理神經模型
