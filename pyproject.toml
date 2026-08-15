@@ -9,6 +9,7 @@ description = "Traceable Taiwan and United States stock-trend research support"
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.16,<2",
+  "cryptography>=50,<51",
   "dagster>=1.11,<2",
   "dagster-webserver>=1.13,<2",
   "fastapi>=0.116,<1",

@@ -1,6 +1,6 @@
 # 深模組、REST、事件與排程契約
 
-> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文任何必須連接商業 provider、外部 entitlement service、Kubernetes 或固定規模的部署假設；深模組與 REST 必須以官方零成本來源及 stable unavailable／excluded outcomes 表達缺口。本文其餘 module／event／workflow seam 契約仍有效。
+> **2026-08-15 product boundary:** ADR 0017、0018 與主 spec 的 `COST-0-01` 取代本文任何必須連接付費 provider、外部 entitlement service、Kubernetes 或固定規模的部署假設；深模組與 REST 可使用用途合格的零付費 authenticated provider，並以 stable `credential_required`／unavailable／excluded outcomes 表達缺口。來源憑證只經 SecretProvider，provider SDK 型別不得進入 application interface；本文其餘 module／event／workflow seam 契約仍有效。
 
 ## 狀態與範圍
 

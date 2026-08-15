@@ -15,6 +15,10 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "/api/v1/research/listings/{listing_id}/price-eligibility",
         "/api/v1/operations/health",
         "/api/v1/operations/sources",
+        "/api/v1/operations/source-credentials",
+        "/api/v1/operations/source-credentials/{provider_id}",
+        "/api/v1/operations/source-credentials/{provider_id}/rotations",
+        "/api/v1/operations/source-credentials/{provider_id}/validations",
     }
     prediction = contract["components"]["schemas"]["PredictionResult"]
     assert prediction["oneOf"] == [
@@ -82,13 +86,44 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     }
     assert eligibility["properties"]["status"]["enum"] == [
         "qualified",
+        "credential_required",
         "policy_blocked",
         "quarantined",
         "deferred",
     ]
+    assert eligibility["properties"]["market"] == {
+        "type": "string",
+        "enum": ["XTAI", "XNAS", "XNYS"],
+    }
+    assert eligibility["properties"]["source_basis"] == {
+        "oneOf": [
+            {"$ref": "#/components/schemas/OpenDataSourceBasis"},
+            {"$ref": "#/components/schemas/ZeroFeeAuthenticatedSourceBasis"},
+        ]
+    }
+    zero_fee_basis = contract["components"]["schemas"]["ZeroFeeAuthenticatedSourceBasis"]
+    assert set(zero_fee_basis["required"]) == {
+        "account_required",
+        "basis_type",
+        "credential_kind",
+        "fee_required",
+        "members",
+        "plan_id",
+        "principal_classification",
+        "provider_id",
+        "qualification_status",
+        "source_basis_id",
+        "terms_content_sha256",
+        "terms_url",
+    }
+    assert zero_fee_basis["properties"]["terms_content_sha256"]["type"] == [
+        "string",
+        "null",
+    ]
     source = contract["components"]["schemas"]["PriceSourceEligibility"]
     assert source["properties"]["status"]["enum"] == [
         "published",
+        "credential_required",
         "policy_blocked",
         "quarantined",
         "deferred",
@@ -141,4 +176,27 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "source_policy_version_id",
         "source_entitlement_version_id",
         "evidence_artifact_id",
+    }
+    credential = contract["components"]["schemas"]["SourceCredentialMetadata"]
+    assert credential["additionalProperties"] is False
+    assert set(credential["properties"]) == {
+        "provider_id",
+        "display_name",
+        "credential_kind",
+        "required_fields",
+        "readiness",
+        "reason_code",
+        "secret_ref_id",
+        "version",
+        "configured_at",
+        "last_validated_at",
+        "revoked_at",
+        "registration_url",
+        "key_management_url",
+    }
+    assert "credential_fields" not in credential["properties"]
+    write_request = contract["components"]["schemas"]["SourceCredentialWriteRequest"]
+    assert write_request["properties"]["credential_fields"]["additionalProperties"] == {
+        "type": "string",
+        "writeOnly": True,
     }

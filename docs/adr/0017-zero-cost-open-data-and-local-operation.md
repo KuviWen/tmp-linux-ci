@@ -1,5 +1,7 @@
 # 零成本公開資料與本機運行是產品邊界
 
+> **2026-08-15 partial supersession:** ADR 0018 放寬本文的「免帳號、免 API key、免個別申請」限制，允許符合用途且不付費的自助來源方案；本文的零採購、本機運行、不可偽造資格與 fail-closed 原則仍有效。
+
 本專案只供個人與內部團體研究使用。自 P2 起，必要資料來源必須是官方機關或交易場所逐一明示的公開資料集／官方文件，且正式路徑不得要求付費、帳號、API key、申請文件、另行書面契約或部署者取得外部 entitlement。公開資料使用依據以版本化 `SourcePolicyVersion` 保存資料集 ID、distribution、公開條款／license、條款內容雜湊、顯名文字、允許用途與有效期間；使用公開條款本身不被描述成無條件，但它不形成個別申請或採購依賴。`ActionGrant` 仍控制誰可執行系統操作，公開資料政策則控制該資料可否被保存、轉換、建模、備份與內部展示。P2 行情路徑以 `retain_observed_history` 表示保存實際取得歷史的用途，不得以 `retain_7_years` 作為接觸來源、治理或查詢的硬閘門；可用深度由不可變歷史證據另行判定。
 
 當官方零成本資料沒有足夠歷史、公司行動、身分生命週期、revision 或涵蓋時，系統只保存從首次取得日起的不可變 platform-observed history，並將缺口呈現為 `unavailable`、`degraded` 或明確的 qualification failure；不得改用爬蟲、互動頁、人工下載、測試帳號、商業資料或虛構證據。回測仍固定標籤、交易日端點、purge、embargo 與 once-only tests，但訓練期間及可形成的 folds 由實際已驗證歷史決定並綁入 `TrainingIntent`；統計、類別或校準支援不足時不建立正式模型，不能用固定七年承諾掩蓋不存在的資料。

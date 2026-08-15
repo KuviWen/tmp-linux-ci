@@ -1,6 +1,6 @@
 # 10 — 正式 EOD 服務指派與預測發布
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 讓一個經 bootstrap 治理核准的 logistic ModelArtifact 透過原子 production 服務指派進入正式日終 workflow；每個市場在 T+90 固定資料選擇、FeatureSnapshot 與 assignment，於 T+120 前交易發布 10＋10 每掛牌三期間結果或機器原因，並在研究、營運與 audit 中完整可追溯。
 

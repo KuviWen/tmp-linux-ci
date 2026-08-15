@@ -1,6 +1,6 @@
 # 25 — 共享台美 quality-aware gated forecaster
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 將 price anchor、基本面、總體及文件表示整合為共享台美、三期間 quality-aware gated neural candidate，使用市場別正規化／小型 adapter、期間別 gate／head 與六個 calibrators，完整走過 FeatureSnapshot、shadow EOD、research projection 及六個 market × horizon cell 的治理證據。
 

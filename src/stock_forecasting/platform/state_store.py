@@ -37,6 +37,7 @@ from stock_forecasting.platform.schema import (
     production_prediction_records,
     research_records,
     security_audit_events,
+    source_credential_versions,
     trace_artifact_refs,
     work_attempts,
 )
@@ -459,6 +460,233 @@ class StateStore:
         authorization["outcome"] = row["outcome"]
         authorization["trace_id"] = row["trace_id"]
         return authorization
+
+    def get_source_credential(self, *, provider_id: str) -> dict[str, object] | None:
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(source_credential_versions)
+                    .where(source_credential_versions.c.provider_id == provider_id)
+                    .order_by(source_credential_versions.c.version.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            return None
+        result = dict(row)
+        if result.get("revoked_at") is None:
+            result.pop("revoked_at", None)
+        return result
+
+    def publish_source_credential(
+        self,
+        *,
+        provider_id: str,
+        secret_ref_id: str,
+        readiness: str,
+        reason_code: str,
+        configured_at: str,
+        authorization: dict[str, object],
+        trace_id: str,
+    ) -> dict[str, object]:
+        with self.engine.begin() as connection:
+            latest_version = int(
+                connection.execute(
+                    select(func.coalesce(func.max(source_credential_versions.c.version), 0)).where(
+                        source_credential_versions.c.provider_id == provider_id
+                    )
+                ).scalar_one()
+            )
+            if latest_version != 0:
+                raise ImmutableStateConflict("source_credential_already_configured")
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization,
+                outcome="allowed",
+                trace_id=trace_id,
+            )
+            connection.execute(
+                source_credential_versions.insert().values(
+                    provider_id=provider_id,
+                    version=1,
+                    secret_ref_id=secret_ref_id,
+                    readiness=readiness,
+                    reason_code=reason_code,
+                    configured_at=configured_at,
+                    last_validated_at=None,
+                    revoked_at=None,
+                )
+            )
+        return {
+            "provider_id": provider_id,
+            "readiness": readiness,
+            "reason_code": reason_code,
+            "secret_ref_id": secret_ref_id,
+            "version": 1,
+            "configured_at": configured_at,
+            "last_validated_at": None,
+        }
+
+    def rotate_source_credential(
+        self,
+        *,
+        provider_id: str,
+        secret_ref_id: str,
+        readiness: str,
+        reason_code: str,
+        configured_at: str,
+        authorization: dict[str, object],
+        trace_id: str,
+    ) -> tuple[dict[str, object], str]:
+        with self.engine.begin() as connection:
+            current = (
+                connection.execute(
+                    select(source_credential_versions)
+                    .where(source_credential_versions.c.provider_id == provider_id)
+                    .order_by(source_credential_versions.c.version.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if current is None or current["readiness"] == "revoked":
+                raise ImmutableStateConflict("source_credential_not_configured")
+            version = int(current["version"]) + 1
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization,
+                outcome="allowed",
+                trace_id=trace_id,
+            )
+            connection.execute(
+                source_credential_versions.insert().values(
+                    provider_id=provider_id,
+                    version=version,
+                    secret_ref_id=secret_ref_id,
+                    readiness=readiness,
+                    reason_code=reason_code,
+                    configured_at=configured_at,
+                    last_validated_at=None,
+                    revoked_at=None,
+                )
+            )
+        return (
+            {
+                "provider_id": provider_id,
+                "readiness": readiness,
+                "reason_code": reason_code,
+                "secret_ref_id": secret_ref_id,
+                "version": version,
+                "configured_at": configured_at,
+                "last_validated_at": None,
+            },
+            str(current["secret_ref_id"]),
+        )
+
+    def revoke_source_credential(
+        self,
+        *,
+        provider_id: str,
+        revoked_at: str,
+        authorization: dict[str, object],
+        trace_id: str,
+    ) -> dict[str, object]:
+        with self.engine.begin() as connection:
+            current = (
+                connection.execute(
+                    select(source_credential_versions)
+                    .where(source_credential_versions.c.provider_id == provider_id)
+                    .order_by(source_credential_versions.c.version.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if current is None or current["readiness"] == "revoked":
+                raise ImmutableStateConflict("source_credential_not_configured")
+            version = int(current["version"]) + 1
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization,
+                outcome="allowed",
+                trace_id=trace_id,
+            )
+            connection.execute(
+                source_credential_versions.insert().values(
+                    provider_id=provider_id,
+                    version=version,
+                    secret_ref_id=current["secret_ref_id"],
+                    readiness="revoked",
+                    reason_code="source_credential_revoked",
+                    configured_at=current["configured_at"],
+                    last_validated_at=current["last_validated_at"],
+                    revoked_at=revoked_at,
+                )
+            )
+        return {
+            "provider_id": provider_id,
+            "readiness": "revoked",
+            "reason_code": "source_credential_revoked",
+            "secret_ref_id": current["secret_ref_id"],
+            "version": version,
+            "configured_at": current["configured_at"],
+            "last_validated_at": current["last_validated_at"],
+            "revoked_at": revoked_at,
+        }
+
+    def record_source_credential_validation(
+        self,
+        *,
+        provider_id: str,
+        readiness: str,
+        reason_code: str,
+        validated_at: str,
+        authorization: dict[str, object],
+        trace_id: str,
+    ) -> dict[str, object]:
+        with self.engine.begin() as connection:
+            current = (
+                connection.execute(
+                    select(source_credential_versions)
+                    .where(source_credential_versions.c.provider_id == provider_id)
+                    .order_by(source_credential_versions.c.version.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if current is None or current["readiness"] == "revoked":
+                raise ImmutableStateConflict("source_credential_not_configured")
+            version = int(current["version"]) + 1
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization,
+                outcome="allowed",
+                trace_id=trace_id,
+            )
+            connection.execute(
+                source_credential_versions.insert().values(
+                    provider_id=provider_id,
+                    version=version,
+                    secret_ref_id=current["secret_ref_id"],
+                    readiness=readiness,
+                    reason_code=reason_code,
+                    configured_at=current["configured_at"],
+                    last_validated_at=validated_at,
+                    revoked_at=None,
+                )
+            )
+        return {
+            "provider_id": provider_id,
+            "readiness": readiness,
+            "reason_code": reason_code,
+            "secret_ref_id": current["secret_ref_id"],
+            "version": version,
+            "configured_at": current["configured_at"],
+            "last_validated_at": validated_at,
+        }
 
     def get_price_research_eligibility(self, *, listing_id: str) -> dict[str, Any]:
         with self.engine.connect() as connection:

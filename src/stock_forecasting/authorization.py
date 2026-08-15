@@ -22,8 +22,10 @@ AuthorizationAction = Literal[
     "market_data.collect",
     "price_research_eligibility.read",
     "price_qualification.govern",
+    "source_credential.read",
+    "source_credential.manage",
 ]
-AuthorizationPurpose = Literal["fixture_research", "price_research"]
+AuthorizationPurpose = Literal["fixture_research", "price_research", "source_administration"]
 AuthorizationResourceState = Literal["active"]
 SourceUseRight = Literal[
     "ingest",
@@ -34,7 +36,7 @@ SourceUseRight = Literal[
     "internal_display",
     "backup_restore",
 ]
-SourceAccessBasis = Literal["principal_entitlement", "open_data_terms"]
+SourceAccessBasis = Literal["principal_entitlement", "open_data_terms", "zero_fee_plan"]
 
 _LOCAL_KEY_ENVIRONMENTS = frozenset({"local", "development"})
 _CONTEXT_ISSUER = object()
@@ -330,6 +332,8 @@ class LocalApiKeyIdentity:
                         "market_data.collect",
                         "price_research_eligibility.read",
                         "price_qualification.govern",
+                        "source_credential.read",
+                        "source_credential.manage",
                     }
                     for scope in scopes
                 )
@@ -412,14 +416,25 @@ class SourcePolicyVersion:
     valid_to: datetime = _MAX_INSTANT
     allowed_uses: frozenset[SourceUseRight] = frozenset()
     access_basis: SourceAccessBasis = "principal_entitlement"
+    source_basis_id: str | None = None
     license_id: str | None = None
     terms_url: str | None = None
     terms_content_sha256: str | None = None
     attribution: str | None = None
     distributions: tuple[SourceDistribution, ...] = ()
+    provider_id: str | None = None
+    plan_id: str | None = None
+    principal_classification: str | None = None
+    credential_kind: str | None = None
+    account_required: bool | None = None
+    fee_required: bool | None = None
 
     def __post_init__(self) -> None:
-        if self.access_basis not in {"principal_entitlement", "open_data_terms"}:
+        if self.access_basis not in {
+            "principal_entitlement",
+            "open_data_terms",
+            "zero_fee_plan",
+        }:
             raise ValueError("source_access_basis_invalid")
         terms_fields = (
             self.license_id,
@@ -444,7 +459,63 @@ class SourcePolicyVersion:
                 or len(set(self.distributions)) != len(self.distributions)
             ):
                 raise ValueError("open_data_terms_evidence_invalid")
-        elif any(value is not None for value in terms_fields):
+            if any(
+                value is not None
+                for value in (
+                    self.provider_id,
+                    self.plan_id,
+                    self.principal_classification,
+                    self.credential_kind,
+                    self.account_required,
+                    self.fee_required,
+                )
+            ):
+                raise ValueError("open_data_terms_cannot_assert_provider_plan")
+        elif self.access_basis == "zero_fee_plan":
+            if (
+                not isinstance(self.source_basis_id, str)
+                or not self.source_basis_id.strip()
+                or any(not isinstance(value, str) or not value.strip() for value in terms_fields)
+                or not self.distributions
+                or len(set(self.distributions)) != len(self.distributions)
+                or any(
+                    not isinstance(value, str) or not value.strip()
+                    for value in (
+                        self.provider_id,
+                        self.plan_id,
+                        self.principal_classification,
+                        self.credential_kind,
+                    )
+                )
+                or self.account_required is not True
+                or self.fee_required is not False
+            ):
+                raise ValueError("zero_fee_plan_evidence_invalid")
+            if (
+                not cast(str, self.terms_url).startswith("https://")
+                or len(cast(str, self.terms_content_sha256)) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in cast(str, self.terms_content_sha256)
+                )
+            ):
+                raise ValueError("zero_fee_plan_evidence_invalid")
+        elif (
+            self.source_basis_id is not None
+            or any(value is not None for value in terms_fields)
+            or self.distributions
+            or any(
+                value is not None
+                for value in (
+                    self.provider_id,
+                    self.plan_id,
+                    self.principal_classification,
+                    self.credential_kind,
+                    self.account_required,
+                    self.fee_required,
+                )
+            )
+        ):
             raise ValueError("entitlement_policy_cannot_assert_open_data_terms")
 
 
@@ -633,7 +704,9 @@ def source_policy_version_payload(policy: SourcePolicyVersion) -> dict[str, obje
     }
     if policy.allowed_uses:
         payload["allowed_uses"] = sorted(policy.allowed_uses)
-    if policy.access_basis == "open_data_terms":
+    if policy.source_basis_id is not None:
+        payload["source_basis_id"] = policy.source_basis_id
+    if policy.access_basis in {"open_data_terms", "zero_fee_plan"}:
         payload.update(
             {
                 "access_basis": policy.access_basis,
@@ -651,6 +724,17 @@ def source_policy_version_payload(policy: SourcePolicyVersion) -> dict[str, obje
                         key=lambda item: (item.dataset_id, item.distribution_url),
                     )
                 ],
+            }
+        )
+    if policy.access_basis == "zero_fee_plan":
+        payload.update(
+            {
+                "provider_id": policy.provider_id,
+                "plan_id": policy.plan_id,
+                "principal_classification": policy.principal_classification,
+                "credential_kind": policy.credential_kind,
+                "account_required": policy.account_required,
+                "fee_required": policy.fee_required,
             }
         )
     return payload
@@ -1023,7 +1107,7 @@ class AuthorizationPolicy:
         elif not intent.required_uses <= source_policy.allowed_uses:
             reason_code = "source_policy_use_denied"
         elif (
-            source_policy.access_basis == "open_data_terms"
+            source_policy.access_basis in {"open_data_terms", "zero_fee_plan"}
             and intent.action == "market_data.collect"
             and not any(
                 distribution.dataset_id == intent.distribution_id
@@ -1332,4 +1416,133 @@ def build_taiwan_price_blocked_authorization_policy(
         action_grants=(grant,),
         source_policies=(source_policy,),
         source_entitlements=(entitlement,),
+    )
+
+
+def build_us_zero_fee_engineering_authorization_policy(
+    context: SecurityContext,
+) -> AuthorizationPolicy:
+    actions: frozenset[AuthorizationAction] = frozenset(
+        {
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "source_credential.read",
+            "source_credential.manage",
+        }
+    )
+    required_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_observed_history",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
+    )
+    bars_actions: frozenset[AuthorizationAction] = frozenset({"market_data.collect"})
+    read_actions: frozenset[AuthorizationAction] = frozenset({"price_research_eligibility.read"})
+    credential_actions: frozenset[AuthorizationAction] = frozenset(
+        {"source_credential.read", "source_credential.manage"}
+    )
+    policies = (
+        SourcePolicyVersion(
+            version_id="ticket-07-engineering/alpaca-bars-policy-v1",
+            dataset_id="alpaca-us-stock-bars",
+            allowed_actions=bars_actions,
+            purposes=frozenset({"price_research"}),
+            environments=frozenset({context.environment}),
+            data_protection_class="licensed",
+            resource_states=frozenset({"active"}),
+            valid_from=context.issued_at,
+            valid_to=context.expires_at,
+            allowed_uses=required_uses,
+            access_basis="zero_fee_plan",
+            source_basis_id="ALPACA-BASIC-US-MARKET-DATA-01",
+            license_id="alpaca-customer-agreement-engineering-unverified",
+            terms_url=("https://files.alpaca.markets/disclosures/library/TermsAndConditions.pdf"),
+            terms_content_sha256=(
+                "2dc774d4aeeafbe4c7f0565e7842d932bc8bc10488af805fce43b8734e7b9859"
+            ),
+            attribution="Alpaca Market Data Basic",
+            distributions=(
+                SourceDistribution(
+                    dataset_id="alpaca-us-stock-bars-v2",
+                    distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+                ),
+            ),
+            provider_id="alpaca-market-data-basic",
+            plan_id="basic-2026-08-15",
+            principal_classification="individual_non_commercial",
+            credential_kind="api_key_pair",
+            account_required=True,
+            fee_required=False,
+        ),
+        SourcePolicyVersion(
+            version_id="ticket-07-engineering/price-read-policy-v1",
+            dataset_id="price-research-eligibility",
+            allowed_actions=read_actions,
+            purposes=frozenset({"price_research"}),
+            environments=frozenset({context.environment}),
+            data_protection_class="licensed",
+            resource_states=frozenset({"active"}),
+            valid_from=context.issued_at,
+            valid_to=context.expires_at,
+        ),
+        SourcePolicyVersion(
+            version_id="ticket-07-engineering/credential-metadata-policy-v1",
+            dataset_id="source-credential-metadata",
+            allowed_actions=credential_actions,
+            purposes=frozenset({"source_administration"}),
+            environments=frozenset({context.environment}),
+            data_protection_class="restricted",
+            resource_states=frozenset({"active"}),
+            valid_from=context.issued_at,
+            valid_to=context.expires_at,
+        ),
+    )
+    entitlement_contracts: tuple[
+        tuple[
+            str,
+            frozenset[AuthorizationAction],
+            frozenset[AuthorizationPurpose],
+        ],
+        ...,
+    ] = (
+        ("alpaca-us-stock-bars", bars_actions, frozenset({"price_research"})),
+        ("price-research-eligibility", read_actions, frozenset({"price_research"})),
+        (
+            "source-credential-metadata",
+            credential_actions,
+            frozenset({"source_administration"}),
+        ),
+    )
+    entitlements = tuple(
+        SourceEntitlement(
+            version_id=f"ticket-07-engineering/{dataset_id}-entitlement-v1",
+            principal_id=context.principal_id,
+            dataset_id=dataset_id,
+            status="active",
+            allowed_actions=allowed_actions,
+            purposes=purposes,
+            environments=frozenset({context.environment}),
+            valid_from=context.issued_at,
+            valid_to=context.expires_at,
+            allowed_uses=(required_uses if dataset_id == "alpaca-us-stock-bars" else frozenset()),
+        )
+        for dataset_id, allowed_actions, purposes in entitlement_contracts
+    )
+    return AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="ticket-07-engineering/action-grant-v1",
+                principal_id=context.principal_id,
+                actions=actions,
+                environment=context.environment,
+                valid_from=context.issued_at,
+                valid_to=context.expires_at,
+            ),
+        ),
+        source_policies=policies,
+        source_entitlements=entitlements,
     )

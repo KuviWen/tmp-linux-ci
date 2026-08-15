@@ -33,6 +33,7 @@ FIXTURE_PURPOSE_REMOVED_POLICY_SET = "fixture-purpose-removed-v1"
 FIXTURE_GRANT_MISSING_POLICY_SET = "fixture-grant-missing-v1"
 FIXTURE_POLICY_UNKNOWN_SET = "fixture-policy-unknown-v1"
 TICKET_06_POLICY_BLOCKED_SET = "ticket-06-taiwan-policy-blocked-v1"
+TICKET_07_ENGINEERING_POLICY_SET = "ticket-07-us-zero-fee-engineering-v1"
 
 
 def _parse_instant(value: object) -> datetime:
@@ -134,6 +135,7 @@ def _policy_from_payload(payload: dict[str, Any]) -> AuthorizationPolicy:
                         SourceAccessBasis,
                         item.get("access_basis", "principal_entitlement"),
                     ),
+                    source_basis_id=cast(str | None, item.get("source_basis_id")),
                     license_id=cast(str | None, item.get("license_id")),
                     terms_url=cast(str | None, item.get("terms_url")),
                     terms_content_sha256=cast(
@@ -151,6 +153,15 @@ def _policy_from_payload(payload: dict[str, Any]) -> AuthorizationPolicy:
                             item.get("distributions", []),
                         )
                     ),
+                    provider_id=cast(str | None, item.get("provider_id")),
+                    plan_id=cast(str | None, item.get("plan_id")),
+                    principal_classification=cast(
+                        str | None,
+                        item.get("principal_classification"),
+                    ),
+                    credential_kind=cast(str | None, item.get("credential_kind")),
+                    account_required=cast(bool | None, item.get("account_required")),
+                    fee_required=cast(bool | None, item.get("fee_required")),
                 )
                 for item in policies_payload
             ),

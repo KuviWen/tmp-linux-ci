@@ -20,6 +20,7 @@ from stock_forecasting.platform.schema import (
     production_prediction_records,
     research_records,
     security_audit_events,
+    source_credential_versions,
     trace_artifact_refs,
     work_attempts,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "research_projection_status",
     "research_records",
     "security_audit_events",
+    "source_credential_versions",
     "trace_artifact_refs",
     "work_attempts",
 ]

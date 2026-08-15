@@ -29,6 +29,11 @@ from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
 from stock_forecasting.research_query import ResearchQuery
 from stock_forecasting.security_audit import SecurityAudit
+from stock_forecasting.source_credentials import (
+    InMemorySecretProvider,
+    SecretProvider,
+    SourceCredentialValidator,
+)
 from stock_forecasting.workflows.fixture_eod import (
     FixtureEodCommand,
     FixtureEodOutcome,
@@ -53,6 +58,8 @@ class Application:
         authorization_policy_set_id: str,
         authorization_policy_bootstrap: AuthorizationPolicy | None,
         fixed_security_time: datetime | None,
+        secret_provider: SecretProvider | None = None,
+        source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
         self.local_identity = local_identity
@@ -88,7 +95,14 @@ class Application:
             object_repository=self.object_repository,
         )
         self.security_audit = SecurityAudit(self.state_store)
-        self.operations_control = OperationsControl(self.state_store)
+        self.secret_provider = secret_provider or InMemorySecretProvider()
+        self.operations_control = OperationsControl(
+            self.state_store,
+            authorization_policy=self.authorization_policy,
+            secret_provider=self.secret_provider,
+            source_credential_validators=source_credential_validators or {},
+            clock=lambda: self._fixed_security_time or datetime.now(UTC),
+        )
         self._relay_fault = relay_fault or NoRelayFault()
         self._event_compatibility = event_compatibility or EventCompatibility.current()
         self._relay_clock = relay_clock or SystemRelayClock()
@@ -154,6 +168,8 @@ def build_test_application(
     authorization_time: datetime | None = None,
     authorization_policy_set_id: str | None = None,
     authorization_policy_override: AuthorizationPolicy | None = None,
+    secret_provider: SecretProvider | None = None,
+    source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
 ) -> Application:
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
     resolved_database_url = database_url or "sqlite+pysqlite:///:memory:"
@@ -188,6 +204,8 @@ def build_test_application(
         authorization_policy_set_id=authorization_policy_set_id or f"test-policy-{uuid4()}",
         authorization_policy_bootstrap=authorization_policy_bootstrap,
         fixed_security_time=authorization_time or observed_at,
+        secret_provider=secret_provider,
+        source_credential_validators=source_credential_validators,
     )
 
 
@@ -202,6 +220,8 @@ def build_application(
     relay_worker_id: str | None = None,
     local_identity: LocalApiKeyIdentity,
     authorization_policy_set_id: str,
+    secret_provider: SecretProvider | None = None,
+    source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
 ) -> Application:
     return Application(
         observed_at=observed_at,
@@ -216,4 +236,6 @@ def build_application(
         authorization_policy_set_id=authorization_policy_set_id,
         authorization_policy_bootstrap=None,
         fixed_security_time=None,
+        secret_provider=secret_provider,
+        source_credential_validators=source_credential_validators,
     )

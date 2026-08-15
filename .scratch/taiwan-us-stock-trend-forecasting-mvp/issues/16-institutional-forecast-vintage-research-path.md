@@ -1,18 +1,18 @@
 # 16 — 國際機構預測 vintage 研究路徑
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
-**What to build:** 若 OECD 或另一官方機構提供免帳號／免申請／免付費且公開條款允許保存與建模的 forecast dataflow，從 dataset allowlist、vintage qualification 與來源政策轉為不可變跨市場總體預測特徵；否則此 optional 模態端到端 `unavailable`，不阻斷完整產品。
+**What to build:** 若 OECD 或另一機構提供用途合格的零付費 forecast dataflow，從 dataset allowlist、必要 credential readiness、vintage qualification 與來源政策轉為不可變跨市場總體預測特徵；否則此 optional 模態端到端 `credential_required`／`unavailable`，不阻斷完整產品。
 
 **Blocked by:** 11 — 發布 P2 正式價量 baseline acceptance bundle
 
-**Optional source basis:** 合格官方零成本 forecast dataflow；不存在 external gate
+**Optional source basis:** 合格零付費 forecast dataflow；不存在付費、採購或 sales gate
 
 **Trace IDs:** `P3-TRACE-MACRO-01`, `GATE-POLICY-01`
 
 Status: ready-for-agent
 
-- [ ] Source steward 對選定 dataflow 建立有效 allowlist、公開條款、保存、模型使用、vintage／revision 及顯名證據；不得要求帳號、API key、個別申請或付費，其他 dataflow 不自動取得相同資格。
+- [ ] Source steward 對選定 dataflow 建立有效 allowlist、來源使用條款、方案／部署主體分類、保存、模型使用、vintage／revision 及顯名證據；可要求自助帳號與來源憑證但不得要求付費、sales／人工核准或協商契約，其他 dataflow 不自動取得相同資格。
 - [ ] Adapter 保存每個 release／vintage 的原始證據、first-observed time、period、geography、measure、unit、revision、涵蓋及 policy version。
 - [ ] 合格 `platform_observed`／`archive_attested` vintage 可形成正式歷史特徵；current-only、unknown 或 self-asserted 版本只能隔離或阻斷。
 - [ ] FeatureFactory 將核准 forecast 特徵提供給台美掛牌，保存實際 vintage、age、availability、quality 與 source-policy lineage，不把最新預測回填到舊 cutoff。

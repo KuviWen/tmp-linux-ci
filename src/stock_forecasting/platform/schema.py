@@ -101,6 +101,19 @@ price_research_eligibility = Table(
     UniqueConstraint("eligibility_id", "listing_id", name="uq_price_research_eligibility"),
 )
 
+source_credential_versions = Table(
+    "security_source_credential_versions",
+    metadata,
+    Column("provider_id", String(128), primary_key=True),
+    Column("version", Integer, primary_key=True),
+    Column("secret_ref_id", String(256), nullable=False),
+    Column("readiness", String(32), nullable=False),
+    Column("reason_code", String(128), nullable=False),
+    Column("configured_at", String(32), nullable=False),
+    Column("last_validated_at", String(32), nullable=True),
+    Column("revoked_at", String(32), nullable=True),
+)
+
 fixture_prediction_results = Table(
     "serving_fixture_prediction_results",
     metadata,

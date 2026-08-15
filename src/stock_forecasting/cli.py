@@ -20,16 +20,19 @@ from stock_forecasting.acceptance_bundle import is_sha256_reference
 from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
     build_taiwan_price_blocked_authorization_policy,
+    build_us_zero_fee_engineering_authorization_policy,
 )
 from stock_forecasting.authorization_repository import (
     FIXTURE_REVOKED_POLICY_SET,
     TICKET_06_POLICY_BLOCKED_SET,
+    TICKET_07_ENGINEERING_POLICY_SET,
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
 )
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.runtime import RuntimeSettings
 from stock_forecasting.ticket_06_acceptance import run_ticket_06_acceptance
+from stock_forecasting.ticket_07_acceptance import run_ticket_07_acceptance
 
 
 def _instant(value: str) -> datetime:
@@ -135,6 +138,7 @@ def _parser() -> argparse.ArgumentParser:
             "ticket-04",
             "ticket-05",
             "ticket-06",
+            "ticket-07",
         ],
     )
     acceptance.add_argument("--database-url", required=True)
@@ -187,8 +191,15 @@ def _parser() -> argparse.ArgumentParser:
             "research_prediction.read",
             "market_data.collect",
             "price_research_eligibility.read",
+            "source_credential.read",
+            "source_credential.manage",
         ],
         required=True,
+    )
+    local_key_init.add_argument(
+        "--data-protection-class",
+        action="append",
+        choices=["public_source", "internal", "licensed", "restricted", "secret"],
     )
     local_key_init.add_argument("--issued-at", type=_instant)
     local_key_init.add_argument("--expires-at", type=_instant)
@@ -203,6 +214,9 @@ def _parser() -> argparse.ArgumentParser:
     ticket_06_authorization = authorization_commands.add_parser("init-ticket-06")
     ticket_06_authorization.add_argument("--database-url", required=True)
     ticket_06_authorization.add_argument("--key-file", type=Path, required=True)
+    ticket_07_authorization = authorization_commands.add_parser("init-ticket-07")
+    ticket_07_authorization.add_argument("--database-url", required=True)
+    ticket_07_authorization.add_argument("--key-file", type=Path, required=True)
     return parser
 
 
@@ -216,19 +230,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         "ticket-04",
         "ticket-05",
         "ticket-06",
+        "ticket-07",
     }:
-        if arguments.ticket != "ticket-06" and (
+        if arguments.ticket not in {"ticket-06", "ticket-07"} and (
             (arguments.base_url is None) != (arguments.dagster_url is None)
         ):
             parser.error("--base-url and --dagster-url must be provided together")
-        if arguments.ticket == "ticket-06":
+        if arguments.ticket in {"ticket-06", "ticket-07"}:
             if arguments.base_url is None or arguments.key_file is None:
-                parser.error("ticket-06 requires --base-url and --key-file")
-            report = run_ticket_06_acceptance(
-                database_url=arguments.database_url,
-                object_root=arguments.object_root,
-                base_url=arguments.base_url,
-                key_file=arguments.key_file,
+                parser.error(f"{arguments.ticket} requires --base-url and --key-file")
+            report = (
+                run_ticket_06_acceptance(
+                    database_url=arguments.database_url,
+                    object_root=arguments.object_root,
+                    base_url=arguments.base_url,
+                    key_file=arguments.key_file,
+                )
+                if arguments.ticket == "ticket-06"
+                else run_ticket_07_acceptance(
+                    database_url=arguments.database_url,
+                    object_root=arguments.object_root,
+                    base_url=arguments.base_url,
+                    key_file=arguments.key_file,
+                )
             )
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
             return 0 if report["status"] == "passed" else 1
@@ -324,11 +348,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             explicit_times_conflict = arguments.issued_at is not None and (
                 identity.context.issued_at != issued_at or identity.context.expires_at != expires_at
             )
+            explicit_classes_conflict = (
+                arguments.data_protection_class is not None
+                and identity.context.data_protection_classes
+                != frozenset(arguments.data_protection_class)
+            )
             if (
                 identity.context.owner != arguments.owner
                 or identity.context.environment != arguments.environment
                 or identity.context.scopes != frozenset(arguments.scope)
                 or explicit_times_conflict
+                or explicit_classes_conflict
                 or identity.context.expires_at <= generated_at
             ):
                 raise RuntimeError("local_api_key_file_conflict")
@@ -340,6 +370,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 scopes=set(arguments.scope),
                 issued_at=issued_at,
                 expires_at=expires_at,
+                data_protection_classes=(
+                    set(arguments.data_protection_class)
+                    if arguments.data_protection_class is not None
+                    else None
+                ),
             )
             identity.save(arguments.path)
         print(json.dumps({"status": status}, sort_keys=True))
@@ -388,6 +423,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         repository.install(
             TICKET_06_POLICY_BLOCKED_SET,
             build_taiwan_price_blocked_authorization_policy(identity.context),
+        )
+        print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
+        return 0
+    if arguments.command == "authorization" and arguments.authorization_command == (
+        "init-ticket-07"
+    ):
+        identity = LocalApiKeyIdentity.load(arguments.key_file)
+        repository = AuthorizationPolicyRepository(
+            StateStore(arguments.database_url, create_schema=False)
+        )
+        repository.install(
+            TICKET_07_ENGINEERING_POLICY_SET,
+            build_us_zero_fee_engineering_authorization_policy(identity.context),
         )
         print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
         return 0

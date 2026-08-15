@@ -1,6 +1,6 @@
 # 20 — Multimodal logistic 到完整研究介面
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 將合格價量、FinancialFact、台美與國際總體 vintage，以及可用或明確受阻的官方文件模態，形成精確 measured support pool 的 immutable FeatureSnapshots 與 eligible multimodal logistic 候選；以價量及逐模態消融完成相同治理與 shadow，並在完整繁中研究介面展示預測、支援、影響因素、證據、vintage、回測及譜系。
 

@@ -1,6 +1,6 @@
 # 可觀測性、來源健康、漂移與事故契約
 
-> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文對外部商業來源、付費通知／監控服務及固定 production scale 的必要假設；健康與事故證據須可由本機開源元件完成，並以實際官方零成本支援池為範圍。本文的 canonical health／incident 與 telemetry projection 分離仍有效。
+> **2026-08-15 product boundary:** ADR 0017、0018 與主 spec 的 `COST-0-01` 取代本文對付費來源、付費通知／監控服務及固定 production scale 的必要假設；健康與事故證據須可由本機開源元件完成，並以實際合格零付費支援池為範圍，credential readiness 與 source health 分開呈現。本文的 canonical health／incident 與 telemetry projection 分離仍有效。
 
 ## 狀態與範圍
 

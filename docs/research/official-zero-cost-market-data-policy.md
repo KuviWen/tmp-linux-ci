@@ -1,5 +1,7 @@
 # 官方零成本行情資料政策
 
+> **2026-08-15 scope note:** ADR 0018 已放寬全產品的免帳號／免 API key 限制；本文仍是 ticket 06 的台灣 OGDL source-specific 研究，所列匿名存取事實保持有效，但不再代表所有後續來源都必須匿名。
+
 查證日期：2026-08-15
 
 政策建議版本：`official-zero-cost-market-data-policy-v1`
@@ -144,14 +146,14 @@ TWSE Data E-Shop 的「每日收盤行情」提供自 2003-12-01 起的日檔，
 
 ## United States／future-ticket implications
 
-Phase 2 的 United States path 同樣受零成本公開來源邊界控制。查得的官方免費來源只能補局部 reference evidence：
+Phase 2 的 United States path 同樣受零付費、用途合格及 fail-closed 邊界控制。下列匿名官方免費來源只能補局部 reference evidence：
 
 - [SEC EDGAR APIs](https://www.sec.gov/search-filings/edgar-application-programming-interfaces) 免 authentication／API key，提供 filer submissions、former names、exchange／ticker metadata 與 XBRL facts；它是 filings／facts source，不提供未調整交易所 OHLCV，也不是完整 corporate-action price-adjustment feed。
 - [Nasdaq Trader Symbol Directory](https://www.nasdaqtrader.com/Trader.aspx?id=symbollookup) 的 current symbol files 會在日內更新；頁面另明示 Nasdaq Events Data（Security Status、Ex-Date、When Issued／When Distributed、Nasdaq Listed）可按現況使用而無額外 licensing requirement。但頁面同時說 Symbol Lookup 是 current trading day 狀態，這些事件子集不是七年 EOD archive。
 - Nasdaq 完整 Daily List 涵蓋上市、下市、名稱／symbol 變更及股利，歷史到 1999 年，但它是 secured monthly subscription，而非免費公共 feed。[Nasdaq Daily List](https://nasdaqtrader.com/Trader.aspx?id=DailyListPD) Nasdaq 的官方費率公告亦將 Daily List／Fundamental Data 列為每組織月費產品。[Nasdaq 2024 fee notice](https://www.nasdaqtrader.com/TraderNews.aspx?id=DN2024-2)
 - NYSE 官方歷史產品頁將 TAQ Closing Prices 定義為各交易日 OHLC／volume 檔；Daily TAQ 規格明示客戶須執行適用 agreement，訂購核准後才發 credentials。[NYSE Historical Data](https://www.nyse.com/market-data/historical)；[Daily TAQ client specification](https://www.nyse.com/publicdocs/nyse/data/Daily_TAQ_Client_Spec_v3.0a.pdf)
 
-所以 SEC 或 Nasdaq current events 可以成為 future ticket 的獨立、範圍受限 source policies，但不能被誤稱為完整 EOD、company-actions 與 symbol-history path。美國 formal price path 在沒有合格官方零成本 distribution 時必須明示 unavailable；這是產品支援邊界，不是等待契約或 backfill 的 external gate。
+所以 SEC 或 Nasdaq current events 可以成為 future ticket 的獨立、範圍受限 source policies，但不能被誤稱為完整 EOD、company-actions 與 symbol-history path。依 ADR 0018，美國 formal price path 可另用用途合格的零付費 authenticated provider／source bundle；缺少來源資格時明示 `policy_blocked`，缺少憑證時明示 `credential_required`，兩者都不是付費、採購或 sales gate。
 
 ## 未知事項
 

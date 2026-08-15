@@ -1,6 +1,6 @@
 # 多模態趨勢模型與訓練設計
 
-> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文對商業新聞／consensus、付費 encoder API、固定股票池與固定歷史深度的必要假設；模型只能使用合格官方零成本模態及本機 open-license artifacts。本文的缺值語意、TrendForecaster seam、校準、ablation 與 fail-closed 原則仍有效。
+> **2026-08-15 product boundary:** ADR 0017、0018 與主 spec 的 `COST-0-01` 取代本文對商業新聞／consensus、付費 encoder API、固定股票池與固定歷史深度的必要假設；模型只能使用具合格來源使用依據及 credential readiness 的零付費模態與本機 open-license artifacts。本文的缺值語意、TrendForecaster seam、校準、ablation 與 fail-closed 原則仍有效。
 
 本文件固定生產導向 MVP 的多模態趨勢模型：它以時間點正確的價量、基本面、總體及文件模態資料，對台灣與美國掛牌一次產生 1／5／20 交易日上漲、下跌、盤整機率、信心分數、資料支援狀態及主要影響因素。標籤、回測摺與測試隔離遵守 [`trend-label-and-backtest-contract.md`](trend-label-and-backtest-contract.md)；候選模型升版門檻與排程由模型生命週期設計另行固定，baseline到neural的分期與股票池資格遵守[分階段架構交接契約](phased-architecture-and-spec-handoff.md)。
 

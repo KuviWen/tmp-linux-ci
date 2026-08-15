@@ -1,0 +1,185 @@
+{
+  "manifest_id": "p2-stock-pool-10-plus-10-v1",
+  "selection_evidence_version": "us-10-selection-evidence-v1",
+  "selection_as_of": "2026-08-15",
+  "market_targets": {"XTAI": 10, "US": 10},
+  "market_calendar_cases": ["half_day_session"],
+  "market_calendar_evidence": {
+    "session_date": "2024-11-29",
+    "open_time": "09:30",
+    "close_time": "13:00",
+    "source_url": "https://www.nyse.com/markets/hours-calendars"
+  },
+  "source_basis": {
+    "source_basis_id": "ALPACA-BASIC-US-MARKET-DATA-01",
+    "basis_type": "zero_fee_plan",
+    "provider_id": "alpaca-market-data-basic",
+    "plan_id": "basic-2026-08-15",
+    "principal_classification": "individual_non_commercial",
+    "credential_kind": "api_key_pair",
+    "account_required": true,
+    "fee_required": false,
+    "terms_url": "https://files.alpaca.markets/disclosures/library/TermsAndConditions.pdf",
+    "terms_content_sha256": "2dc774d4aeeafbe4c7f0565e7842d932bc8bc10488af805fce43b8734e7b9859",
+    "qualification_status": "candidate_terms_not_archived",
+    "members": [
+      {
+        "provider_id": "alpaca-market-data-basic",
+        "dataset_id": "alpaca-us-stock-bars-v2",
+        "distribution_url": "https://data.alpaca.markets/v2/stocks/bars",
+        "qualification_scope": "unadjusted_eod",
+        "schema_version": "us-unadjusted-eod-v1",
+        "price_semantics": "unadjusted",
+        "qualification_status": "candidate_terms_not_archived",
+        "known_gaps": ["realized_depth_requires_live_probe"]
+      },
+      {
+        "provider_id": "alpaca-market-data-basic",
+        "dataset_id": "alpaca-us-corporate-actions-v1",
+        "distribution_url": "https://data.alpaca.markets/v1/corporate-actions",
+        "qualification_scope": "corporate_actions_and_symbol_changes",
+        "schema_version": "alpaca-corporate-actions-v1",
+        "price_semantics": null,
+        "qualification_status": "candidate_terms_not_archived",
+        "known_gaps": ["provider_creation_time_not_guaranteed"]
+      },
+      {
+        "provider_id": "alpaca-market-data-basic",
+        "dataset_id": "alpaca-us-trading-calendar-v2",
+        "distribution_url": "https://paper-api.alpaca.markets/v2/calendar",
+        "qualification_scope": "trading_calendar_and_early_close",
+        "schema_version": "alpaca-trading-calendar-v2",
+        "price_semantics": null,
+        "qualification_status": "candidate_terms_not_archived",
+        "known_gaps": ["calendar_history_subject_to_provider_coverage"]
+      },
+      {
+        "provider_id": "nasdaq-trader-public-reference",
+        "dataset_id": "nasdaq-current-symbol-directory",
+        "distribution_url": "https://www.nasdaqtrader.com/Trader.aspx?id=symbollookup",
+        "qualification_scope": "current_reference_cross_check",
+        "schema_version": "nasdaq-symbol-directory-current",
+        "price_semantics": null,
+        "qualification_status": "candidate_scope_limited",
+        "known_gaps": ["current_snapshot_not_complete_symbol_history"]
+      }
+    ]
+  },
+  "formal_qualification_artifact_id": null,
+  "historical_availability_claim_id": null,
+  "listings": [
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000001",
+      "issuer_id": "71000000-0000-4000-8000-000000000001",
+      "security_id": "72000000-0000-4000-8000-000000000001",
+      "market": "XNAS",
+      "security_kind": "ordinary_share",
+      "external_security_code": "AAPL",
+      "external_aliases": [{"security_code": "AAPL", "security_name": "Apple Inc.", "valid_from": "1980-12-12", "valid_to": null}],
+      "coverage_cases": ["ordinary_share", "company_action"],
+      "selection_evidence_urls": ["https://www.sec.gov/files/company_tickers_exchange.json"]
+    },
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000002",
+      "issuer_id": "71000000-0000-4000-8000-000000000002",
+      "security_id": "72000000-0000-4000-8000-000000000002",
+      "market": "XNYS",
+      "security_kind": "ordinary_share",
+      "external_security_code": "BRK.B",
+      "external_aliases": [{"security_code": "BRK.B", "security_name": "Berkshire Hathaway Class B", "valid_from": "1996-05-09", "valid_to": null}],
+      "coverage_cases": ["ordinary_share", "share_class"],
+      "selection_evidence_urls": ["https://www.sec.gov/files/company_tickers_exchange.json"]
+    },
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000003",
+      "issuer_id": "71000000-0000-4000-8000-000000000003",
+      "security_id": "72000000-0000-4000-8000-000000000003",
+      "market": "XNAS",
+      "security_kind": "ordinary_share",
+      "external_security_code": "GOOGL",
+      "external_aliases": [{"security_code": "GOOGL", "security_name": "Alphabet Class A", "valid_from": "2014-04-03", "valid_to": null}],
+      "coverage_cases": ["ordinary_share", "share_class"],
+      "selection_evidence_urls": ["https://www.sec.gov/files/company_tickers_exchange.json"]
+    },
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000004",
+      "issuer_id": "71000000-0000-4000-8000-000000000003",
+      "security_id": "72000000-0000-4000-8000-000000000004",
+      "market": "XNAS",
+      "security_kind": "ordinary_share",
+      "external_security_code": "GOOG",
+      "external_aliases": [{"security_code": "GOOG", "security_name": "Alphabet Class C", "valid_from": "2014-04-03", "valid_to": null}],
+      "coverage_cases": ["ordinary_share", "share_class"],
+      "selection_evidence_urls": ["https://www.sec.gov/files/company_tickers_exchange.json"]
+    },
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000005",
+      "issuer_id": "71000000-0000-4000-8000-000000000005",
+      "security_id": "72000000-0000-4000-8000-000000000005",
+      "market": "XNYS",
+      "security_kind": "adr",
+      "external_security_code": "TSM",
+      "external_aliases": [{"security_code": "TSM", "security_name": "Taiwan Semiconductor Manufacturing ADS", "valid_from": "1997-10-08", "valid_to": null}],
+      "coverage_cases": ["adr"],
+      "selection_evidence_urls": ["https://www.sec.gov/files/company_tickers_exchange.json"]
+    },
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000006",
+      "issuer_id": "71000000-0000-4000-8000-000000000006",
+      "security_id": "72000000-0000-4000-8000-000000000006",
+      "market": "XNAS",
+      "security_kind": "ordinary_share",
+      "external_security_code": "META",
+      "external_aliases": [
+        {"security_code": "FB", "security_name": "Facebook, Inc.", "valid_from": "2012-05-18", "valid_to": "2022-06-08"},
+        {"security_code": "META", "security_name": "Meta Platforms, Inc.", "valid_from": "2022-06-09", "valid_to": null}
+      ],
+      "coverage_cases": ["ordinary_share", "ticker_change"],
+      "selection_evidence_urls": ["https://docs.alpaca.markets/us/reference/stockbarsingle-1"]
+    },
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000007",
+      "issuer_id": "71000000-0000-4000-8000-000000000007",
+      "security_id": "72000000-0000-4000-8000-000000000007",
+      "market": "XNAS",
+      "security_kind": "ordinary_share",
+      "external_security_code": "NVDA",
+      "external_aliases": [{"security_code": "NVDA", "security_name": "NVIDIA Corporation", "valid_from": "1999-01-22", "valid_to": null}],
+      "coverage_cases": ["ordinary_share", "company_action"],
+      "selection_evidence_urls": ["https://docs.alpaca.markets/us/reference/corporateactions-1"]
+    },
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000008",
+      "issuer_id": "71000000-0000-4000-8000-000000000008",
+      "security_id": "72000000-0000-4000-8000-000000000008",
+      "market": "XNYS",
+      "security_kind": "ordinary_share",
+      "external_security_code": "GME",
+      "external_aliases": [{"security_code": "GME", "security_name": "GameStop Corp.", "valid_from": "2002-02-13", "valid_to": null}],
+      "coverage_cases": ["ordinary_share", "suspension"],
+      "selection_evidence_urls": ["https://www.nasdaqtrader.com/Trader.aspx?id=TradingHaltSearch"]
+    },
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000009",
+      "issuer_id": "71000000-0000-4000-8000-000000000009",
+      "security_id": "72000000-0000-4000-8000-000000000009",
+      "market": "XNAS",
+      "security_kind": "ordinary_share",
+      "external_security_code": "SIVB",
+      "external_aliases": [{"security_code": "SIVB", "security_name": "SVB Financial Group", "valid_from": null, "valid_to": "2023-03-28"}],
+      "coverage_cases": ["ordinary_share", "historical_delisting"],
+      "selection_evidence_urls": ["https://www.sec.gov/Archives/edgar/data/719739/000119312523079091/d496894d8k.htm"]
+    },
+    {
+      "listing_id": "70000000-0000-4000-8000-000000000010",
+      "issuer_id": "71000000-0000-4000-8000-000000000010",
+      "security_id": "72000000-0000-4000-8000-000000000010",
+      "market": "XNAS",
+      "security_kind": "ordinary_share",
+      "external_security_code": "AMZN",
+      "external_aliases": [{"security_code": "AMZN", "security_name": "Amazon.com, Inc.", "valid_from": "1997-05-15", "valid_to": null}],
+      "coverage_cases": ["ordinary_share"],
+      "selection_evidence_urls": ["https://www.sec.gov/files/company_tickers_exchange.json"]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # 09 — Class-prior 與 logistic bootstrap 治理路徑
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 以合格台美歷史資料建立 class-prior 與 regularized multinomial logistic 兩個 TrendForecaster adapter，完整走過不可變訓練意圖、防洩漏 walk-forward、校準、評估、BootstrapGatePolicy、人工核准及五次 shadow，並在研究治理介面呈現候選證據；未勝出時不得建立正式服務指派。
 

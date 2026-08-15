@@ -1,6 +1,6 @@
 # 30 — 發布 P4 受治理神經模型 acceptance bundle
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 從 P3 passing bundle 重現 shared neural 候選的增量建構、三 seeds、verified-history manifest 中所有 eligible folds、baselines／ablations、bounded local HPO、具樣本支援的 calibrators、Integrated Gradients、無網路重現、hard gates、內部核准、shadow、promotion／rollback／stale／drift／policy 情境，並發布不可變 P4 acceptance bundle；歷史不足時不建立候選，neural 未勝出時允許 logistic 合法留任。
 

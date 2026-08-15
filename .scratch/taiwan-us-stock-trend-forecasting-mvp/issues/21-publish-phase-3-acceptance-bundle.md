@@ -1,6 +1,6 @@
 # 21 — 發布 P3 多模態研究 pilot acceptance bundle
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 從 P2 passing bundle 重現實際支援池的多模態 pilot，展示台美官方文件、FinancialFact、總體 vintage、商業新聞排除、雙語文件品質、sandbox、review、multimodal ablation、五次 EOD shadow 及完整繁中研究 MVP，並發布不可變 P3 acceptance bundle。
 
@@ -18,5 +18,5 @@ Status: ready-for-agent
 - [ ] 研究 MVP 在完整 measured support pool 展示搜尋／矩陣／標的頁、三期間預測或 unavailable reason、信心、支援、影響因素、允許證據、fundamentals、vintage、history、backtest、lineage 及繁中無障礙。
 - [ ] 每市場 EOD T+120、REST SLO、evidence projection、文件／來源健康、incident／notification 及 audit 有 canonical evidence，錯公司、錯證據、錯政策為 hard failure。
 - [ ] 產品與 bundle 明示 `official-documents-only` 是完整產品範圍，新聞模態為 excluded／not-applicable 且不保留 P5 blocker。
-- [ ] Bundle 綁定 P2 bundle、public-source bases、source／processing／stock-pool／feature／fold manifests、goldens、sandbox、review、ablation、shadow、SLO、security、deletion、UI／REST 與重現命令。
+- [ ] Bundle 綁定 P2 bundle、source-use bases／credential-readiness metadata、source／processing／stock-pool／feature／fold manifests、goldens、sandbox、review、ablation、shadow、SLO、security、deletion、UI／REST 與重現命令，且不含 secret value。
 - [ ] 任何失敗建立新的 blocked／failed bundle evidence，不修改 P2 bundle、既有 datasets、models、decisions 或 production predictions。

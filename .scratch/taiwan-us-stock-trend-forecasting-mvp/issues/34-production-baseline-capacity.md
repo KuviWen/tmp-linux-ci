@@ -1,6 +1,6 @@
 # 34 — 零成本內部 baseline 容量路徑
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 以台美實際零成本支援池、已觀測時間點資料、實測官方文件量及本機內部使用負載，重訓並核准適用該精確 support profile 的最佳合格模型，連續三次完成 Compose EOD、研究查詢與營運驗收，發布不可變容量報告；不預先承諾 2,000 掛牌或外部硬體。
 

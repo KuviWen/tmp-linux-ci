@@ -60,7 +60,7 @@ TaiwanPriceSourceMode = Literal["current", "historical"]
 SourceRevisionKind = Literal["original", "late_arrival", "correction", "withdrawal"]
 SourceQualityIssue = Literal["identity_ambiguous", "missing_company_action"]
 HistoricalEvidenceLevel = Literal["platform_observed", "archive_attested", "published_current_only"]
-_APPROVED_PRICE_SCHEMA_VERSIONS = frozenset({"taiwan-unadjusted-eod-v1"})
+_APPROVED_PRICE_SCHEMA_VERSIONS = frozenset({"taiwan-unadjusted-eod-v1", "us-unadjusted-eod-v1"})
 
 
 @dataclass(frozen=True)
@@ -201,6 +201,23 @@ class ListingLifecycleRecord:
 
 
 @dataclass(frozen=True)
+class SymbolIdentityRecord:
+    listing_id: str
+    symbol: str
+    valid_from: date | None
+    valid_to: date | None
+    source_event_id: str
+
+
+@dataclass(frozen=True)
+class MarketSessionRecord:
+    session_date: date
+    open_time: str
+    close_time: str
+    session_kind: Literal["regular", "early_close"]
+
+
+@dataclass(frozen=True)
 class DecodedSourcePartition:
     source_id: str
     schema_version: str
@@ -211,6 +228,8 @@ class DecodedSourcePartition:
     adjusted_close_cross_checks: tuple[Decimal, ...]
     identity_assertion_ids: tuple[str, ...]
     parent_object_ids: tuple[str, ...]
+    symbol_identities: tuple[SymbolIdentityRecord, ...] = ()
+    market_sessions: tuple[MarketSessionRecord, ...] = ()
     revision_kind: SourceRevisionKind = "original"
     quality_issues: tuple[SourceQualityIssue, ...] = ()
 
@@ -242,7 +261,15 @@ class SourceRateLimited(RuntimeError):
         self.rate_limit_policy_id = rate_limit_policy_id
 
 
-class TaiwanPriceSourceAdapter:
+class SourceCredentialRequired(RuntimeError):
+    def __init__(self, reason_code: str) -> None:
+        if not reason_code.startswith("source_credential_"):
+            raise ValueError("source_credential_reason_invalid")
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+class CollectorDecoderPriceSourceAdapter:
     def __init__(
         self,
         *,
@@ -287,12 +314,22 @@ class TaiwanPriceSourceAdapter:
         return LoadedSourcePartition(collection=collection, decoded=decoded)
 
 
+class TaiwanPriceSourceAdapter(CollectorDecoderPriceSourceAdapter):
+    pass
+
+
 @dataclass(frozen=True)
 class PriceMaterializationOutcome:
-    status: Literal["policy_blocked", "published", "quarantined", "deferred"]
+    status: Literal[
+        "policy_blocked",
+        "credential_required",
+        "published",
+        "quarantined",
+        "deferred",
+    ]
     reason_code: str
     policy_reason_code: str
-    source_basis_id: Literal["TWSE-OGDL-OPEN-DATA-01"]
+    source_basis_id: str
     source_id: str
     source_mode: TaiwanPriceSourceMode
     listing_ids: tuple[str, ...]
@@ -400,7 +437,7 @@ class DataSupply:
             status="policy_blocked",
             reason_code=_public_policy_reason(decision.reason_code),
             policy_reason_code=decision.reason_code,
-            source_basis_id="TWSE-OGDL-OPEN-DATA-01",
+            source_basis_id=self._source_basis_id(decision),
             source_id=request.source_id,
             source_mode=request.mode,
             listing_ids=request.listing_ids,
@@ -426,6 +463,7 @@ class DataSupply:
         request: SourcePartitionRequest,
         decision: AuthorizationDecision,
     ) -> PriceMaterializationOutcome:
+        source_basis_id = self._source_basis_id(decision)
         adapter = self._adapters.get(request.source_id)
         if adapter is None:
             raise ValueError("qualified_source_adapter_unavailable")
@@ -438,12 +476,38 @@ class DataSupply:
         authorized_request = replace(request, policy_decision_id=decision.decision_id)
         try:
             loaded = adapter.load(authorized_request)
+        except SourceCredentialRequired as error:
+            outcome = PriceMaterializationOutcome(
+                status="credential_required",
+                reason_code=error.reason_code,
+                policy_reason_code=decision.reason_code,
+                source_basis_id=source_basis_id,
+                source_id=request.source_id,
+                source_mode=request.mode,
+                listing_ids=request.listing_ids,
+                trace_id=request.trace_id,
+                policy_decision_id=decision.decision_id,
+                policy_evaluation_id=decision.evaluation_id,
+                policy_correlation_id=decision.correlation_id,
+                policy_valid_until=decision.valid_until,
+                evaluated_at=decision.evaluated_at,
+                historical_availability_claim_id=request.historical_availability_claim_id,
+            )
+            self._state_store.publish_price_research_evaluation(
+                trace_id=request.trace_id,
+                execution_purpose="price_research",
+                artifacts=[],
+                authorization=authorization_audit_payload(decision),
+                authorization_outcome="allowed",
+                eligibility_records=_eligibility_records(outcome),
+            )
+            return outcome
         except SourceRateLimited as error:
             outcome = PriceMaterializationOutcome(
                 status="deferred",
                 reason_code="source_rate_limited",
                 policy_reason_code=decision.reason_code,
-                source_basis_id="TWSE-OGDL-OPEN-DATA-01",
+                source_basis_id=source_basis_id,
                 source_id=request.source_id,
                 source_mode=request.mode,
                 listing_ids=request.listing_ids,
@@ -514,7 +578,7 @@ class DataSupply:
                 status="quarantined",
                 reason_code=quarantine_reason,
                 policy_reason_code=decision.reason_code,
-                source_basis_id="TWSE-OGDL-OPEN-DATA-01",
+                source_basis_id=source_basis_id,
                 source_id=request.source_id,
                 source_mode=request.mode,
                 listing_ids=request.listing_ids,
@@ -617,7 +681,7 @@ class DataSupply:
             status="published",
             reason_code="qualified_price_materialized",
             policy_reason_code=decision.reason_code,
-            source_basis_id="TWSE-OGDL-OPEN-DATA-01",
+            source_basis_id=source_basis_id,
             source_id=request.source_id,
             source_mode=request.mode,
             listing_ids=request.listing_ids,
@@ -646,6 +710,16 @@ class DataSupply:
             eligibility_records=_eligibility_records(outcome),
         )
         return outcome
+
+    def _source_basis_id(self, decision: AuthorizationDecision) -> str:
+        matching_policies = tuple(
+            policy
+            for policy in self._authorization_policy.source_policies
+            if policy.version_id == decision.source_policy_version_id
+        )
+        if len(matching_policies) == 1 and matching_policies[0].source_basis_id is not None:
+            return matching_policies[0].source_basis_id
+        return "TWSE-OGDL-OPEN-DATA-01"
 
     def _historical_claim(
         self,
@@ -703,6 +777,14 @@ def _source_qualification_checks(status: str, reason_code: str) -> dict[str, str
             "depth": "not_evaluated",
         }
     if status == "deferred":
+        return {
+            "policy": "passed",
+            "coverage": "not_evaluated",
+            "schema": "not_evaluated",
+            "integrity": "not_evaluated",
+            "depth": "not_evaluated",
+        }
+    if status == "credential_required":
         return {
             "policy": "passed",
             "coverage": "not_evaluated",
@@ -813,6 +895,29 @@ def _normalized_partition_payload(decoded: DecodedSourcePartition) -> dict[str, 
                 "source_event_id": event.source_event_id,
             }
             for event in decoded.listing_lifecycle
+        ],
+        "symbol_identities": [
+            {
+                "listing_id": identity.listing_id,
+                "symbol": identity.symbol,
+                "valid_from": (
+                    identity.valid_from.isoformat() if identity.valid_from is not None else None
+                ),
+                "valid_to": (
+                    identity.valid_to.isoformat() if identity.valid_to is not None else None
+                ),
+                "source_event_id": identity.source_event_id,
+            }
+            for identity in decoded.symbol_identities
+        ],
+        "market_sessions": [
+            {
+                "session_date": session.session_date.isoformat(),
+                "open_time": session.open_time,
+                "close_time": session.close_time,
+                "session_kind": session.session_kind,
+            }
+            for session in decoded.market_sessions
         ],
     }
 

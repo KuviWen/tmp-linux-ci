@@ -122,6 +122,8 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
     monkeypatch.setenv("LOCAL_API_KEY_MODE", "enabled")
     monkeypatch.setenv("LOCAL_API_KEY_FILE", str(key_file))
     monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", FIXTURE_ACTIVE_POLICY_SET)
+    source_secret_root = tmp_path / "source-secrets"
+    monkeypatch.setenv("SOURCE_SECRET_ROOT", str(source_secret_root))
 
     settings = RuntimeSettings.from_environment()
     first = settings.build_application()
@@ -131,6 +133,21 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
     assert first.local_identity.credential.authorization_header() == (
         second.local_identity.credential.authorization_header()
     )
+    secret_ref = first.secret_provider.put(
+        provider_id="alpaca-market-data-basic",
+        credential_fields={
+            "api_key_id": "PK-RUNTIME-PERSISTENCE",
+            "api_secret_key": "runtime-persistence-secret",
+        },
+    )
+    third = settings.build_application()
+    assert third.secret_provider.checkout(secret_ref.secret_ref_id).credential_fields() == {
+        "api_key_id": "PK-RUNTIME-PERSISTENCE",
+        "api_secret_key": "runtime-persistence-secret",
+    }
+    persisted = b"".join(path.read_bytes() for path in source_secret_root.iterdir())
+    assert b"PK-RUNTIME-PERSISTENCE" not in persisted
+    assert b"runtime-persistence-secret" not in persisted
 
 
 def test_runtime_loads_selected_immutable_policy_set_for_denied_adapter_process(

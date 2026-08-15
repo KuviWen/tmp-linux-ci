@@ -1,6 +1,6 @@
 # 26 — 受限 HPO 到正式三-seed 候選
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 對共享 gated forecaster 執行只見 validation、最多 30 trials 的受限 HPO；依預先登錄規則選出設定後，另建正式 TrainingIntent 並以三 seeds 從頭訓練、校準、回測，產生可進 gate 的候選，任何 trial checkpoint 都無法核准或服務。
 

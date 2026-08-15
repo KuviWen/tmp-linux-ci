@@ -12,6 +12,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from stock_forecasting.application import Application
 from stock_forecasting.authorization import (
@@ -30,6 +31,10 @@ P1_PHASE_BOUNDARIES = {
     }
     for modality in ("documents", "fundamentals", "macro")
 }
+
+
+class SourceCredentialWriteRequest(BaseModel):
+    credential_fields: dict[str, str]
 
 
 def _etag(payload: object) -> str:
@@ -328,6 +333,190 @@ def create_web_app(application: Application) -> FastAPI:
             return authorization_denied(request, outcome)
         return {"items": outcome}
 
+    @app.get("/api/v1/operations/source-credentials", response_model=None)
+    def list_source_credentials(
+        request: Request,
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object] | Response:
+        outcome = application.operations_control.list_source_credentials(
+            trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+            security_context=security_context,
+        )
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        return {"items": outcome}
+
+    @app.put("/api/v1/operations/source-credentials/{provider_id}", response_model=None)
+    def set_source_credential(
+        request: Request,
+        provider_id: str,
+        body: SourceCredentialWriteRequest,
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object] | Response:
+        try:
+            outcome = application.operations_control.set_source_credential(
+                provider_id=provider_id,
+                credential_fields=body.credential_fields,
+                trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+                security_context=security_context,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="source_provider_not_found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        return outcome
+
+    @app.post(
+        "/api/v1/operations/source-credentials/{provider_id}/rotations",
+        response_model=None,
+    )
+    def rotate_source_credential(
+        request: Request,
+        provider_id: str,
+        body: SourceCredentialWriteRequest,
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object] | Response:
+        try:
+            outcome = application.operations_control.rotate_source_credential(
+                provider_id=provider_id,
+                credential_fields=body.credential_fields,
+                trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+                security_context=security_context,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="source_provider_not_found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        return outcome
+
+    @app.delete("/api/v1/operations/source-credentials/{provider_id}", response_model=None)
+    def revoke_source_credential(
+        request: Request,
+        provider_id: str,
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object] | Response:
+        try:
+            outcome = application.operations_control.revoke_source_credential(
+                provider_id=provider_id,
+                trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+                security_context=security_context,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="source_provider_not_found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        return outcome
+
+    @app.post(
+        "/api/v1/operations/source-credentials/{provider_id}/validations",
+        response_model=None,
+    )
+    def validate_source_credential(
+        request: Request,
+        provider_id: str,
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object] | Response:
+        try:
+            outcome = application.operations_control.validate_source_credential(
+                provider_id=provider_id,
+                trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+                security_context=security_context,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="source_provider_not_found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        return outcome
+
+    @app.get(
+        "/operations/source-credentials",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    def source_credentials_page(
+        request: Request,
+        security_context: SecurityContext = research_authentication,
+    ) -> str | Response:
+        outcome = application.operations_control.list_source_credentials(
+            trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+            security_context=security_context,
+        )
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        provider_sections: list[str] = []
+        for provider in outcome:
+            provider_id = escape(str(provider["provider_id"]), quote=True)
+            base_endpoint = f"/api/v1/operations/source-credentials/{provider_id}"
+            provider_sections.append(
+                '<section class="panel" data-provider-id="'
+                f'{provider_id}"><h2>{escape(str(provider["display_name"]))}</h2>'
+                "<dl><dt>Credential kind</dt><dd>"
+                f"{escape(str(provider['credential_kind']))}</dd>"
+                '<dt>Readiness</dt><dd class="status">'
+                f"{escape(str(provider['readiness']))}</dd>"
+                f"<dt>Reason</dt><dd>{escape(str(provider['reason_code']))}</dd>"
+                f"<dt>Version</dt><dd>{escape(str(provider['version']))}</dd></dl>"
+                '<p><a rel="noreferrer" href="'
+                f'{escape(str(provider["registration_url"]), quote=True)}">重新申請帳號</a> '
+                '<a rel="noreferrer" href="'
+                f'{escape(str(provider["key_management_url"]), quote=True)}">'
+                "管理／重新發行 key</a></p>"
+                f'<form data-endpoint="{base_endpoint}">'
+                '<label>API key ID <input type="password" name="api_key_id" '
+                'autocomplete="new-password" required></label>'
+                '<label>API secret key <input type="password" name="api_secret_key" '
+                'autocomplete="new-password" required></label>'
+                '<p><button type="button" data-operation="set">儲存</button> '
+                '<button type="button" data-operation="rotate">輪替</button> '
+                '<button type="button" data-operation="validate">驗證</button> '
+                '<button type="button" data-operation="revoke">撤銷</button></p>'
+                '<output aria-live="polite"></output></form></section>'
+            )
+        body = (
+            "<main><header><h1>來源憑證管理</h1>"
+            "<p>API key、secret 與 token 是 write-only；頁面只顯示 readiness 與版本。</p>"
+            "<p>程式不會自動建立帳號、處理 CAPTCHA、email、MFA 或接受條款；"
+            "請使用提供者自己的連結完成重新申請。</p></header>"
+            + "".join(provider_sections)
+            + """<script>
+for (const button of document.querySelectorAll('[data-operation]')) {
+  button.addEventListener('click', async () => {
+    const form = button.closest('form');
+    const operation = button.dataset.operation;
+    const base = form.dataset.endpoint;
+    const fields = Object.fromEntries(new FormData(form));
+    const request = operation === 'set'
+      ? {url: base, method: 'PUT', body: {credential_fields: fields}}
+      : operation === 'rotate'
+        ? {url: `${base}/rotations`, method: 'POST', body: {credential_fields: fields}}
+        : operation === 'validate'
+          ? {url: `${base}/validations`, method: 'POST'}
+          : {url: base, method: 'DELETE'};
+    const response = await fetch(request.url, {
+      method: request.method,
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: request.body ? JSON.stringify(request.body) : undefined,
+    });
+    const result = await response.json();
+    form.querySelector('output').textContent = response.ok
+      ? `${result.readiness}: ${result.reason_code}`
+      : `${result.code || 'request_failed'}`;
+    form.reset();
+  });
+}
+</script></main>"""
+        )
+        return _page("來源憑證管理", body)
+
     @app.get("/research", response_class=HTMLResponse, response_model=None)
     def research_matrix(
         request: Request,
@@ -514,12 +703,18 @@ def create_web_app(application: Application) -> FastAPI:
             return authorization_denied(request, outcome)
         sources = cast(list[dict[str, object]], outcome["sources"])
         status = str(outcome["status"])
+        market = str(outcome["market"])
+        is_us_market = market in {"XNAS", "XNYS"}
+        page_title = "美股行情研究資格" if is_us_market else "台股行情研究資格"
         if status == "quarantined":
             state_text = "資料隔離"
             provider_text = "不具研究資格；來源原始證據已隔離保存"
         elif status == "deferred":
             state_text = "來源延後"
             provider_text = "來源限流，尚未取得資料；checkpoint 未前進"
+        elif status == "credential_required":
+            state_text = "憑證待設定"
+            provider_text = "未接觸來源；請由來源憑證管理頁設定並驗證憑證"
         elif status == "policy_blocked":
             current_policy_reasons = {
                 str(decision["reason_code"])
@@ -572,13 +767,30 @@ def create_web_app(application: Application) -> FastAPI:
             ),
             None,
         )
+        source_basis = cast(dict[str, object], outcome["source_basis"])
+        if source_basis.get("basis_type") == "zero_fee_plan":
+            provider_name = (
+                "Alpaca Market Data Basic"
+                if source_basis.get("provider_id") == "alpaca-market-data-basic"
+                else str(source_basis.get("provider_id", "未知 provider"))
+            )
+            basis_details = (
+                f"<dt>零付費認證來源</dt><dd>{escape(provider_name)}</dd>"
+                f"<dt>方案</dt><dd>{escape(str(source_basis['plan_id']))}</dd>"
+                "<dt>成本邊界</dt><dd>$0 自助帳號；憑證 readiness 不代表用途資格</dd>"
+            )
+        else:
+            basis_details = (
+                "<dt>官方公開資料使用依據</dt><dd>"
+                f"{escape(str(outcome['source_basis_id']))}</dd>"
+                "<dt>成本邊界</dt><dd>免帳號、免申請、免付費；須保留 OGDL 顯名</dd>"
+            )
         body = (
-            "<main><header><h1>台股行情研究資格</h1>"
+            f"<main><header><h1>{page_title}</h1>"
             f'<p class="badge">{state_text}</p>'
             f"<p>{provider_text}</p></header>"
             '<section class="panel"><h2>資格依賴</h2><dl>'
-            f"<dt>官方公開資料使用依據</dt><dd>{escape(str(outcome['source_basis_id']))}</dd>"
-            "<dt>成本邊界</dt><dd>免帳號、免申請、免付費；須保留 OGDL 顯名</dd>"
+            f"{basis_details}"
             f"<dt>原因</dt><dd>{escape(str(outcome['reason_code']))}</dd>"
             f"<dt>資料集版本</dt><dd>{escape(str(dataset_id)) if dataset_id else '尚未建立'}</dd>"
             "<dt>調整版本</dt>"
@@ -591,6 +803,6 @@ def create_web_app(application: Application) -> FastAPI:
             "<th>模式</th><th>來源</th><th>狀態</th><th>原因</th>"
             f"</tr></thead><tbody>{source_rows}</tbody></table></section></main>"
         )
-        return _page("台股行情研究資格", body)
+        return _page(page_title, body)
 
     return app

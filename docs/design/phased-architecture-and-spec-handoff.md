@@ -1,6 +1,6 @@
 # 分階段架構核准與規格化交接契約
 
-> **2026-08-15 supersession:** ADR 0017 與主 spec 的 `COST-0-01` 正式取代本文 P2＋所有 `DEP-*` 採購／契約／entitlement gates、付費新聞／consensus、固定七年／八季深度、600＋1,400／2,000 listings，以及必要 Kubernetes／三 failure domains／跨區 DR。這些舊段落只保留決策歷史，不再形成 entry／exit 或 ticket requirement；實際階段契約以修訂後主 spec 與 tickets 06–39 為準。
+> **2026-08-15 supersession:** ADR 0017、0018 與主 spec 的 `COST-0-01` 正式取代本文 P2＋所有 `DEP-*` 採購／契約／entitlement gates及免帳號／免 API key 限制、付費新聞／consensus、固定七年／八季深度、600＋1,400／2,000 listings，以及必要 Kubernetes／三 failure domains／跨區 DR。零付費自助來源的 credential readiness 是可交付的程式狀態，不是 external entry gate；這些舊段落只保留決策歷史，不再形成 requirement，實際階段契約以修訂後主 spec 與 tickets 06–39 為準。
 
 ## 狀態、權威與使用方式
 
@@ -161,7 +161,7 @@ Gate 的數值與細節只存在於權威領域契約；後續規格引用 trace
 
 - `P3-TRACE-DOC-TW-01`：台灣 MOPS／OGDL 重大訊息、月營收及財報摘要形成版本化文件、FinancialFact、標的連結、annotation與證據。
 - `P3-TRACE-DOC-US-01`：SEC 8-K／6-K／10-Q／10-K／company facts經相同深 `DocumentPipeline.process` interface形成美國路徑。
-- `P3-TRACE-MACRO-01`：CBC＋DGBAS、免註冊 BLS v1 及任一獨立驗證為 no-key 的 OECD distribution 保存 release／vintage；BEA API、FRED／ALFRED 與 IMF account interfaces 固定 excluded／unavailable。
+- `P3-TRACE-MACRO-01`：CBC＋DGBAS、BLS v1 及任一獨立驗證合格的零付費 institutional distribution 保存 release／vintage；BEA API、FRED／ALFRED 與 IMF 不因需要自助憑證而固定排除，但用途或憑證不足時維持 optional `credential_required`／unavailable。
 - `P3-TRACE-NEWS-01`：台美商業新聞以相同 policy／feature／REST 契約呈現 `excluded`／`not-applicable`；不建立 collector、credential、申請或產品 gate。
 - `P3-TRACE-NLP-01`：安全sandbox、去重、confirmed連結、taxonomy、事件、凍結多語embedding、影響評估及版本化review queue通過中英文golden corpus。
 - `P3-TRACE-MODEL-01`：multimodal logistic對價量only與各單模態做ablation；只有完整gate、人工核准與五次shadow通過才可取代價量baseline。
@@ -253,7 +253,7 @@ Gate 的數值與細節只存在於權威領域契約；後續規格引用 trace
 
 - 引用該階段全部entry、tracer、exit及共用gate trace IDs；
 - 將每個tracer寫成可從外部觀察結果驗收的垂直情境，不拆成資料平台、模型平台、UI或監控等水平規格；
-- 明列依賴register狀態及blocked行為，不把採購、法務或憑證建立寫成程式成果；
+- 明列依賴 register 狀態及 blocked 行為，不把採購、法務或 provider 帳號／key 自動發行寫成程式成果；程式內 credential readiness、write-only 管理與 provider-owned 重新申請連結則是可驗收成果；
 - 直接繼承安全、時間點、容量、SLO、回測、譜系、無障礙與失敗數值，不重新提問或放寬；
 - 先建立tracer bullet票券，再建立同階段exit-bundle票券；可平行的implementation工作仍受前一bundle與外部entry gate約束；
 - 明列fixture只證明工程、正式來源與模型另需資格的限制。

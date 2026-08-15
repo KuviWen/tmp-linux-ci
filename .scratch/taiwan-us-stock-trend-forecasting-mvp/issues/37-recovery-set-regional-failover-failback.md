@@ -1,6 +1,6 @@
 # 37 — 復原集合與本機 backup／restore 路徑
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 建立把 application database target、object backup inventory／watermark、deletion-ledger sequence、設定與 deployment digests 綁定的版本化 RecoverySet；由正式 PredictionRecord 完整還原證據鏈、先重播政策性刪除，再在本機隔離 restore 環境完成受控回復，量測實際資料損失邊界、restore time 及單一部署世代。
 

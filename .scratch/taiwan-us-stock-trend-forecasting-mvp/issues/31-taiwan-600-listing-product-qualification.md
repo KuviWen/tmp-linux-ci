@@ -1,6 +1,6 @@
 # 31 — 台灣零成本完整支援池資料資格路徑
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 將台灣股票池擴展到官方零成本來源實際可完整資格審查的最大支援集合，逐一驗證身分、交易日曆、名稱／symbol history、公司行動、session、公開來源使用依據、行情、官方文件、基本面與總體涵蓋，並從正式 EOD 到繁中研究介面保留 full／degraded／unavailable／policy-blocked 的精確支援語意。
 

@@ -11,6 +11,7 @@ from stock_forecasting.authorization_repository import (
     FIXTURE_ACTIVE_POLICY_SET,
     FIXTURE_REVOKED_POLICY_SET,
     TICKET_06_POLICY_BLOCKED_SET,
+    TICKET_07_ENGINEERING_POLICY_SET,
     AuthorizationPolicyRepository,
 )
 from stock_forecasting.cli import main
@@ -160,3 +161,59 @@ def test_ticket_06_authorization_init_installs_metadata_read_but_no_price_source
     assert [item.dataset_id for item in policy.source_entitlements] == [
         "price-research-eligibility"
     ]
+
+
+def test_ticket_07_authorization_init_installs_zero_fee_and_credential_contracts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-source-administrator",
+        environment="development",
+        scopes={
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "source_credential.read",
+            "source_credential.manage",
+        },
+        issued_at=now,
+        expires_at=now.replace(day=16),
+        data_protection_classes={"licensed", "restricted", "secret"},
+    )
+    key_file = tmp_path / "ticket-07-local-api-key.json"
+    identity.save(key_file)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ticket-07-authorization.db'}"
+    StateStore(database_url, create_schema=True)
+
+    exit_code = main(
+        [
+            "authorization",
+            "init-ticket-07",
+            "--database-url",
+            database_url,
+            "--key-file",
+            str(key_file),
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == '{"policy_set_count": 1, "status": "initialized"}\n'
+    policy = AuthorizationPolicyRepository(StateStore(database_url, create_schema=False)).get(
+        TICKET_07_ENGINEERING_POLICY_SET,
+        principal_id=identity.context.principal_id,
+    )
+    policies = {item.dataset_id: item for item in policy.source_policies}
+    assert set(policies) == {
+        "alpaca-us-stock-bars",
+        "price-research-eligibility",
+        "source-credential-metadata",
+    }
+    bars = policies["alpaca-us-stock-bars"]
+    assert bars.access_basis == "zero_fee_plan"
+    assert bars.source_basis_id == "ALPACA-BASIC-US-MARKET-DATA-01"
+    assert bars.provider_id == "alpaca-market-data-basic"
+    assert bars.plan_id == "basic-2026-08-15"
+    assert bars.fee_required is False
+    assert bars.terms_content_sha256 is not None
+    assert policies["source-credential-metadata"].data_protection_class == "restricted"

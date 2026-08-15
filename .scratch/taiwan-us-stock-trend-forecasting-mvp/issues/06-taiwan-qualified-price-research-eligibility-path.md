@@ -1,6 +1,6 @@
 # 06 — 台股合格行情到研究資格狀態
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 將 data.gov.tw 逐一明示 OGDL 1.0 的 TWSE 當期 distributions 與平台自首次取得日起的不可變 observed-history reader 接入相同 DataSupply 介面契約，從未調整 EOD、公司行動與掛牌／名稱歷史建立可追溯台股資料集、內部調整版本及研究／營運資格狀態；公開使用依據或實得歷史不足時，完整路徑必須 fail closed 而不使用替代網站、付費 feed 或採購待辦。
 

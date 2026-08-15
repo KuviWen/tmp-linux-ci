@@ -1,6 +1,6 @@
 # 研究介面資訊架構
 
-> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文對固定 100＋100／2,000 listing、商業新聞／consensus 與外部 production service 的必要假設；研究介面顯示實際零成本支援池，並把不支援來源明確呈現為 unavailable／excluded。本文的可追溯性、繁中、URL state 與 accessibility 契約仍有效。
+> **2026-08-15 product boundary:** ADR 0017、0018 與主 spec 的 `COST-0-01` 取代本文對固定 100＋100／2,000 listing、商業新聞／consensus 與外部 production service 的必要假設；研究介面顯示實際合格零付費支援池，並把缺少憑證或不支援來源明確呈現為 `credential_required`／unavailable／excluded。本文的可追溯性、繁中、URL state 與 accessibility 契約仍有效。
 
 ## 狀態
 

@@ -21,6 +21,7 @@ from stock_forecasting.data_supply import (
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
+from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
 
 class PriceEligibilityQuery:
@@ -68,17 +69,29 @@ class PriceEligibilityQuery:
         modes = {str(source["source_mode"]) for source in sources}
         required_modes_present = modes == {"current", "historical"}
         statuses = {str(source["status"]) for source in sources}
-        try:
+        us_manifest = load_us_stock_pool_manifest()
+        us_listing = next(
+            (candidate for candidate in us_manifest.listings if candidate.listing_id == listing_id),
+            None,
+        )
+        if us_listing is not None:
+            market: str = us_listing.market
+            source_basis = us_manifest.source_basis.as_payload()
+            formal_evidence_available = us_manifest.formally_qualified
+        else:
             manifest = load_taiwan_stock_pool_manifest(self._object_repository)
-            formal_evidence_available = TaiwanPriceQualificationWorkflow(
-                self._state_store,
-                object_repository=self._object_repository,
-            ).formal_qualification_available(
-                manifest,
-                sources,
-            )
-        except ValueError:
-            formal_evidence_available = False
+            market = "XTAI"
+            source_basis = manifest.source_basis.as_payload()
+            try:
+                formal_evidence_available = TaiwanPriceQualificationWorkflow(
+                    self._state_store,
+                    object_repository=self._object_repository,
+                ).formal_qualification_available(
+                    manifest,
+                    sources,
+                )
+            except ValueError:
+                formal_evidence_available = False
         current_source_rights_denied = any(
             isinstance((current := source.get("current_policy_decision")), dict)
             and current.get("outcome") == "denied"
@@ -93,6 +106,13 @@ class PriceEligibilityQuery:
                 "source_rights_not_effective"
                 if any(source["reason_code"] == "source_rights_not_effective" for source in sources)
                 else "source_basis_unverified"
+            )
+        elif "credential_required" in statuses:
+            status = "credential_required"
+            reason_code = next(
+                str(source["reason_code"])
+                for source in sources
+                if source["status"] == "credential_required"
             )
         elif "deferred" in statuses:
             status = "deferred"
@@ -118,11 +138,11 @@ class PriceEligibilityQuery:
             checks["policy"] = "blocked"
         return {
             "listing_id": listing_id,
-            "market": "XTAI",
+            "market": market,
             "status": status,
             "reason_code": reason_code,
-            "source_basis_id": manifest.source_basis.source_basis_id,
-            "source_basis": manifest.source_basis.as_payload(),
+            "source_basis_id": str(source_basis["source_basis_id"]),
+            "source_basis": source_basis,
             "formally_qualified": status == "qualified",
             "checks": checks,
             "sources": sources,

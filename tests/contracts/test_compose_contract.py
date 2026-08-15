@@ -34,6 +34,11 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "ticket-06-api",
         "ticket-06-api-ingress",
         "ticket-06-acceptance",
+        "ticket-07-local-key-init",
+        "ticket-07-authorization-init",
+        "ticket-07-api",
+        "ticket-07-api-ingress",
+        "ticket-07-acceptance",
     }
     assert services["postgres"]["image"] == "postgres:17-alpine"
     assert services["postgres"]["environment"] == {
@@ -344,6 +349,52 @@ def test_compose_declares_ticket_06_policy_blocked_deployed_acceptance() -> None
     assert acceptance["depends_on"]["ticket-06-api-ingress"]["condition"] == ("service_healthy")
 
 
+def test_compose_declares_ticket_07_missing_credential_deployed_acceptance() -> None:
+    compose = yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    profile = ["ticket-07-acceptance"]
+
+    key_init = services["ticket-07-local-key-init"]
+    assert key_init["profiles"] == profile
+    assert key_init["command"].count("--scope") == 4
+    assert {
+        "market_data.collect",
+        "price_research_eligibility.read",
+        "source_credential.read",
+        "source_credential.manage",
+    } <= set(key_init["command"])
+    assert key_init["command"].count("--data-protection-class") == 3
+    assert {"licensed", "restricted", "secret"} <= set(key_init["command"])
+
+    authorization_init = services["ticket-07-authorization-init"]
+    assert authorization_init["profiles"] == profile
+    assert "init-ticket-07" in authorization_init["command"]
+
+    api = services["ticket-07-api"]
+    assert api["profiles"] == profile
+    assert api["environment"]["AUTHORIZATION_POLICY_SET_ID"] == (
+        "ticket-07-us-zero-fee-engineering-v1"
+    )
+    assert api["environment"]["SOURCE_SECRET_ROOT"] == ("/var/lib/stock-forecasting/source-secrets")
+    assert "ticket-07-source-secrets:/var/lib/stock-forecasting/source-secrets" in api["volumes"]
+    assert services["ticket-07-api-ingress"]["network_mode"] == "service:ticket-07-api"
+
+    acceptance = services["ticket-07-acceptance"]
+    assert acceptance["profiles"] == profile
+    assert acceptance["command"][:5] == [
+        "python",
+        "-m",
+        "stock_forecasting.cli",
+        "acceptance",
+        "ticket-07",
+    ]
+    assert "--base-url" in acceptance["command"]
+    assert "--key-file" in acceptance["command"]
+    assert acceptance["depends_on"]["ticket-07-api"]["condition"] == "service_healthy"
+    assert acceptance["depends_on"]["ticket-07-api-ingress"]["condition"] == ("service_healthy")
+    assert "ticket-07-source-secrets" in compose["volumes"]
+
+
 def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
     dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
     dockerignore = (REPOSITORY_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
@@ -354,6 +405,7 @@ def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
     assert "COPY docker ./docker" in dockerfile
     assert "COPY .github ./.github" in dockerfile
     assert "/run/stock-forecasting" in dockerfile
+    assert "/var/lib/stock-forecasting/source-secrets" in dockerfile
     assert "USER app" in dockerfile
     assert '"--host", "127.0.0.1"' in dockerfile
     assert (REPOSITORY_ROOT / "requirements.lock").is_file()

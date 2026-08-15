@@ -1,10 +1,10 @@
 # 安全、身分、來源授權與保存控制
 
-> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文對每個 P2＋來源皆需 principal entitlement、外部 OIDC／WebAuthn／KMS、商業簽章、獨立滲透測試及固定七年保存的必要假設。官方公開資料由 `open_data_terms` SourcePolicyVersion 建立資格；必要安全證據使用本機／開源工具。本文的 ActionGrant、用途／環境交集、secret 不外洩、append-only audit 與 policy deletion 仍有效。
+> **2026-08-15 product boundary:** ADR 0017、0018 與主 spec 的 `COST-0-01` 取代本文對每個 P2＋來源皆需 principal entitlement、來源必須免帳號／免 API key、外部 OIDC／WebAuthn／KMS、商業簽章、獨立滲透測試及固定七年保存的必要假設。公開或零付費方案皆以 dataset-level SourcePolicyVersion 建立來源使用資格；來源憑證另由本機開源 SecretProvider 管理。本文的 ActionGrant、用途／環境交集、secret 不外洩、append-only audit 與 policy deletion 仍有效。
 
 本文件固定生產導向 MVP 的信任域、人員與工作負載身分、行動權限、來源使用資格、secret、加密、資料保護、保存／刪除、安全稽核、供應鏈、執行隔離與安全驗收契約。它延伸既有的[資料平台架構](data-platform-architecture.md)、[文件處理管線](document-processing-pipeline.md)、[模型生命週期](model-lifecycle-and-promotion.md)、[模組與 REST 契約](service-boundaries-and-api-contracts.md)及[營運與事故契約](observability-source-health-and-incidents.md)，不取代其中的時間點、譜系、升版或營運語意；分期安全entry／exit與商業來源dependency由[分階段架構交接契約](phased-architecture-and-spec-handoff.md)固定。
 
-本文是工程安全與來源權利控制設計，不是法律、法遵或資料供應商契約意見。來源可否使用、保存、訓練、展示或再散布，仍須以部署者取得的有效文件及法務／採購判斷為準；程序身分、網路、備份、復原與供應鏈 gate 的部署形狀由[部署契約](deployment-topology-capacity-and-recovery.md)落實。
+本文是工程安全與來源權利控制設計，不是法律、法遵或資料供應商契約意見。來源可否使用、保存、訓練、展示或再散布，仍須以部署主體實際適用的版本化方案與條款證據判斷；需要付款、sales／人工核准、採購或協商契約的來源不進必要產品路徑。程序身分、網路、備份、復原與供應鏈 gate 的部署形狀由[部署契約](deployment-topology-capacity-and-recovery.md)落實。
 
 ## 決策摘要
 
@@ -13,7 +13,7 @@
 - 人員與工作負載都先形成不可偽造的 `SecurityContext`；網路位置、管理員稱號或外部 IdP group 不構成隱含信任。
 - 行動權限與來源使用資格是兩條獨立軸線；授權決策還要同時套用用途、環境、資料保護類別及來源政策，任一未知或衝突即拒絕。
 - 來源政策與來源使用資格由應用擁有版本化真相；reverse proxy、Dagster、資料庫、OPA 類工具或各 REST handler 不能另建一套權限語意。
-- Secret 值不進設定、資料庫、工作命令或 log；只有真正連線的 adapter 能透過 `SecretProvider` 取得短效租約。
+- Secret 值不進 repository、設定、資料庫、工作命令、artifact、response、outbox、log 或 trace；只有真正連線的 adapter 能透過 `SecretProvider` 取得短效租約。來源憑證的存在或有效性不會取代來源使用資格。
 - 七年是正式資料／模型／預測／治理證據的最低產品要求。來源原文若不允許七年保存及模型用途，不得成為正式模型輸入。
 - 來源內容與受其限制的衍生物可被政策性刪除；不含被禁止內容的核准、授權、tombstone、刪除證明及安全稽核保留不可變證據。
 - 正式 image、模型成品與部署 bundle 以 digest 定址、簽章並附 provenance／SBOM；未驗證產物不得執行。
@@ -65,6 +65,7 @@ flowchart LR
 | `AuthorizationDecision` | 不可變 allow／deny、穩定 reason codes、所有適用政策／grant／entitlement、遮罩／欄位／匯出限制、decision ID、時間及最晚有效時間 |
 | `SecretRef` | 可保存的不透明 reference，沒有 secret value；包含 provider namespace、用途及允許的 workload class |
 | `SecretLease` | 不可序列化的短效 secret 租約，帶版本、issued／expiry、使用目的及撤銷狀態；不得進 REST、工作命令、artifact 或 log |
+| `SourceCredentialReadiness` | 不含 secret value 的 `missing`、`configured`、`validation_failed`、`valid`、`expired` 或 `revoked` 結果；綁定 provider、credential kind、SecretRef、版本、最近驗證時間與修復連結 |
 | `RetentionDecision` | 對一組物件與相依產出計算的最低保存期限、最晚刪除期限、legal hold／衝突及允許處置 |
 | `DeletionCertificate` | 不含被禁內容的刪除範圍、依據、核准、執行、驗證、未完成項及時間證據 |
 | `SecurityAuditEvent` | 對認證、授權、secret、受限讀取、治理、部署及安全處置的不可變行為證據 |
@@ -105,6 +106,16 @@ REST、Dagster、資料擷取、文件 sandbox、特徵、訓練、推論、治�
 - 正式 adapter 使用平台 OIDC 或 SPIFFE X.509-SVID，固定 trust domain、audience 及 workload name；
 - JWT 工作負載憑證最長 5 分鐘；動態 X.509／資料庫 lease 最長 1 小時並自動輪替；
 - 來源靜態憑證只由獲准 source adapter 在使用時 checkout。
+
+### 來源憑證管理
+
+Operations 程式頁面與 REST 只回傳 provider、credential kind、readiness、SecretRef ID、版本、最近設定／驗證時間、遮罩後識別提示及版本化 provider-owned registration／key-management URL，永不回傳 credential value。`source_credential.read` 可查狀態；`source_credential.manage` 才可 set、rotate、revoke、validate，所有動作套用 SecurityContext、CSRF／step-up、purpose、environment、provider allowlist 及 append-only audit。
+
+Set／rotate request 的 key、secret 或 token 是 write-only request body，handler 在同一呼叫內交給 `SecretProvider` 後即丟棄；應用資料庫只保存新 SecretRef 與 readiness metadata。舊、新版本可在 provider 允許的短暫輪替視窗並存，但 adapter 每次 work attempt 只取得被 pin 的單一短效 SecretLease；撤銷後的新 attempt 不得再 checkout 舊版本，既有來源政策與歷史授權決策不被改寫。
+
+Validate 是明確的 provider adapter 操作：缺少 secret 時不產生網路呼叫；authentication failure 更新 `validation_failed`，provider／network failure 保留可區分的 transient 結果，成功只證明 credential 可驗證，不會自動啟用未合格資料集。任何 response、exception、telemetry、audit 或 support bundle 都先經 secret redaction 與 known-value canary 檢查。
+
+「重新申請」只導向來源政策中固定並經 egress allowlist 驗證的 provider-owned HTTPS URL，回到程式後由使用者輸入替代憑證。應用不代填外部帳號、不處理 CAPTCHA、email／MFA、不替使用者接受條款，也不把一般 redirect 目的地當成可信 URL；只有 provider 有另行合格的正式發行 API 時才可增加自動發行能力。
 
 ### Break-glass
 

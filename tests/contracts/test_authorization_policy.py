@@ -657,6 +657,140 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
     assert denied.reason_code == "source_distribution_not_authorized"
 
 
+def test_zero_fee_authenticated_plan_requires_versioned_terms_and_principal_entitlement() -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-individual-researcher",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    required_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_observed_history",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
+    )
+    distribution = SourceDistribution(
+        dataset_id="alpaca-us-stock-bars-v2",
+        distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+    )
+    source_policy = SourcePolicyVersion(
+        version_id="policy-alpaca-basic-us-bars-v1",
+        dataset_id="alpaca-us-stock-bars",
+        allowed_actions=frozenset({"market_data.collect"}),
+        purposes=frozenset({"price_research"}),
+        environments=frozenset({"development"}),
+        data_protection_class="licensed",
+        resource_states=frozenset({"active"}),
+        allowed_uses=required_uses,
+        access_basis="zero_fee_plan",
+        source_basis_id="ALPACA-BASIC-US-MARKET-DATA-01",
+        license_id="alpaca-customer-agreement-2026-08-15",
+        terms_url="https://files.alpaca.markets/disclosures/library/TermsAndConditions.pdf",
+        terms_content_sha256="2" * 64,
+        attribution="Alpaca Market Data Basic",
+        distributions=(distribution,),
+        provider_id="alpaca-market-data-basic",
+        plan_id="basic-2026-08-15",
+        principal_classification="individual_non_commercial",
+        credential_kind="api_key_pair",
+        account_required=True,
+        fee_required=False,
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-ticket-07-us-price-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"market_data.collect"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=(source_policy,),
+        source_entitlements=(
+            SourceEntitlement(
+                version_id="entitlement-ticket-07-qualified-individual-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id="alpaca-us-stock-bars",
+                status="active",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+                allowed_uses=required_uses,
+            ),
+        ),
+    )
+
+    decision = policy.evaluate(
+        identity.context,
+        OperationIntent(
+            action="market_data.collect",
+            dataset_id="alpaca-us-stock-bars",
+            purpose="price_research",
+            environment="development",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-ticket-07-zero-fee-plan",
+            correlation_id="request-ticket-07-zero-fee-plan",
+            required_uses=required_uses,
+            distribution_id=distribution.dataset_id,
+            distribution_url=distribution.distribution_url,
+        ),
+    )
+
+    assert decision.allowed is True
+    evidence = policy.publication_version_evidence(decision)
+    assert (
+        evidence["source_policy"]
+        | {
+            "provider_id": "alpaca-market-data-basic",
+            "plan_id": "basic-2026-08-15",
+            "principal_classification": "individual_non_commercial",
+            "credential_kind": "api_key_pair",
+            "account_required": True,
+            "fee_required": False,
+        }
+        == evidence["source_policy"]
+    )
+    assert evidence["source_entitlement"]["version_id"] == (
+        "entitlement-ticket-07-qualified-individual-v1"
+    )
+
+    without_qualification = AuthorizationPolicy(
+        action_grants=policy.action_grants,
+        source_policies=policy.source_policies,
+        source_entitlements=(),
+    ).evaluate(
+        identity.context,
+        OperationIntent(
+            action="market_data.collect",
+            dataset_id="alpaca-us-stock-bars",
+            purpose="price_research",
+            environment="development",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-ticket-07-unqualified-plan",
+            correlation_id="request-ticket-07-unqualified-plan",
+            required_uses=required_uses,
+            distribution_id=distribution.dataset_id,
+            distribution_url=distribution.distribution_url,
+        ),
+    )
+    assert without_qualification.allowed is False
+    assert without_qualification.reason_code == "source_entitlement_missing"
+
+
 def test_conflicting_entitlement_versions_fail_closed_instead_of_using_tuple_order() -> None:
     now = datetime(2026, 8, 14, 1, 0, tzinfo=UTC)
     credential, verifier = LocalApiKeyVerifier.issue(

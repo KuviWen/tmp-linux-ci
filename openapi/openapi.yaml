@@ -100,6 +100,101 @@ paths:
           $ref: '#/components/responses/ProblemResponse'
         '403':
           $ref: '#/components/responses/ProblemResponse'
+  /api/v1/operations/source-credentials:
+    get:
+      operationId: listSourceCredentials
+      security:
+        - LocalApiKey: []
+      responses:
+        '200':
+          description: Write-only provider credential readiness metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/SourceCredentialMetadata'}
+        '401': {$ref: '#/components/responses/ProblemResponse'}
+        '403': {$ref: '#/components/responses/ProblemResponse'}
+  /api/v1/operations/source-credentials/{provider_id}:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    put:
+      operationId: setSourceCredential
+      security:
+        - LocalApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SourceCredentialWriteRequest'}
+      responses:
+        '200':
+          description: Credential metadata after storing the write-only value.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SourceCredentialMetadata'}
+        '401': {$ref: '#/components/responses/ProblemResponse'}
+        '403': {$ref: '#/components/responses/ProblemResponse'}
+        '404': {$ref: '#/components/responses/ProblemResponse'}
+        '422': {$ref: '#/components/responses/ProblemResponse'}
+    delete:
+      operationId: revokeSourceCredential
+      security:
+        - LocalApiKey: []
+      responses:
+        '200':
+          description: Revoked credential metadata; the secret value is destroyed.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SourceCredentialMetadata'}
+        '401': {$ref: '#/components/responses/ProblemResponse'}
+        '403': {$ref: '#/components/responses/ProblemResponse'}
+        '404': {$ref: '#/components/responses/ProblemResponse'}
+        '409': {$ref: '#/components/responses/ProblemResponse'}
+  /api/v1/operations/source-credentials/{provider_id}/rotations:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    post:
+      operationId: rotateSourceCredential
+      security:
+        - LocalApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SourceCredentialWriteRequest'}
+      responses:
+        '200':
+          description: Credential metadata after atomically replacing the secret.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SourceCredentialMetadata'}
+        '401': {$ref: '#/components/responses/ProblemResponse'}
+        '403': {$ref: '#/components/responses/ProblemResponse'}
+        '404': {$ref: '#/components/responses/ProblemResponse'}
+        '422': {$ref: '#/components/responses/ProblemResponse'}
+  /api/v1/operations/source-credentials/{provider_id}/validations:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    post:
+      operationId: validateSourceCredential
+      security:
+        - LocalApiKey: []
+      responses:
+        '200':
+          description: Provider API validation result without secret material.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SourceCredentialMetadata'}
+        '401': {$ref: '#/components/responses/ProblemResponse'}
+        '403': {$ref: '#/components/responses/ProblemResponse'}
+        '404': {$ref: '#/components/responses/ProblemResponse'}
+        '409': {$ref: '#/components/responses/ProblemResponse'}
   /api/v1/operations/health:
     get:
       operationId: listCanonicalHealth
@@ -143,6 +238,13 @@ components:
       schema:
         type: string
         format: uuid
+    ProviderId:
+      name: provider_id
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [alpaca-market-data-basic]
   responses:
     ProblemResponse:
       description: RFC 9457 problem details.
@@ -332,6 +434,70 @@ components:
                   - current_dividend
                   - current_listing_reference
                   - selection_support
+    ZeroFeeSourceBundleMember:
+      type: object
+      additionalProperties: false
+      required:
+        - provider_id
+        - dataset_id
+        - distribution_url
+        - qualification_scope
+        - schema_version
+        - price_semantics
+        - qualification_status
+        - known_gaps
+      properties:
+        provider_id: {type: string, minLength: 1}
+        dataset_id: {type: string, minLength: 1}
+        distribution_url: {type: string, format: uri}
+        qualification_scope: {type: string, minLength: 1}
+        schema_version: {type: string, minLength: 1}
+        price_semantics:
+          type: [string, 'null']
+          enum: [unadjusted, null]
+        qualification_status:
+          type: string
+          enum: [candidate_terms_not_archived, candidate_scope_limited]
+        known_gaps:
+          type: array
+          minItems: 1
+          items: {type: string, minLength: 1}
+    ZeroFeeAuthenticatedSourceBasis:
+      type: object
+      additionalProperties: false
+      required:
+        - source_basis_id
+        - basis_type
+        - provider_id
+        - plan_id
+        - principal_classification
+        - credential_kind
+        - account_required
+        - fee_required
+        - terms_url
+        - terms_content_sha256
+        - qualification_status
+        - members
+      properties:
+        source_basis_id: {type: string, minLength: 1}
+        basis_type: {type: string, const: zero_fee_plan}
+        provider_id: {type: string, minLength: 1}
+        plan_id: {type: string, minLength: 1}
+        principal_classification: {type: string, minLength: 1}
+        credential_kind: {type: string, const: api_key_pair}
+        account_required: {type: boolean, const: true}
+        fee_required: {type: boolean, const: false}
+        terms_url: {type: string, format: uri}
+        terms_content_sha256:
+          type: [string, 'null']
+          pattern: '^[0-9a-f]{64}$'
+        qualification_status:
+          type: string
+          const: candidate_terms_not_archived
+        members:
+          type: array
+          minItems: 1
+          items: {$ref: '#/components/schemas/ZeroFeeSourceBundleMember'}
     PriceResearchEligibility:
       type: object
       additionalProperties: false
@@ -347,20 +513,22 @@ components:
         - sources
       properties:
         listing_id: {type: string, format: uuid}
-        market: {type: string, const: XTAI}
+        market: {type: string, enum: [XTAI, XNAS, XNYS]}
         status:
           type: string
-          enum: [qualified, policy_blocked, quarantined, deferred]
+          enum: [qualified, credential_required, policy_blocked, quarantined, deferred]
         reason_code: {type: string}
-        source_basis_id: {type: string, const: TWSE-OGDL-OPEN-DATA-01}
+        source_basis_id: {type: string, minLength: 1}
         source_basis:
-          $ref: '#/components/schemas/OpenDataSourceBasis'
+          oneOf:
+            - {$ref: '#/components/schemas/OpenDataSourceBasis'}
+            - {$ref: '#/components/schemas/ZeroFeeAuthenticatedSourceBasis'}
         formally_qualified: {type: boolean}
         checks:
           $ref: '#/components/schemas/PriceQualificationChecks'
         sources:
           type: array
-          minItems: 2
+          minItems: 1
           items: {$ref: '#/components/schemas/PriceSourceEligibility'}
     PriceQualificationChecks:
       type: object
@@ -454,10 +622,12 @@ components:
         - checks
         - current_policy_decision
       properties:
-        status: {type: string, enum: [published, policy_blocked, quarantined, deferred]}
+        status:
+          type: string
+          enum: [published, credential_required, policy_blocked, quarantined, deferred]
         reason_code: {type: string}
         policy_reason_code: {type: string}
-        source_basis_id: {type: string, const: TWSE-OGDL-OPEN-DATA-01}
+        source_basis_id: {type: string, minLength: 1}
         source_id: {type: string}
         source_mode: {type: string, enum: [current, historical]}
         listing_ids:
@@ -539,6 +709,46 @@ components:
         status: {type: string, enum: [ready, degraded, blocked, unknown]}
         reason_code: {type: string}
         affected_attempts: {type: integer, minimum: 1}
+    SourceCredentialMetadata:
+      type: object
+      additionalProperties: false
+      required:
+        - provider_id
+        - readiness
+        - reason_code
+        - secret_ref_id
+        - version
+        - configured_at
+        - last_validated_at
+      properties:
+        provider_id: {type: string}
+        display_name: {type: string}
+        credential_kind: {type: string, enum: [api_key_pair]}
+        required_fields:
+          type: array
+          items: {type: string}
+        readiness:
+          type: string
+          enum: [missing, configured, valid, validation_failed, revoked]
+        reason_code: {type: string}
+        secret_ref_id: {type: [string, 'null']}
+        version: {type: [integer, 'null'], minimum: 1}
+        configured_at: {type: [string, 'null'], format: date-time}
+        last_validated_at: {type: [string, 'null'], format: date-time}
+        revoked_at: {type: [string, 'null'], format: date-time}
+        registration_url: {type: string, format: uri}
+        key_management_url: {type: string, format: uri}
+    SourceCredentialWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [credential_fields]
+      properties:
+        credential_fields:
+          type: object
+          minProperties: 1
+          additionalProperties:
+            type: string
+            writeOnly: true
     ProblemDetails:
       type: object
       additionalProperties: false

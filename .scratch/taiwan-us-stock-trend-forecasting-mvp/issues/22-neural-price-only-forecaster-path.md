@@ -1,6 +1,6 @@
 # 22 — Neural price-only TrendForecaster 路徑
 
-**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+**Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
 **What to build:** 在既有 TrendForecaster 深 seam 後建立第一個 neural price-only implementation，使用與 logistic 完全相同的 immutable FeatureBatch、回測、校準、artifact、shadow 與研究／營運契約，證明神經模型可以在不改 caller 或正式資料語意的情況下端到端運行。
 

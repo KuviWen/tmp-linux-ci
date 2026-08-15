@@ -1,6 +1,6 @@
 # 資料擷取、編排與儲存平台架構
 
-> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文所有 P2＋外部契約／principal entitlement、付費 backfill 與固定七年必要來源假設；公開資料以 dataset-level `open_data_terms` 治理，缺漏以實得涵蓋 fail closed。本文其餘不可變版本、時間點、譜系與 provider-interface 契約仍有效。
+> **2026-08-15 product boundary:** ADR 0017、0018 與主 spec 的 `COST-0-01` 取代本文所有 P2＋採購／協商契約／付費 backfill 與固定七年必要來源假設；公開及零付費 authenticated data 都以 dataset-level SourcePolicyVersion 治理，來源憑證只經 SecretProvider，缺漏以實得涵蓋與 `credential_required` fail closed。本文其餘不可變版本、時間點、譜系與 provider-interface 契約仍有效。
 
 本文件記錄「選擇資料擷取、編排與儲存架構」的決策。它建立可在 Docker Compose 完整運行、可部署到 Kubernetes、保存七年證據鏈，且不讓編排或儲存供應商滲入領域語意的平台骨架；身分、來源權利、加密及精確刪除遵守[安全與保存契約](security-identity-entitlement-and-retention.md)，程序、副本、容量與復原遵守[部署契約](deployment-topology-capacity-and-recovery.md)，分期實作深度與tracer bullets遵守[分階段架構交接契約](phased-architecture-and-spec-handoff.md)。
 
