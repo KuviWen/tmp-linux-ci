@@ -1,6 +1,6 @@
 {
   "manifest_id": "p2-stock-pool-10-plus-10-v1",
-  "selection_evidence_version": "twse-10-selection-evidence-v1",
+  "selection_evidence_version": "twse-10-selection-evidence-v2",
   "selection_as_of": "2026-08-15",
   "market_targets": {
     "XTAI": 10,
@@ -57,7 +57,8 @@
       ],
       "selection_evidence_ids": [
         "twse-factbook-2026-common-stocks",
-        "twse-2317-trading-halt"
+        "twse-2317-trading-halt",
+        "twse-2317-trading-resume"
       ],
       "coverage_cases": ["ordinary_share", "suspension"]
     },
@@ -183,7 +184,7 @@
         "twse-factbook-2026-common-stocks",
         "tsh-2887-name-change"
       ],
-      "coverage_cases": ["ordinary_share", "ticker_change"]
+      "coverage_cases": ["ordinary_share", "name_history"]
     },
     {
       "listing_id": "10000000-0000-4000-8000-000000000010",
@@ -218,84 +219,159 @@
   "selection_evidence": [
     {
       "evidence_id": "twse-factbook-2026-common-stocks",
+      "evidence_kind": "ordinary_share_population",
       "coverage_case": "ordinary_share",
       "publisher": "TWSE",
       "source_url": "https://www.twse.com.tw/downloads/zh/about/company/factbook/2026/1.04.html",
       "source_content_sha256": "08e3ff2c79770e21fd436be605014b4cfbf8830894661693c84c52f345a2f6fb",
-      "occurred_on": "2025-12-31",
-      "retrieved_on": "2026-08-15"
+      "subjects": [
+        {"listing_id": "10000000-0000-4000-8000-000000000001", "external_security_code": "2330"},
+        {"listing_id": "10000000-0000-4000-8000-000000000002", "external_security_code": "2317"},
+        {"listing_id": "10000000-0000-4000-8000-000000000003", "external_security_code": "2308"},
+        {"listing_id": "10000000-0000-4000-8000-000000000004", "external_security_code": "2454"},
+        {"listing_id": "10000000-0000-4000-8000-000000000005", "external_security_code": "2881"},
+        {"listing_id": "10000000-0000-4000-8000-000000000007", "external_security_code": "3711"},
+        {"listing_id": "10000000-0000-4000-8000-000000000008", "external_security_code": "2382"},
+        {"listing_id": "10000000-0000-4000-8000-000000000009", "external_security_code": "2887"}
+      ],
+      "effective_from": "2025-12-31",
+      "effective_to": "2025-12-31",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:76685c1012c3941f4317c505b4cf8d6f346f8795d12878704b4ffe06db83fe71"
     },
     {
       "evidence_id": "twse-2330-cash-dividend",
+      "evidence_kind": "cash_dividend",
       "coverage_case": "company_action",
       "publisher": "TWSE",
       "source_url": "https://wwwc.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d69a3d6cf9019b078b883d0440.pdf",
       "source_content_sha256": "2a7228de0e64fa135d61053a58ee309711db7e3e5d57618b7d41635c9e856ec9",
-      "occurred_on": "2025-12-11",
-      "retrieved_on": "2026-08-15"
+      "subjects": [
+        {"listing_id": "10000000-0000-4000-8000-000000000001", "external_security_code": "2330"}
+      ],
+      "effective_from": "2025-12-11",
+      "effective_to": "2025-12-11",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:8e682e599454fc643bc60c973e721327800a3c96789f7df67eef1fc0693de442"
     },
     {
       "evidence_id": "twse-2317-trading-halt",
+      "evidence_kind": "trading_suspension",
       "coverage_case": "suspension",
       "publisher": "TWSE",
       "source_url": "https://wwwc.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d697fc438f01985582a3690192.pdf",
       "source_content_sha256": "bacc86f2b2d5949b638e12485d407618be0ffef8d2b6f443509aa9259eb0040f",
-      "occurred_on": "2025-07-30",
-      "retrieved_on": "2026-08-15"
+      "subjects": [
+        {"listing_id": "10000000-0000-4000-8000-000000000002", "external_security_code": "2317"}
+      ],
+      "effective_from": "2025-07-30",
+      "effective_to": "2025-07-30",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:4e9c7ce01ee2e8b4f3523524b506af35d5ac20dd9a9407d469c355ff57dd523b"
+    },
+    {
+      "evidence_id": "twse-2317-trading-resume",
+      "evidence_kind": "trading_resume",
+      "coverage_case": "suspension",
+      "publisher": "TWSE",
+      "source_url": "https://wwwc.twse.com.tw/staticFiles/news/news/tsecnews/8a8216d697fc438f01985ae1745301be.pdf",
+      "source_content_sha256": "dd326e7841732c3e350092d417eefbd588a9682cb30ca452af7af3eccc0efc9c",
+      "subjects": [
+        {"listing_id": "10000000-0000-4000-8000-000000000002", "external_security_code": "2317"}
+      ],
+      "effective_from": "2025-07-31",
+      "effective_to": "2025-07-31",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:49ed235b85782038a6abf119efa61019abadaa49bc93493f58672a79ba117466"
     },
     {
       "evidence_id": "tsh-2887-name-change",
-      "coverage_case": "ticker_change",
+      "evidence_kind": "display_name_change",
+      "coverage_case": "name_history",
       "publisher": "issuer",
       "source_url": "https://www.tsholdings.com.tw/tsh/relations/major/1743420780000/",
       "source_content_sha256": "2ce74c7d4296b84f1ec4c3c7c8d258abbf0873dd1e3d04f237007d0de656e96e",
-      "occurred_on": "2025-07-24",
-      "retrieved_on": "2026-08-15"
+      "subjects": [
+        {"listing_id": "10000000-0000-4000-8000-000000000009", "external_security_code": "2887"}
+      ],
+      "effective_from": "2025-07-24",
+      "effective_to": "2025-07-24",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:7f4152abd8e23f2994f54df2d724c3892e06306a67b1dc59bd9abd5ab25d53a6"
     },
     {
       "evidence_id": "twse-3714-common-share",
+      "evidence_kind": "ordinary_share_listing",
       "coverage_case": "ordinary_share",
       "publisher": "TWSE",
       "source_url": "https://investoredu.twse.com.tw/Mobile_pages/..%2FFileSystem%2FFileUpload%2F3b0709ec-90bf-4051-975b-8f28b6c035aa.pdf",
       "source_content_sha256": "c5170640828b61a12e4d9c5ca41666a42491c562ef60e3846be0dcf2d3fa7003",
-      "occurred_on": "2021-01-06",
-      "retrieved_on": "2026-08-15"
+      "subjects": [
+        {"listing_id": "10000000-0000-4000-8000-000000000006", "external_security_code": "3714"}
+      ],
+      "effective_from": "2021-01-06",
+      "effective_to": "2021-01-06",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:76f396a5bac3ab5bd2edba473556966577e9df2c06472ec96e27a722778b7c67"
     },
     {
       "evidence_id": "twse-2448-common-share",
+      "evidence_kind": "ordinary_share_at_delisting",
       "coverage_case": "ordinary_share",
       "publisher": "TWSE",
       "source_url": "https://investoredu.twse.com.tw/Mobile_pages/..%2FFileSystem%2FFileUpload%2F3b0709ec-90bf-4051-975b-8f28b6c035aa.pdf",
       "source_content_sha256": "c5170640828b61a12e4d9c5ca41666a42491c562ef60e3846be0dcf2d3fa7003",
-      "occurred_on": "2021-01-06",
-      "retrieved_on": "2026-08-15"
+      "subjects": [
+        {"listing_id": "10000000-0000-4000-8000-000000000010", "external_security_code": "2448"}
+      ],
+      "effective_from": "2021-01-06",
+      "effective_to": "2021-01-06",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:037acc8e46136cd2a17b259a6c2e9bb29d0d2cb420a6b6977782740fd4c166ae"
     },
     {
       "evidence_id": "twse-2448-3714-share-exchange",
+      "evidence_kind": "share_exchange_successor",
       "coverage_case": "company_action",
       "publisher": "TWSE",
       "source_url": "https://investoredu.twse.com.tw/Mobile_pages/..%2FFileSystem%2FFileUpload%2F3b0709ec-90bf-4051-975b-8f28b6c035aa.pdf",
       "source_content_sha256": "c5170640828b61a12e4d9c5ca41666a42491c562ef60e3846be0dcf2d3fa7003",
-      "occurred_on": "2021-01-06",
-      "retrieved_on": "2026-08-15"
+      "subjects": [
+        {"listing_id": "10000000-0000-4000-8000-000000000010", "external_security_code": "2448"},
+        {"listing_id": "10000000-0000-4000-8000-000000000006", "external_security_code": "3714"}
+      ],
+      "effective_from": "2021-01-06",
+      "effective_to": "2021-01-06",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:a2eaf616a5b7842d99d689fe6f26bdcff65aae6b5ac16829d596d0ac27007bf0"
     },
     {
       "evidence_id": "twse-2448-delisting",
+      "evidence_kind": "historical_delisting",
       "coverage_case": "historical_delisting",
       "publisher": "TWSE",
       "source_url": "https://investoredu.twse.com.tw/Mobile_pages/..%2FFileSystem%2FFileUpload%2F3b0709ec-90bf-4051-975b-8f28b6c035aa.pdf",
       "source_content_sha256": "c5170640828b61a12e4d9c5ca41666a42491c562ef60e3846be0dcf2d3fa7003",
-      "occurred_on": "2021-01-06",
-      "retrieved_on": "2026-08-15"
+      "subjects": [
+        {"listing_id": "10000000-0000-4000-8000-000000000010", "external_security_code": "2448"}
+      ],
+      "effective_from": "2021-01-06",
+      "effective_to": "2021-01-06",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:69bb45c2cae0e65750b470bc9100f87c49756bc3089ca46d408652678e3cf906"
     },
     {
       "evidence_id": "twse-calendar-saturday-shortened-session",
+      "evidence_kind": "shortened_session_regime",
       "coverage_case": "half_day_session",
       "publisher": "TWSE",
       "source_url": "https://www.twse.com.tw/staticFiles/product/publication/twse60/html/178/",
       "source_content_sha256": "6287d5e48d111edd2842aaa274545f30a3bc8d4207c548bbb4adef7ade2daceb",
-      "occurred_on": "1998-04-04",
-      "retrieved_on": "2026-08-15"
+      "subjects": [],
+      "effective_from": "1998-04-04",
+      "effective_to": "2000-12-30",
+      "retrieved_on": "2026-08-15",
+      "retrieval_receipt_id": "sha256:ad851932e5e0bcf28cb166ef6dbb057ec5cbe41794570e00f6c080b3e7a7e8a6"
     }
   ]
 }

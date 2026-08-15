@@ -1,9 +1,54 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from uuid import UUID
 
-from stock_forecasting.data_supply import load_taiwan_stock_pool_manifest
+import pytest
+
+from stock_forecasting.data_supply import (
+    ExternalSecurityAlias,
+    StockPoolListing,
+    load_taiwan_stock_pool_manifest,
+)
+
+
+def test_stock_pool_listing_can_preserve_a_time_bounded_external_code_change() -> None:
+    listing = StockPoolListing(
+        listing_id="20000000-0000-4000-8000-000000000001",
+        issuer_id="20000000-0000-4000-8000-000000000002",
+        security_id="20000000-0000-4000-8000-000000000003",
+        market="XTAI",
+        security_kind="ordinary_share",
+        external_security_code="5678",
+        external_aliases=(
+            ExternalSecurityAlias(
+                security_code="1234",
+                security_name="歷史名稱",
+                valid_from=date(2010, 1, 1),
+                valid_to=date(2020, 6, 30),
+            ),
+            ExternalSecurityAlias(
+                security_code="5678",
+                security_name="現行名稱",
+                valid_from=date(2020, 7, 1),
+                valid_to=None,
+            ),
+        ),
+        selection_evidence_ids=("official-code-change",),
+        coverage_cases=frozenset({"ordinary_share", "ticker_change"}),
+    )
+
+    assert [alias.security_code for alias in listing.external_aliases] == ["1234", "5678"]
+    overlapping_current_alias = replace(
+        listing.external_aliases[1],
+        valid_from=date(2020, 6, 30),
+    )
+    with pytest.raises(ValueError, match="taiwan_stock_pool_external_alias_ambiguous"):
+        replace(
+            listing,
+            external_aliases=(listing.external_aliases[0], overlapping_current_alias),
+        )
 
 
 def test_taiwan_segment_declares_versioned_ten_listing_qualification_contract() -> None:
@@ -23,9 +68,9 @@ def test_taiwan_segment_declares_versioned_ten_listing_qualification_contract() 
     assert covered_cases == {
         "company_action",
         "historical_delisting",
+        "name_history",
         "ordinary_share",
         "suspension",
-        "ticker_change",
     }
     assert manifest.market_calendar_cases == frozenset({"half_day_session"})
     assert manifest.evidence_status == "qualification_candidate"
@@ -39,7 +84,7 @@ def test_taiwan_segment_declares_versioned_ten_listing_qualification_contract() 
 def test_taiwan_segment_binds_real_selection_and_calendar_cases_to_official_evidence() -> None:
     manifest = load_taiwan_stock_pool_manifest()
 
-    assert manifest.selection_evidence_version == "twse-10-selection-evidence-v1"
+    assert manifest.selection_evidence_version == "twse-10-selection-evidence-v2"
     assert manifest.selection_as_of == date(2026, 8, 15)
     assert {listing.external_security_code for listing in manifest.listings} == {
         "2317",
@@ -72,8 +117,8 @@ def test_taiwan_segment_binds_real_selection_and_calendar_cases_to_official_evid
     }
     assert listing_by_code["2317"].coverage_cases >= {"ordinary_share", "suspension"}
     assert listing_by_code["2887"].coverage_cases >= {
+        "name_history",
         "ordinary_share",
-        "ticker_change",
     }
     assert [
         (alias.security_name, alias.valid_from, alias.valid_to)
@@ -98,6 +143,10 @@ def test_taiwan_segment_binds_real_selection_and_calendar_cases_to_official_evid
 
     available_evidence = {evidence.evidence_id: evidence for evidence in manifest.evidence}
     assert available_evidence
+    historical_ordinary_share = available_evidence["twse-2448-common-share"]
+    assert historical_ordinary_share.evidence_kind == "ordinary_share_at_delisting"
+    assert historical_ordinary_share.effective_from == date(2021, 1, 6)
+    assert historical_ordinary_share.effective_to == date(2021, 1, 6)
     for listing in manifest.listings:
         assert listing.selection_evidence_ids
         assert set(listing.selection_evidence_ids) <= available_evidence.keys()
@@ -122,3 +171,94 @@ def test_taiwan_segment_binds_real_selection_and_calendar_cases_to_official_evid
     assert half_day.modern_training_window_applicability == "not_applicable"
     assert half_day.evidence_id in available_evidence
     assert transition.evidence_id in available_evidence
+
+
+def test_taiwan_suspension_evidence_preserves_the_resume_boundary_and_listing_subject() -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+    listing_by_code = {listing.external_security_code: listing for listing in manifest.listings}
+    evidence_by_id = {evidence.evidence_id: evidence for evidence in manifest.evidence}
+
+    suspension = evidence_by_id["twse-2317-trading-halt"]
+    resume = evidence_by_id["twse-2317-trading-resume"]
+
+    assert suspension.evidence_kind == "trading_suspension"
+    assert suspension.effective_from == date(2025, 7, 30)
+    assert suspension.effective_to == date(2025, 7, 30)
+    assert [
+        (subject.listing_id, subject.external_security_code) for subject in suspension.subjects
+    ] == [(listing_by_code["2317"].listing_id, "2317")]
+    assert resume.evidence_kind == "trading_resume"
+    assert resume.source_content_sha256 == (
+        "dd326e7841732c3e350092d417eefbd588a9682cb30ca452af7af3eccc0efc9c"
+    )
+    assert resume.effective_from == date(2025, 7, 31)
+    assert resume.effective_to == date(2025, 7, 31)
+    assert [
+        (subject.listing_id, subject.external_security_code) for subject in resume.subjects
+    ] == [(listing_by_code["2317"].listing_id, "2317")]
+
+
+def test_taiwan_manifest_rejects_selection_evidence_from_another_listing() -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+    listing_by_code = {listing.external_security_code: listing for listing in manifest.listings}
+    original = listing_by_code["3714"]
+    wrong_subject = replace(
+        original,
+        selection_evidence_ids=(
+            "twse-3714-common-share",
+            "twse-2330-cash-dividend",
+        ),
+    )
+
+    with pytest.raises(ValueError, match="taiwan_stock_pool_listing_evidence_subject_mismatch"):
+        replace(
+            manifest,
+            listings=tuple(
+                wrong_subject if listing.listing_id == original.listing_id else listing
+                for listing in manifest.listings
+            ),
+        )
+
+
+def test_taiwan_manifest_rejects_unrelated_listing_relationship_evidence() -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+    unrelated = replace(
+        manifest.listing_relationships[0],
+        evidence_id="twse-2330-cash-dividend",
+    )
+
+    with pytest.raises(ValueError, match="taiwan_stock_pool_listing_relationship_evidence_invalid"):
+        replace(manifest, listing_relationships=(unrelated,))
+
+
+def test_taiwan_manifest_rejects_unrelated_calendar_evidence() -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+    unrelated = replace(
+        manifest.market_calendar_evidence,
+        evidence_id="twse-2330-cash-dividend",
+    )
+
+    with pytest.raises(ValueError, match="taiwan_stock_pool_calendar_evidence_invalid"):
+        replace(manifest, market_calendar_evidence=unrelated)
+
+
+def test_taiwan_selection_retrieval_receipts_reject_content_digest_corruption() -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+
+    assert all(
+        evidence.retrieval_receipt_id.startswith("sha256:") for evidence in manifest.evidence
+    )
+    with pytest.raises(ValueError, match="taiwan_stock_pool_evidence_receipt_mismatch"):
+        replace(manifest.evidence[0], source_content_sha256="0" * 64)
+
+
+def test_taiwan_selection_evidence_rejects_a_mismatched_assertion_kind() -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+    dividend = next(
+        evidence
+        for evidence in manifest.evidence
+        if evidence.evidence_id == "twse-2330-cash-dividend"
+    )
+
+    with pytest.raises(ValueError, match="taiwan_stock_pool_evidence_assertion_invalid"):
+        replace(dividend, evidence_kind="display_name_change")

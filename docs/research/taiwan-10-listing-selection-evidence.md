@@ -2,7 +2,7 @@
 
 查證日期：2026-08-15
 
-證據版本：`twse-10-selection-evidence-v1`
+證據版本：`twse-10-selection-evidence-v2`
 
 ## 結論
 
@@ -45,6 +45,7 @@ TWSE 2026 Fact Book 的「2025 年底股票市值前 30 大」表列出本選樣
 |---|---|---|
 | 普通股 | 8 檔由 2026 Fact Book 的排除特別股股票表支持；`2448`／`3714` 由 TWSE 股份轉換新聞稿明載普通股 | **有足夠官方證據** |
 | external code transition 與 name history | `2448` → `3714` 是兩個 listing 的 predecessor／successor code transition；`2887` 是同代號下台新金 → 台新新光金的 name history | **有足夠官方證據**；沒有同一 listing ticker value mutation 的證據 |
+| 同一 listing 的 ticker／security-code 值變更 | 未找到可證明同一 listing 由代號 A 改為 B 的第一方紀錄 | **未完成**；不得以更名或跨 listing 股份轉換代替 |
 | 公司行動 | `2330` 於 2025-12-11 除息；`2448` 每 1 股換 `3714` 0.5 股；`2887` 於 2025-07-24 合併及更名 | **有足夠官方證據** |
 | 暫停與恢復 | `2317` 於 2025-07-30 暫停、2025-07-31 恢復 | **有足夠官方證據** |
 | 訓練歷史中的下市 | `2448` 於 2021-01-06 終止上市 | **有足夠官方證據**；manifest 仍須讓 training window 實際包含該日以前的資料 |
@@ -75,11 +76,11 @@ TWSE 2000-11-20 正式函釋鎖定生效日：自 2001-01-01 起，集中市場�
 
 研究證據轉入 versioned manifest 時，至少應保存：
 
-- `selection_evidence_version = twse-10-selection-evidence-v1`
+- `selection_evidence_version = twse-10-selection-evidence-v2`
 - `selection_as_of = 2026-08-15`
 - 不可重用的 `issuer_id`、`security_id`、`listing_id`
 - `venue = XTAI`、security type、currency 及具有效期的外部代號／名稱 assertions
-- 每個 source URL、來源擁有者、事件日、生效區間、查得時間及 content hash
+- 每個 source URL、來源擁有者、事件日、生效區間、查得時間、content hash，以及綁定 assertion kind、listing subject 與 content hash 的 content-addressed retrieval receipt
 - `2448` 與 `3714` 分立 listing IDs，以及帶換股比例的 predecessor／successor edge
 - dividend、suspension、resume、delisting 分立事件，不把它們折成一般 OHLC 缺值
 - calendar version 及 session type；`scheduled_half_day` 不適用時要有明確 reason

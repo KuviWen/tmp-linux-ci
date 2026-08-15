@@ -25,6 +25,7 @@ from stock_forecasting.platform.state_store import StateStore
 StockPoolCoverageCase = Literal[
     "ordinary_share",
     "ticker_change",
+    "name_history",
     "company_action",
     "suspension",
     "historical_delisting",
@@ -32,10 +33,23 @@ StockPoolCoverageCase = Literal[
 SelectionEvidenceCoverageCase = Literal[
     "ordinary_share",
     "ticker_change",
+    "name_history",
     "company_action",
     "suspension",
     "historical_delisting",
     "half_day_session",
+]
+SelectionEvidenceKind = Literal[
+    "ordinary_share_population",
+    "cash_dividend",
+    "trading_suspension",
+    "trading_resume",
+    "display_name_change",
+    "ordinary_share_listing",
+    "ordinary_share_at_delisting",
+    "share_exchange_successor",
+    "historical_delisting",
+    "shortened_session_regime",
 ]
 ManifestEvidenceStatus = Literal["qualification_candidate", "qualified"]
 TaiwanPriceSourceMode = Literal["current", "historical"]
@@ -930,16 +944,47 @@ class ExternalSecurityAlias:
 
 
 @dataclass(frozen=True)
+class SelectionEvidenceSubject:
+    listing_id: str
+    external_security_code: str
+
+    def __post_init__(self) -> None:
+        UUID(self.listing_id)
+        if not self.external_security_code:
+            raise ValueError("taiwan_stock_pool_evidence_subject_invalid")
+
+
+@dataclass(frozen=True)
 class ListingSelectionEvidence:
     evidence_id: str
+    evidence_kind: SelectionEvidenceKind
     coverage_case: SelectionEvidenceCoverageCase
     publisher: Literal["TWSE", "issuer"]
     source_url: str
     source_content_sha256: str
-    occurred_on: date
+    subjects: tuple[SelectionEvidenceSubject, ...]
+    effective_from: date
+    effective_to: date
     retrieved_on: date
+    retrieval_receipt_id: str
 
     def __post_init__(self) -> None:
+        expected_coverage: dict[str, str] = {
+            "ordinary_share_population": "ordinary_share",
+            "cash_dividend": "company_action",
+            "trading_suspension": "suspension",
+            "trading_resume": "suspension",
+            "display_name_change": "name_history",
+            "ordinary_share_listing": "ordinary_share",
+            "ordinary_share_at_delisting": "ordinary_share",
+            "share_exchange_successor": "company_action",
+            "historical_delisting": "historical_delisting",
+            "shortened_session_regime": "half_day_session",
+        }
+        if expected_coverage.get(self.evidence_kind) != self.coverage_case or (
+            self.evidence_kind == "shortened_session_regime"
+        ) != (not self.subjects):
+            raise ValueError("taiwan_stock_pool_evidence_assertion_invalid")
         try:
             digest = bytes.fromhex(self.source_content_sha256)
         except ValueError as error:
@@ -947,9 +992,33 @@ class ListingSelectionEvidence:
         if (
             len(digest) != 32
             or not self.source_url.startswith("https://")
-            or self.occurred_on > self.retrieved_on
+            or self.effective_from > self.effective_to
+            or self.effective_from > self.retrieved_on
         ):
             raise ValueError("taiwan_stock_pool_evidence_invalid")
+        if self.retrieval_receipt_id != self._expected_retrieval_receipt_id():
+            raise ValueError("taiwan_stock_pool_evidence_receipt_mismatch")
+
+    def _expected_retrieval_receipt_id(self) -> str:
+        payload = {
+            "evidence_id": self.evidence_id,
+            "evidence_kind": self.evidence_kind,
+            "coverage_case": self.coverage_case,
+            "publisher": self.publisher,
+            "source_url": self.source_url,
+            "source_content_sha256": self.source_content_sha256,
+            "subjects": [
+                {
+                    "listing_id": subject.listing_id,
+                    "external_security_code": subject.external_security_code,
+                }
+                for subject in self.subjects
+            ],
+            "effective_from": self.effective_from.isoformat(),
+            "effective_to": self.effective_to.isoformat(),
+            "retrieved_on": self.retrieved_on.isoformat(),
+        }
+        return _artifact_id("selection_source_retrieval_receipt", payload)
 
 
 @dataclass(frozen=True)
@@ -1000,10 +1069,23 @@ class StockPoolListing:
         UUID(self.listing_id)
         UUID(self.issuer_id)
         UUID(self.security_id)
-        if not self.external_aliases or any(
-            alias.security_code != self.external_security_code for alias in self.external_aliases
+        alias_codes = {alias.security_code for alias in self.external_aliases}
+        has_code_change = len(alias_codes) > 1
+        if (
+            not self.external_aliases
+            or self.external_security_code not in alias_codes
+            or has_code_change != ("ticker_change" in self.coverage_cases)
         ):
             raise ValueError("taiwan_stock_pool_external_alias_invalid")
+        ordered_aliases = sorted(
+            self.external_aliases,
+            key=lambda alias: alias.valid_from or date.min,
+        )
+        if any(
+            (previous.valid_to or date.max) >= (following.valid_from or date.min)
+            for previous, following in zip(ordered_aliases, ordered_aliases[1:], strict=False)
+        ):
+            raise ValueError("taiwan_stock_pool_external_alias_ambiguous")
 
 
 @dataclass(frozen=True)
@@ -1036,25 +1118,67 @@ class TaiwanStockPoolManifest:
         evidence_by_id = {item.evidence_id: item for item in self.evidence}
         if len(evidence_by_id) != len(self.evidence):
             raise ValueError("taiwan_stock_pool_evidence_id_reused")
-        if self.market_calendar_evidence.evidence_id not in evidence_by_id:
+        calendar_source_evidence = evidence_by_id.get(self.market_calendar_evidence.evidence_id)
+        if calendar_source_evidence is None:
             raise ValueError("taiwan_stock_pool_calendar_evidence_missing")
+        if (
+            calendar_source_evidence.evidence_kind != "shortened_session_regime"
+            or calendar_source_evidence.coverage_case != "half_day_session"
+            or calendar_source_evidence.subjects
+            or calendar_source_evidence.effective_from != self.market_calendar_evidence.valid_from
+            or calendar_source_evidence.effective_to != self.market_calendar_evidence.valid_to
+        ):
+            raise ValueError("taiwan_stock_pool_calendar_evidence_invalid")
         if any(item.retrieved_on > self.selection_as_of for item in self.evidence):
             raise ValueError("taiwan_stock_pool_future_evidence")
-        listing_ids = {listing.listing_id for listing in self.listings}
+        listings_by_id = {listing.listing_id: listing for listing in self.listings}
+        listing_ids = listings_by_id.keys()
         for relationship in self.listing_relationships:
+            relationship_evidence = evidence_by_id.get(relationship.evidence_id)
             if (
                 relationship.predecessor_listing_id not in listing_ids
                 or relationship.successor_listing_id not in listing_ids
                 or relationship.predecessor_listing_id == relationship.successor_listing_id
-                or relationship.evidence_id not in evidence_by_id
+                or relationship_evidence is None
             ):
                 raise ValueError("taiwan_stock_pool_listing_relationship_invalid")
+            expected_relationship_subjects = {
+                (
+                    relationship.predecessor_listing_id,
+                    listings_by_id[relationship.predecessor_listing_id].external_security_code,
+                ),
+                (
+                    relationship.successor_listing_id,
+                    listings_by_id[relationship.successor_listing_id].external_security_code,
+                ),
+            }
+            if (
+                relationship_evidence.evidence_kind != "share_exchange_successor"
+                or relationship_evidence.effective_from != relationship.effective_on
+                or relationship_evidence.effective_to != relationship.effective_on
+                or {
+                    (subject.listing_id, subject.external_security_code)
+                    for subject in relationship_evidence.subjects
+                }
+                != expected_relationship_subjects
+            ):
+                raise ValueError("taiwan_stock_pool_listing_relationship_evidence_invalid")
         for listing in self.listings:
             if (
                 not listing.selection_evidence_ids
                 or not set(listing.selection_evidence_ids) <= evidence_by_id.keys()
             ):
                 raise ValueError("taiwan_stock_pool_listing_evidence_missing")
+            expected_subject = (listing.listing_id, listing.external_security_code)
+            if any(
+                expected_subject
+                not in {
+                    (subject.listing_id, subject.external_security_code)
+                    for subject in evidence_by_id[evidence_id].subjects
+                }
+                for evidence_id in listing.selection_evidence_ids
+            ):
+                raise ValueError("taiwan_stock_pool_listing_evidence_subject_mismatch")
             evidenced_cases = {
                 evidence_by_id[evidence_id].coverage_case
                 for evidence_id in listing.selection_evidence_ids
@@ -1167,12 +1291,22 @@ def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
         evidence=tuple(
             ListingSelectionEvidence(
                 evidence_id=str(evidence["evidence_id"]),
+                evidence_kind=cast(SelectionEvidenceKind, evidence["evidence_kind"]),
                 coverage_case=cast(SelectionEvidenceCoverageCase, evidence["coverage_case"]),
                 publisher=cast(Literal["TWSE", "issuer"], evidence["publisher"]),
                 source_url=str(evidence["source_url"]),
                 source_content_sha256=str(evidence["source_content_sha256"]),
-                occurred_on=date.fromisoformat(str(evidence["occurred_on"])),
+                subjects=tuple(
+                    SelectionEvidenceSubject(
+                        listing_id=str(subject["listing_id"]),
+                        external_security_code=str(subject["external_security_code"]),
+                    )
+                    for subject in cast(list[dict[str, object]], evidence["subjects"])
+                ),
+                effective_from=date.fromisoformat(str(evidence["effective_from"])),
+                effective_to=date.fromisoformat(str(evidence["effective_to"])),
                 retrieved_on=date.fromisoformat(str(evidence["retrieved_on"])),
+                retrieval_receipt_id=str(evidence["retrieval_receipt_id"]),
             )
             for evidence in evidence_payloads
         ),
