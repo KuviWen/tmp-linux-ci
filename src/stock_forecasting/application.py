@@ -6,12 +6,21 @@ from pathlib import Path
 from tempfile import mkdtemp
 from uuid import uuid4
 
+from stock_forecasting.alpaca_market_data import (
+    AlpacaPriceSourceAdapter,
+    AlpacaSourceCollector,
+    AlpacaSourceDecoder,
+    ProviderHttpTransport,
+    UrllibProviderHttpTransport,
+    load_candidate_alpaca_reference_graph,
+)
 from stock_forecasting.authorization import (
     AuthorizationPolicy,
     EntitlementStatus,
     LocalApiKeyIdentity,
     PolicyDeniedOutcome,
     SecurityContext,
+    SourceAccessMode,
     build_fixture_authorization_policy,
 )
 from stock_forecasting.authorization_repository import AuthorizationPolicyRepository
@@ -31,6 +40,7 @@ from stock_forecasting.research_query import ResearchQuery
 from stock_forecasting.security_audit import SecurityAudit
 from stock_forecasting.source_credentials import (
     InMemorySecretProvider,
+    ManagedSourceCredentialResolver,
     SecretProvider,
     SourceCredentialValidator,
 )
@@ -103,6 +113,10 @@ class Application:
             source_credential_validators=source_credential_validators or {},
             clock=lambda: self._fixed_security_time or datetime.now(UTC),
         )
+        self.alpaca_price_adapter = self.build_alpaca_price_adapter(
+            transport=UrllibProviderHttpTransport(),
+            source_access_mode="live_provider",
+        )
         self._relay_fault = relay_fault or NoRelayFault()
         self._event_compatibility = event_compatibility or EventCompatibility.current()
         self._relay_clock = relay_clock or SystemRelayClock()
@@ -124,6 +138,38 @@ class Application:
         self, command: FixtureEodCommand
     ) -> FixtureEodOutcome | PolicyDeniedOutcome:
         return self._fixture_eod.execute(command)
+
+    def build_alpaca_price_adapter(
+        self,
+        *,
+        transport: ProviderHttpTransport,
+        source_access_mode: SourceAccessMode,
+    ) -> AlpacaPriceSourceAdapter:
+        reference_graph = load_candidate_alpaca_reference_graph()
+        return AlpacaPriceSourceAdapter(
+            source_id="alpaca-us-stock-bars",
+            mode="historical",
+            adapter_version="alpaca-market-data-basic-v1",
+            rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+            source_access_mode=source_access_mode,
+            collector=AlpacaSourceCollector(
+                source_id="alpaca-us-stock-bars",
+                provider_id="alpaca-market-data-basic",
+                reference_graph=reference_graph,
+                credential_resolver=ManagedSourceCredentialResolver(
+                    self.state_store,
+                    self.secret_provider,
+                    clock=lambda: self._fixed_security_time or datetime.now(UTC),
+                ),
+                transport=transport,
+                clock=lambda: self._fixed_security_time or datetime.now(UTC),
+                rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+            ),
+            decoder=AlpacaSourceDecoder(
+                source_id="alpaca-us-stock-bars",
+                reference_graph=reference_graph,
+            ),
+        )
 
     def authenticate_local_request(
         self,

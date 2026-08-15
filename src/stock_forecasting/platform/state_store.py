@@ -505,8 +505,19 @@ class StateStore:
                     )
                 ).scalar_one()
             )
-            if latest_version != 0:
+            current = (
+                connection.execute(
+                    select(source_credential_versions)
+                    .where(source_credential_versions.c.provider_id == provider_id)
+                    .order_by(source_credential_versions.c.version.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if current is not None and current["readiness"] != "revoked":
                 raise ImmutableStateConflict("source_credential_already_configured")
+            version = latest_version + 1
             self._insert_authorization_decision(
                 connection,
                 authorization=authorization,
@@ -516,7 +527,7 @@ class StateStore:
             connection.execute(
                 source_credential_versions.insert().values(
                     provider_id=provider_id,
-                    version=1,
+                    version=version,
                     secret_ref_id=secret_ref_id,
                     readiness=readiness,
                     reason_code=reason_code,
@@ -532,7 +543,7 @@ class StateStore:
             "readiness": readiness,
             "reason_code": reason_code,
             "secret_ref_id": secret_ref_id,
-            "version": 1,
+            "version": version,
             "configured_at": configured_at,
             "last_validated_at": None,
         }

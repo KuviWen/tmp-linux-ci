@@ -11,6 +11,7 @@ from stock_forecasting.alpaca_market_data import (
     AlpacaSourceCollector,
     AlpacaSourceDecoder,
     ProviderHttpRequest,
+    load_candidate_alpaca_reference_graph,
 )
 from stock_forecasting.authorization import LocalApiKeyIdentity
 from stock_forecasting.authorization_repository import (
@@ -25,7 +26,7 @@ from stock_forecasting.data_supply import (
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.source_credentials import (
-    InMemorySecretProvider,
+    EncryptedFilesystemSecretProvider,
     ManagedSourceCredentialResolver,
 )
 from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
@@ -60,6 +61,7 @@ def run_ticket_07_acceptance(
     object_root: Path,
     base_url: str,
     key_file: Path,
+    source_secret_root: Path,
 ) -> dict[str, object]:
     identity = LocalApiKeyIdentity.load(key_file)
     state_store = StateStore(database_url, create_schema=False)
@@ -69,9 +71,8 @@ def run_ticket_07_acceptance(
     )
     manifest = load_us_stock_pool_manifest()
     listing = manifest.listings[0]
-    listing_symbols = {
-        listing.listing_id: tuple(alias.security_code for alias in listing.external_aliases)
-    }
+    reference_graph = load_candidate_alpaca_reference_graph()
+    secret_provider = EncryptedFilesystemSecretProvider(source_secret_root)
     transport = _ProviderMustNotBeContacted()
     adapter = AlpacaPriceSourceAdapter(
         source_id="alpaca-us-stock-bars",
@@ -82,10 +83,10 @@ def run_ticket_07_acceptance(
         collector=AlpacaSourceCollector(
             source_id="alpaca-us-stock-bars",
             provider_id="alpaca-market-data-basic",
-            listing_symbols=listing_symbols,
+            reference_graph=reference_graph,
             credential_resolver=ManagedSourceCredentialResolver(
                 state_store,
-                InMemorySecretProvider(),
+                secret_provider,
             ),
             transport=transport,
             clock=lambda: datetime.now(UTC),
@@ -93,7 +94,7 @@ def run_ticket_07_acceptance(
         ),
         decoder=AlpacaSourceDecoder(
             source_id="alpaca-us-stock-bars",
-            listing_symbols=listing_symbols,
+            reference_graph=reference_graph,
         ),
     )
     data_supply = DataSupply(

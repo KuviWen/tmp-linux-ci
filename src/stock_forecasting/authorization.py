@@ -76,6 +76,7 @@ class SecurityContext:
     environment: RuntimeEnvironment
     scopes: frozenset[AuthorizationAction]
     data_protection_classes: frozenset[DataProtectionClass]
+    principal_classification: str | None
     issued_at: datetime
     expires_at: datetime
     authentication_method: Literal["local_api_key"]
@@ -89,6 +90,7 @@ class SecurityContext:
         environment: RuntimeEnvironment,
         scopes: frozenset[AuthorizationAction],
         data_protection_classes: frozenset[DataProtectionClass],
+        principal_classification: str | None,
         issued_at: datetime,
         expires_at: datetime,
         authentication_method: Literal["local_api_key"],
@@ -102,6 +104,7 @@ class SecurityContext:
         object.__setattr__(self, "environment", environment)
         object.__setattr__(self, "scopes", scopes)
         object.__setattr__(self, "data_protection_classes", data_protection_classes)
+        object.__setattr__(self, "principal_classification", principal_classification)
         object.__setattr__(self, "issued_at", issued_at)
         object.__setattr__(self, "expires_at", expires_at)
         object.__setattr__(self, "authentication_method", authentication_method)
@@ -119,6 +122,7 @@ class CurrentSourcePrincipalAttributes:
     data_protection_classes: frozenset[DataProtectionClass]
     valid_from: datetime
     valid_to: datetime
+    principal_classification: str | None = None
 
     def __post_init__(self) -> None:
         if not self.principal_id or not self.evidence_id:
@@ -141,6 +145,7 @@ class CurrentSourcePrincipalAttributes:
             data_protection_classes=context.data_protection_classes,
             valid_from=context.issued_at,
             valid_to=context.expires_at,
+            principal_classification=context.principal_classification,
         )
 
 
@@ -152,6 +157,7 @@ class LocalApiKeyVerifier:
     environment: RuntimeEnvironment
     scopes: frozenset[AuthorizationAction]
     data_protection_classes: frozenset[DataProtectionClass]
+    principal_classification: str | None
     issued_at: datetime
     expires_at: datetime
     revoked: bool
@@ -168,6 +174,7 @@ class LocalApiKeyVerifier:
         issued_at: datetime,
         expires_at: datetime,
         data_protection_classes: set[DataProtectionClass] | None = None,
+        principal_classification: str | None = None,
     ) -> tuple[LocalApiKeyCredential, LocalApiKeyVerifier]:
         if not owner:
             raise ValueError("local_api_key_owner_required")
@@ -175,6 +182,8 @@ class LocalApiKeyVerifier:
             raise ValueError("local_api_key_environment_forbidden")
         if not scopes:
             raise ValueError("local_api_key_scopes_required")
+        if principal_classification is not None and not principal_classification.strip():
+            raise ValueError("local_api_key_principal_classification_invalid")
         if issued_at.tzinfo is None or expires_at.tzinfo is None:
             raise ValueError("local_api_key_times_require_timezone")
         if expires_at <= issued_at:
@@ -194,6 +203,7 @@ class LocalApiKeyVerifier:
             environment=environment,
             scopes=frozenset(scopes),
             data_protection_classes=frozenset(data_protection_classes or {"internal"}),
+            principal_classification=principal_classification,
             issued_at=issued_at,
             expires_at=expires_at,
             revoked=False,
@@ -245,6 +255,7 @@ class LocalApiKeyVerifier:
             environment=self.environment,
             scopes=self.scopes,
             data_protection_classes=self.data_protection_classes,
+            principal_classification=self.principal_classification,
             issued_at=self.issued_at,
             expires_at=self.expires_at,
             authentication_method="local_api_key",
@@ -268,6 +279,7 @@ class LocalApiKeyIdentity:
         issued_at: datetime,
         expires_at: datetime,
         data_protection_classes: set[DataProtectionClass] | None = None,
+        principal_classification: str | None = None,
     ) -> LocalApiKeyIdentity:
         credential, verifier = LocalApiKeyVerifier.issue(
             owner=owner,
@@ -276,6 +288,7 @@ class LocalApiKeyIdentity:
             issued_at=issued_at,
             expires_at=expires_at,
             data_protection_classes=data_protection_classes,
+            principal_classification=principal_classification,
         )
         context = verifier.authenticate(
             credential.authorization_header(),
@@ -295,6 +308,7 @@ class LocalApiKeyIdentity:
             "environment": self.verifier.environment,
             "scopes": sorted(self.verifier.scopes),
             "data_protection_classes": sorted(self.verifier.data_protection_classes),
+            "principal_classification": self.verifier.principal_classification,
             "issued_at": self.verifier.issued_at.isoformat(),
             "expires_at": self.verifier.expires_at.isoformat(),
             "revoked": self.verifier.revoked,
@@ -318,6 +332,7 @@ class LocalApiKeyIdentity:
             environment = payload["environment"]
             scopes = payload["scopes"]
             data_protection_classes = payload["data_protection_classes"]
+            principal_classification = payload.get("principal_classification")
             issued_at = datetime.fromisoformat(payload["issued_at"])
             expires_at = datetime.fromisoformat(payload["expires_at"])
             revoked = payload["revoked"]
@@ -355,6 +370,13 @@ class LocalApiKeyIdentity:
                 or expires_at <= issued_at
                 or expires_at - issued_at > timedelta(days=30)
                 or not isinstance(revoked, bool)
+                or (
+                    principal_classification is not None
+                    and (
+                        not isinstance(principal_classification, str)
+                        or not principal_classification.strip()
+                    )
+                )
             ):
                 raise ValueError
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
@@ -370,6 +392,7 @@ class LocalApiKeyIdentity:
             data_protection_classes=frozenset(
                 cast(list[DataProtectionClass], data_protection_classes)
             ),
+            principal_classification=principal_classification,
             issued_at=issued_at,
             expires_at=expires_at,
             revoked=revoked,
@@ -603,6 +626,7 @@ class AuthorizationDecision:
     source_policy_version_id: str | None
     source_entitlement_version_id: str | None
     data_protection_class: DataProtectionClass | None
+    principal_classification: str | None
     trace_id: str
     correlation_id: str
     evaluated_at: datetime
@@ -825,6 +849,7 @@ def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, ob
         payload["required_uses"] = sorted(decision.required_uses)
     if decision.action == "market_data.collect":
         payload["source_access_mode"] = decision.source_access_mode
+        payload["principal_classification"] = decision.principal_classification
     if decision.distribution_id is not None or decision.distribution_url is not None:
         payload["distribution_id"] = decision.distribution_id
         payload["distribution_url"] = decision.distribution_url
@@ -1022,6 +1047,7 @@ class AuthorizationPolicy:
             principal_id=principal_id,
             intent=intent,
             data_protection_classes=current_subject.data_protection_classes,
+            principal_classification=current_subject.principal_classification,
         )
         reason_code = rights.reason_code
         if evaluated_at >= prior_valid_until:
@@ -1094,6 +1120,7 @@ class AuthorizationPolicy:
         principal_id: str,
         intent: OperationIntent,
         data_protection_classes: frozenset[DataProtectionClass],
+        principal_classification: str | None,
     ) -> _PolicyRightsResolution:
         grant_history = tuple(
             candidate for candidate in self.action_grants if candidate.principal_id == principal_id
@@ -1154,6 +1181,11 @@ class AuthorizationPolicy:
         elif not intent.required_uses <= source_policy.allowed_uses:
             reason_code = "source_policy_use_denied"
         elif (
+            source_policy.access_basis == "zero_fee_plan"
+            and source_policy.principal_classification != principal_classification
+        ):
+            reason_code = "source_policy_principal_classification_denied"
+        elif (
             source_policy.access_basis == "engineering_contract"
             and intent.action == "market_data.collect"
             and intent.source_access_mode != "engineering_double"
@@ -1206,6 +1238,7 @@ class AuthorizationPolicy:
             principal_id=context.principal_id,
             intent=intent,
             data_protection_classes=context.data_protection_classes,
+            principal_classification=context.principal_classification,
         )
         grant = rights.grant
         source_policy = rights.source_policy
@@ -1275,6 +1308,7 @@ class AuthorizationPolicy:
             data_protection_class=(
                 source_policy.data_protection_class if source_policy is not None else None
             ),
+            principal_classification=context.principal_classification,
             trace_id=intent.trace_id,
             correlation_id=intent.correlation_id,
             evaluated_at=intent.evaluated_at,

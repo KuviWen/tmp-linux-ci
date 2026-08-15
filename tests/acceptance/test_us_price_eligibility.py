@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -10,7 +11,10 @@ from fastapi.testclient import TestClient
 
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.alpaca_market_data import (
+    AlpacaCompanyActionExpectation,
     AlpacaPriceSourceAdapter,
+    AlpacaReferenceGraph,
+    AlpacaReferenceListing,
     AlpacaSourceCollector,
     AlpacaSourceDecoder,
     ProviderHttpRequest,
@@ -29,6 +33,8 @@ from stock_forecasting.authorization import (
 )
 from stock_forecasting.data_supply import (
     DataSupply,
+    ExternalSecurityAlias,
+    ListingLifecycleRecord,
     LoadedSourcePartition,
     SourceBundleMemberRequest,
     SourceCredentialRequired,
@@ -42,6 +48,50 @@ ALPACA_BARS_DISTRIBUTION_URL = "https://data.alpaca.markets/v2/stocks/bars"
 ALPACA_SOURCE_ID = "alpaca-us-stock-bars"
 ALPACA_SOURCE_BASIS_ID = "ALPACA-BASIC-US-MARKET-DATA-01"
 ENGINEERING_SOURCE_BASIS_ID = "ENGINEERING-ALPACA-CONTRACT-01"
+
+
+def _engineering_reference_graph(
+    listing_symbols: Mapping[str, tuple[str, ...]],
+    *,
+    expected_action_ids: frozenset[str] = frozenset(),
+) -> AlpacaReferenceGraph:
+    first_listing_id = next(iter(listing_symbols))
+    return AlpacaReferenceGraph(
+        version_id="engineering-us-reference-graph-v1",
+        listings=tuple(
+            AlpacaReferenceListing(
+                listing_id=listing_id,
+                aliases=tuple(
+                    ExternalSecurityAlias(
+                        security_code=symbol,
+                        security_name=f"{symbol} engineering reference",
+                        valid_from=date(2000 + index, 1, 1),
+                        valid_to=(date(2000 + index, 12, 31) if index < len(symbols) - 1 else None),
+                    )
+                    for index, symbol in enumerate(symbols)
+                ),
+                lifecycle=(
+                    ListingLifecycleRecord(
+                        listing_id=listing_id,
+                        effective_date=date(2000, 1, 1),
+                        status="active",
+                        source_event_id=f"engineering-active-{listing_id}",
+                    ),
+                ),
+            )
+            for listing_id, symbols in listing_symbols.items()
+        ),
+        company_action_expectations=tuple(
+            AlpacaCompanyActionExpectation(
+                action_id=action_id,
+                listing_id=first_listing_id,
+                effective_date=date(2024, 1, 3),
+            )
+            for action_id in expected_action_ids
+        ),
+        lifecycle_complete=True,
+        company_actions_complete=True,
+    )
 
 
 def _bundle_member_requests() -> tuple[SourceBundleMemberRequest, ...]:
@@ -434,6 +484,10 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
         ]
     )
     listing_symbols = {listing_id: ("AAPL",)}
+    reference_graph = _engineering_reference_graph(
+        listing_symbols,
+        expected_action_ids=frozenset({"ca-dividend-aapl"}),
+    )
     adapter = AlpacaPriceSourceAdapter(
         source_id=ALPACA_SOURCE_ID,
         mode="current",
@@ -443,7 +497,7 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
         collector=AlpacaSourceCollector(
             source_id=ALPACA_SOURCE_ID,
             provider_id="alpaca-market-data-basic",
-            listing_symbols=listing_symbols,
+            reference_graph=reference_graph,
             credential_resolver=EngineeringCredentialResolver(),
             transport=transport,
             clock=lambda: now,
@@ -451,7 +505,7 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
         ),
         decoder=AlpacaSourceDecoder(
             source_id=ALPACA_SOURCE_ID,
-            listing_symbols=listing_symbols,
+            reference_graph=reference_graph,
         ),
     )
     policy = _qualified_zero_fee_policy(identity, now)
@@ -512,6 +566,22 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
     artifacts = [
         state_store.get_canonical_artifact(artifact_id) for artifact_id in trace["artifact_ids"]
     ]
+    retrieval_receipt = next(
+        artifact
+        for artifact in artifacts
+        if artifact["artifact_kind"] == "source_retrieval_receipt"
+    )
+    dataset = state_store.get_canonical_artifact(outcome.dataset_version_id)
+    assert retrieval_receipt["payload"]["reference_graph"] == {
+        "version_id": reference_graph.version_id,
+        "lifecycle_complete": True,
+        "company_actions_complete": True,
+    }
+    assert dataset["payload"]["reference_graph"] == {
+        "version_id": reference_graph.version_id,
+        "lifecycle_complete": True,
+        "company_actions_complete": True,
+    }
     member_receipts = [
         artifact
         for artifact in artifacts
@@ -625,6 +695,7 @@ def test_bundle_member_quality_issue_is_quarantined_before_dataset_publication(
         ]
     )
     listing_symbols = {listing_id: ("AAPL",)}
+    reference_graph = _engineering_reference_graph(listing_symbols)
     delegate = AlpacaPriceSourceAdapter(
         source_id=ALPACA_SOURCE_ID,
         mode="current",
@@ -634,7 +705,7 @@ def test_bundle_member_quality_issue_is_quarantined_before_dataset_publication(
         collector=AlpacaSourceCollector(
             source_id=ALPACA_SOURCE_ID,
             provider_id="alpaca-market-data-basic",
-            listing_symbols=listing_symbols,
+            reference_graph=reference_graph,
             credential_resolver=EngineeringCredentialResolver(),
             transport=transport,
             clock=lambda: now,
@@ -642,7 +713,7 @@ def test_bundle_member_quality_issue_is_quarantined_before_dataset_publication(
         ),
         decoder=AlpacaSourceDecoder(
             source_id=ALPACA_SOURCE_ID,
-            listing_symbols=listing_symbols,
+            reference_graph=reference_graph,
         ),
     )
     state_store = StateStore(

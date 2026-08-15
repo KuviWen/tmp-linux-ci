@@ -19,6 +19,7 @@ from stock_forecasting.data_supply import (
     CollectorDecoderPriceSourceAdapter,
     CompanyActionRecord,
     DecodedSourcePartition,
+    ExternalSecurityAlias,
     ListingLifecycleRecord,
     MarketSessionRecord,
     SourceCollectionCoverage,
@@ -31,6 +32,7 @@ from stock_forecasting.data_supply import (
 )
 from stock_forecasting.source_credentials import (
     CredentialNotReady,
+    CredentialValidationEvidence,
     CredentialValidationResult,
     SourceCredentialResolver,
 )
@@ -49,6 +51,183 @@ class ProviderHttpResponse:
     status_code: int
     body: bytes
     headers: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AlpacaReferenceListing:
+    listing_id: str
+    aliases: tuple[ExternalSecurityAlias, ...]
+    lifecycle: tuple[ListingLifecycleRecord, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.listing_id
+            or not self.aliases
+            or any(event.listing_id != self.listing_id for event in self.lifecycle)
+        ):
+            raise ValueError("alpaca_reference_listing_invalid")
+
+
+@dataclass(frozen=True)
+class AlpacaCompanyActionExpectation:
+    action_id: str
+    listing_id: str
+    effective_date: date
+
+    def __post_init__(self) -> None:
+        if not self.action_id or not self.listing_id:
+            raise ValueError("alpaca_company_action_expectation_invalid")
+
+
+@dataclass(frozen=True)
+class AlpacaReferenceGraph:
+    version_id: str
+    listings: tuple[AlpacaReferenceListing, ...]
+    company_action_expectations: tuple[AlpacaCompanyActionExpectation, ...]
+    lifecycle_complete: bool
+    company_actions_complete: bool
+
+    def __post_init__(self) -> None:
+        listing_ids = {listing.listing_id for listing in self.listings}
+        if (
+            not self.version_id
+            or not self.listings
+            or len(listing_ids) != len(self.listings)
+            or (
+                self.lifecycle_complete
+                and any(
+                    not listing.lifecycle
+                    or not any(event.status == "active" for event in listing.lifecycle)
+                    for listing in self.listings
+                )
+            )
+            or any(
+                expectation.listing_id not in listing_ids
+                for expectation in self.company_action_expectations
+            )
+            or len({item.action_id for item in self.company_action_expectations})
+            != len(self.company_action_expectations)
+        ):
+            raise ValueError("alpaca_reference_graph_invalid")
+
+    def partition_payload(
+        self,
+        *,
+        listing_ids: tuple[str, ...],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, object]:
+        requested = set(listing_ids)
+        listings = tuple(listing for listing in self.listings if listing.listing_id in requested)
+        if len(listings) != len(requested):
+            raise ValueError("alpaca_reference_graph_listing_missing")
+        expectations = tuple(
+            expectation
+            for expectation in self.company_action_expectations
+            if expectation.listing_id in requested
+            and start_date <= expectation.effective_date <= end_date
+        )
+        return {
+            "version_id": self.version_id,
+            "lifecycle_complete": self.lifecycle_complete,
+            "company_actions_complete": self.company_actions_complete,
+            "listings": [
+                {
+                    "listing_id": listing.listing_id,
+                    "aliases": [
+                        {
+                            "symbol": alias.security_code,
+                            "valid_from": (
+                                alias.valid_from.isoformat()
+                                if alias.valid_from is not None
+                                else None
+                            ),
+                            "valid_to": (
+                                alias.valid_to.isoformat() if alias.valid_to is not None else None
+                            ),
+                        }
+                        for alias in listing.aliases
+                    ],
+                    "lifecycle": [
+                        {
+                            "effective_date": event.effective_date.isoformat(),
+                            "status": event.status,
+                            "source_event_id": event.source_event_id,
+                        }
+                        for event in listing.lifecycle
+                    ],
+                }
+                for listing in listings
+            ],
+            "expected_company_action_ids": sorted(
+                expectation.action_id for expectation in expectations
+            ),
+        }
+
+    def listing(self, listing_id: str) -> AlpacaReferenceListing:
+        try:
+            return next(listing for listing in self.listings if listing.listing_id == listing_id)
+        except StopIteration as error:
+            raise ValueError("alpaca_reference_graph_listing_missing") from error
+
+    def expected_company_action_ids(
+        self,
+        *,
+        listing_ids: tuple[str, ...],
+        start_date: date,
+        end_date: date,
+    ) -> frozenset[str]:
+        payload = self.partition_payload(
+            listing_ids=listing_ids,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return frozenset(cast(list[str], payload["expected_company_action_ids"]))
+
+
+def load_candidate_alpaca_reference_graph() -> AlpacaReferenceGraph:
+    from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
+
+    manifest = load_us_stock_pool_manifest()
+    listings: list[AlpacaReferenceListing] = []
+    for listing in manifest.listings:
+        dated_aliases = tuple(
+            alias.valid_from for alias in listing.external_aliases if alias.valid_from is not None
+        )
+        lifecycle = []
+        if dated_aliases:
+            lifecycle.append(
+                ListingLifecycleRecord(
+                    listing_id=listing.listing_id,
+                    effective_date=min(dated_aliases),
+                    status="active",
+                    source_event_id=f"{manifest.selection_evidence_version}:selection-active",
+                )
+            )
+        final_alias = listing.external_aliases[-1]
+        if final_alias.valid_to is not None:
+            lifecycle.append(
+                ListingLifecycleRecord(
+                    listing_id=listing.listing_id,
+                    effective_date=final_alias.valid_to,
+                    status="delisted",
+                    source_event_id=f"{manifest.selection_evidence_version}:selection-delisted",
+                )
+            )
+        listings.append(
+            AlpacaReferenceListing(
+                listing_id=listing.listing_id,
+                aliases=listing.external_aliases,
+                lifecycle=tuple(lifecycle),
+            )
+        )
+    return AlpacaReferenceGraph(
+        version_id=manifest.selection_evidence_version,
+        listings=tuple(listings),
+        company_action_expectations=(),
+        lifecycle_complete=False,
+        company_actions_complete=False,
+    )
 
 
 class ProviderHttpTransport(Protocol):
@@ -187,13 +366,23 @@ class AlpacaCredentialValidator:
             )
         if response.status_code == 429:
             return CredentialValidationResult(
-                readiness="validation_failed",
-                reason_code="source_credential_validation_rate_limited",
+                readiness="configured",
+                reason_code="source_credential_validation_inconclusive",
+                evidence=CredentialValidationEvidence(
+                    contract_id="alpaca-credential-probe-v1",
+                    live_validation="failed",
+                    source_contract_reason_code="source_contract_rate_limited",
+                ),
             )
         if response.status_code != 200:
             return CredentialValidationResult(
-                readiness="validation_failed",
-                reason_code="source_credential_provider_unavailable",
+                readiness="configured",
+                reason_code="source_credential_validation_inconclusive",
+                evidence=CredentialValidationEvidence(
+                    contract_id="alpaca-credential-probe-v1",
+                    live_validation="failed",
+                    source_contract_reason_code="source_contract_unavailable",
+                ),
             )
         try:
             payload = json.loads(response.body)
@@ -201,8 +390,13 @@ class AlpacaCredentialValidator:
             payload = None
         if not isinstance(payload, dict) or not isinstance(payload.get("bars"), list):
             return CredentialValidationResult(
-                readiness="validation_failed",
-                reason_code="source_credential_provider_schema_invalid",
+                readiness="valid",
+                reason_code="source_credential_valid",
+                evidence=CredentialValidationEvidence(
+                    contract_id="alpaca-credential-probe-v1",
+                    live_validation="failed",
+                    source_contract_reason_code="source_contract_schema_invalid",
+                ),
             )
         return CredentialValidationResult(
             readiness="valid",
@@ -249,7 +443,7 @@ class AlpacaLiveContractValidator:
         if isinstance(regular, CredentialValidationResult):
             return regular
         if not self._valid_multi_symbol_bars(regular, set(self._REGULAR_SYMBOLS)):
-            return self._failure("source_credential_provider_schema_invalid")
+            return self._source_contract_failure("source_contract_schema_invalid")
 
         sivb = self._request_json(
             self._BARS_URL,
@@ -264,9 +458,9 @@ class AlpacaLiveContractValidator:
             headers,
         )
         if isinstance(sivb, CredentialValidationResult):
-            return sivb
+            return self._after_authentication(sivb)
         if not self._valid_multi_symbol_bars(sivb, {"SIVB"}):
-            return self._failure("source_credential_provider_schema_invalid")
+            return self._source_contract_failure("source_contract_schema_invalid")
 
         pagination_pages = 0
         page_token: str | None = None
@@ -285,9 +479,9 @@ class AlpacaLiveContractValidator:
                 query["page_token"] = page_token
             page = self._request_json(self._BARS_URL, query, headers)
             if isinstance(page, CredentialValidationResult):
-                return page
+                return self._after_authentication(page)
             if not self._valid_single_symbol_page(page):
-                return self._failure("source_credential_provider_schema_invalid")
+                return self._source_contract_failure("source_contract_schema_invalid")
             pagination_pages += 1
             next_token = cast(dict[str, object], page).get("next_page_token")
             if next_token is None:
@@ -298,11 +492,11 @@ class AlpacaLiveContractValidator:
                 or next_token in seen_tokens
                 or pagination_pages >= 20
             ):
-                return self._failure("source_credential_provider_schema_invalid")
+                return self._source_contract_failure("source_contract_schema_invalid")
             seen_tokens.add(next_token)
             page_token = next_token
         if pagination_pages < 2:
-            return self._failure("source_credential_provider_schema_invalid")
+            return self._source_contract_failure("source_contract_schema_invalid")
 
         actions = self._request_json(
             self._ACTIONS_URL,
@@ -310,7 +504,7 @@ class AlpacaLiveContractValidator:
             headers,
         )
         if isinstance(actions, CredentialValidationResult):
-            return actions
+            return self._after_authentication(actions)
         dividends = cast(dict[str, object], actions).get("cash_dividends")
         if not isinstance(dividends, list) or not any(
             isinstance(item, dict)
@@ -319,7 +513,29 @@ class AlpacaLiveContractValidator:
             and isinstance(item.get("ex_date"), str)
             for item in dividends
         ):
-            return self._failure("source_credential_provider_schema_invalid")
+            return self._source_contract_failure("source_contract_schema_invalid")
+
+        name_changes = self._request_json(
+            self._ACTIONS_URL,
+            {
+                "end": "2022-06-10",
+                "start": "2022-06-08",
+                "symbols": "FB,META",
+                "types": "name_change",
+            },
+            headers,
+        )
+        if isinstance(name_changes, CredentialValidationResult):
+            return self._after_authentication(name_changes)
+        name_change_rows = cast(dict[str, object], name_changes).get("name_changes")
+        if not isinstance(name_change_rows, list) or not any(
+            isinstance(item, dict)
+            and item.get("old_symbol") == "FB"
+            and item.get("new_symbol") == "META"
+            and item.get("process_date") == "2022-06-09"
+            for item in name_change_rows
+        ):
+            return self._source_contract_failure("source_contract_schema_invalid")
 
         calendar = self._request_json(
             self._CALENDAR_URL,
@@ -327,29 +543,30 @@ class AlpacaLiveContractValidator:
             headers,
         )
         if isinstance(calendar, CredentialValidationResult):
-            return calendar
+            return self._after_authentication(calendar)
         if not isinstance(calendar, list) or not any(
             isinstance(item, dict)
             and item.get("date") == "2024-11-29"
             and item.get("close") == "13:00"
             for item in calendar
         ):
-            return self._failure("source_credential_provider_schema_invalid")
+            return self._source_contract_failure("source_contract_schema_invalid")
 
         return CredentialValidationResult(
             readiness="valid",
             reason_code="source_credential_valid",
-            evidence={
-                "contract_id": "alpaca-ticket-07-live-v1",
-                "live_validation": "passed",
-                "ticker_count": 10,
-                "pagination_pages": pagination_pages,
-                "datasets": [
+            evidence=CredentialValidationEvidence(
+                contract_id="alpaca-ticket-07-live-v1",
+                live_validation="passed",
+                ticker_count=10,
+                pagination_pages=pagination_pages,
+                symbol_lifecycle_probe="passed",
+                datasets=(
                     "alpaca-us-stock-bars-v2",
                     "alpaca-us-corporate-actions-v1",
                     "alpaca-us-trading-calendar-v2",
-                ],
-            },
+                ),
+            ),
         )
 
     def _request_json(
@@ -402,14 +619,49 @@ class AlpacaLiveContractValidator:
 
     @staticmethod
     def _failure(reason_code: str) -> CredentialValidationResult:
+        source_contract_reason = {
+            "source_credential_validation_rate_limited": "source_contract_rate_limited",
+            "source_credential_provider_unavailable": "source_contract_unavailable",
+            "source_credential_provider_schema_invalid": "source_contract_schema_invalid",
+        }.get(reason_code)
+        if source_contract_reason is not None:
+            return CredentialValidationResult(
+                readiness="configured",
+                reason_code="source_credential_validation_inconclusive",
+                evidence=CredentialValidationEvidence(
+                    contract_id="alpaca-ticket-07-live-v1",
+                    live_validation="failed",
+                    source_contract_reason_code=source_contract_reason,
+                ),
+            )
         return CredentialValidationResult(
             readiness="validation_failed",
             reason_code=reason_code,
-            evidence={
-                "contract_id": "alpaca-ticket-07-live-v1",
-                "live_validation": "failed",
-                "reason_code": reason_code,
-            },
+            evidence=CredentialValidationEvidence(
+                contract_id="alpaca-ticket-07-live-v1",
+                live_validation="failed",
+            ),
+        )
+
+    @staticmethod
+    def _after_authentication(
+        result: CredentialValidationResult,
+    ) -> CredentialValidationResult:
+        if result.reason_code == "source_credential_authentication_failed":
+            return result
+        reason = result.evidence.source_contract_reason_code or "source_contract_probe_failed"
+        return AlpacaLiveContractValidator._source_contract_failure(reason)
+
+    @staticmethod
+    def _source_contract_failure(reason_code: str) -> CredentialValidationResult:
+        return CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(
+                contract_id="alpaca-ticket-07-live-v1",
+                live_validation="failed",
+                source_contract_reason_code=reason_code,
+            ),
         )
 
 
@@ -431,7 +683,7 @@ class AlpacaSourceCollector:
         *,
         source_id: str,
         provider_id: str,
-        listing_symbols: Mapping[str, tuple[str, ...]],
+        reference_graph: AlpacaReferenceGraph,
         credential_resolver: SourceCredentialResolver,
         transport: ProviderHttpTransport,
         clock: Callable[[], datetime],
@@ -439,7 +691,11 @@ class AlpacaSourceCollector:
     ) -> None:
         self._source_id = source_id
         self._provider_id = provider_id
-        self._listing_symbols = dict(listing_symbols)
+        self._reference_graph = reference_graph
+        self._listing_symbols = {
+            listing.listing_id: tuple(alias.security_code for alias in listing.aliases)
+            for listing in reference_graph.listings
+        }
         self._credential_resolver = credential_resolver
         self._transport = transport
         self._clock = clock
@@ -525,6 +781,11 @@ class AlpacaSourceCollector:
             "calendar": calendar,
             "corporate_action_pages": corporate_action_pages,
             "provider_id": self._provider_id,
+            "reference_graph": self._reference_graph.partition_payload(
+                listing_ids=request.listing_ids,
+                start_date=request.start_date,
+                end_date=request.end_date,
+            ),
             "schema_version": "alpaca-source-bundle-v1",
         }
         raw_payload = json.dumps(
@@ -573,7 +834,17 @@ class AlpacaSourceCollector:
                 complete=complete,
             ),
             source_revision=checkpoint,
-            expected_company_action_ids=request.expected_company_action_ids,
+            requested_listing_ids=request.listing_ids,
+            reference_graph_version_id=self._reference_graph.version_id,
+            reference_graph_lifecycle_verified=self._reference_graph.lifecycle_complete,
+            company_action_completeness_verified=(self._reference_graph.company_actions_complete),
+            expected_company_action_ids=(
+                self._reference_graph.expected_company_action_ids(
+                    listing_ids=request.listing_ids,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                )
+            ),
             revision_kind=request.revision_kind,
             bundle_members=(
                 CollectedSourceBundleMember(
@@ -698,10 +969,14 @@ class AlpacaSourceDecoder:
         self,
         *,
         source_id: str,
-        listing_symbols: Mapping[str, tuple[str, ...]],
+        reference_graph: AlpacaReferenceGraph,
     ) -> None:
         self._source_id = source_id
-        self._listing_symbols = dict(listing_symbols)
+        self._reference_graph = reference_graph
+        self._listing_symbols = {
+            listing.listing_id: tuple(alias.security_code for alias in listing.aliases)
+            for listing in reference_graph.listings
+        }
         symbol_to_listing: dict[str, str] = {}
         for listing_id, symbols in self._listing_symbols.items():
             if not symbols:
@@ -725,36 +1000,53 @@ class AlpacaSourceDecoder:
             or bundle.get("schema_version") != "alpaca-source-bundle-v1"
         ):
             raise ValueError("source_provider_schema_invalid")
+        if (
+            not collection.requested_listing_ids
+            or collection.reference_graph_version_id != self._reference_graph.version_id
+            or collection.reference_graph_lifecycle_verified
+            is not self._reference_graph.lifecycle_complete
+            or collection.company_action_completeness_verified
+            is not self._reference_graph.company_actions_complete
+        ):
+            raise ValueError("source_reference_graph_lineage_mismatch")
+        expected_reference_payload = self._reference_graph.partition_payload(
+            listing_ids=collection.requested_listing_ids,
+            start_date=collection.coverage.requested_start,
+            end_date=collection.coverage.requested_end,
+        )
+        if bundle.get("reference_graph") != expected_reference_payload:
+            raise ValueError("source_reference_graph_lineage_mismatch")
         quality_issues: set[SourceQualityIssue] = set()
         prices = self._decode_prices(bundle, quality_issues)
-        company_actions, symbol_identities, action_assertions = self._decode_actions(
+        company_actions, _, action_assertions = self._decode_actions(
             bundle,
             quality_issues,
             collection.expected_company_action_ids,
         )
         market_sessions = self._decode_market_sessions(bundle)
-        observed_listings = {price.listing_id for price in prices}
-        first_session_by_listing = {
-            listing_id: min(
-                price.session_date for price in prices if price.listing_id == listing_id
-            )
-            for listing_id in observed_listings
-        }
-        listing_lifecycle = tuple(
-            ListingLifecycleRecord(
-                listing_id=listing_id,
-                effective_date=first_session_by_listing[listing_id],
-                status="active",
-                source_event_id=f"alpaca-active:{listing_id}",
-            )
-            for listing_id in sorted(observed_listings)
+        requested_reference_listings = tuple(
+            self._reference_graph.listing(listing_id)
+            for listing_id in collection.requested_listing_ids
         )
-        symbol_assertions = {
-            f"alpaca-symbol:{price.listing_id}:{symbol}"
-            for symbol, listing_id in self._symbol_to_listing.items()
-            for price in prices
-            if price.listing_id == listing_id and symbol == self._listing_symbols[listing_id][-1]
-        }
+        listing_lifecycle = tuple(
+            event for listing in requested_reference_listings for event in listing.lifecycle
+        )
+        symbol_identities = tuple(
+            SymbolIdentityRecord(
+                listing_id=listing.listing_id,
+                symbol=alias.security_code,
+                valid_from=alias.valid_from,
+                valid_to=alias.valid_to,
+                source_event_id=f"{self._reference_graph.version_id}:{alias.security_code}",
+            )
+            for listing in requested_reference_listings
+            for alias in listing.aliases
+        )
+        symbol_assertions = {identity.source_event_id for identity in symbol_identities}
+        if not collection.reference_graph_lifecycle_verified:
+            quality_issues.add("identity_ambiguous")
+        if not collection.company_action_completeness_verified:
+            quality_issues.add("missing_company_action")
         revision_kind: SourceRevisionKind = collection.revision_kind
         if revision_kind == "correction":
             quality_issues.add("correction_requires_review")
@@ -768,7 +1060,7 @@ class AlpacaSourceDecoder:
             adjusted_close_cross_checks=(),
             identity_assertion_ids=tuple(sorted(symbol_assertions | action_assertions)),
             parent_object_ids=(),
-            symbol_identities=tuple(symbol_identities),
+            symbol_identities=symbol_identities,
             market_sessions=tuple(market_sessions),
             revision_kind=revision_kind,
             quality_issues=tuple(sorted(quality_issues)),

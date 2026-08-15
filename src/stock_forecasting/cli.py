@@ -149,6 +149,7 @@ def _parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--dagster-url")
     acceptance.add_argument("--denied-base-url")
     acceptance.add_argument("--key-file", type=Path)
+    acceptance.add_argument("--source-secret-root", type=Path)
     acceptance.add_argument("--project-root", type=Path, default=Path.cwd())
     acceptance.add_argument("--git-dir", type=Path, default=Path.cwd() / ".git")
     acceptance.add_argument("--previous-bundle-reference")
@@ -201,6 +202,10 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         choices=["public_source", "internal", "licensed", "restricted", "secret"],
     )
+    local_key_init.add_argument(
+        "--principal-classification",
+        choices=["individual_non_commercial", "commercial"],
+    )
     local_key_init.add_argument("--issued-at", type=_instant)
     local_key_init.add_argument("--expires-at", type=_instant)
     authorization = commands.add_parser("authorization")
@@ -239,6 +244,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.ticket in {"ticket-06", "ticket-07"}:
             if arguments.base_url is None or arguments.key_file is None:
                 parser.error(f"{arguments.ticket} requires --base-url and --key-file")
+            if arguments.ticket == "ticket-07" and arguments.source_secret_root is None:
+                parser.error("ticket-07 requires --source-secret-root")
             report = (
                 run_ticket_06_acceptance(
                     database_url=arguments.database_url,
@@ -252,6 +259,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     object_root=arguments.object_root,
                     base_url=arguments.base_url,
                     key_file=arguments.key_file,
+                    source_secret_root=arguments.source_secret_root,
                 )
             )
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
@@ -353,12 +361,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 and identity.context.data_protection_classes
                 != frozenset(arguments.data_protection_class)
             )
+            explicit_principal_classification_conflict = (
+                arguments.principal_classification is not None
+                and identity.context.principal_classification != arguments.principal_classification
+            )
             if (
                 identity.context.owner != arguments.owner
                 or identity.context.environment != arguments.environment
                 or identity.context.scopes != frozenset(arguments.scope)
                 or explicit_times_conflict
                 or explicit_classes_conflict
+                or explicit_principal_classification_conflict
                 or identity.context.expires_at <= generated_at
             ):
                 raise RuntimeError("local_api_key_file_conflict")
@@ -375,6 +388,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if arguments.data_protection_class is not None
                     else None
                 ),
+                principal_classification=arguments.principal_classification,
             )
             identity.save(arguments.path)
         print(json.dumps({"status": status}, sort_keys=True))

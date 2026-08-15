@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from stock_forecasting.adapters.rest import create_web_app
+from stock_forecasting.alpaca_market_data import ProviderHttpRequest, ProviderHttpResponse
 from stock_forecasting.application import Application, build_test_application
 from stock_forecasting.authorization import (
     ActionGrant,
@@ -19,9 +20,11 @@ from stock_forecasting.authorization import (
     SourceEntitlement,
     SourcePolicyVersion,
 )
+from stock_forecasting.data_supply import SourceBundleMemberRequest, SourcePartitionRequest
 from stock_forecasting.operations_control import OperationsControl
 from stock_forecasting.source_credentials import (
     CredentialNotReady,
+    CredentialValidationEvidence,
     CredentialValidationResult,
     InMemorySecretProvider,
     ManagedSourceCredentialResolver,
@@ -74,6 +77,16 @@ class RecordingSecretProvider:
             raise OSError("injected_secret_delete_failure")
         self.delegate.revoke(secret_ref_id)
         self.refs.discard(secret_ref_id)
+
+
+class SequenceProviderTransport:
+    def __init__(self, responses: list[ProviderHttpResponse]) -> None:
+        self.responses = responses
+        self.requests: list[ProviderHttpRequest] = []
+
+    def send(self, request: ProviderHttpRequest) -> ProviderHttpResponse:
+        self.requests.append(request)
+        return self.responses.pop(0)
 
 
 def _credential_application(
@@ -423,11 +436,11 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
         CredentialValidationResult(
             readiness="valid",
             reason_code="source_credential_valid",
-            evidence={
-                "contract_id": "alpaca-ticket-07-live-v1",
-                "live_validation": "passed",
-                "ticker_count": 10,
-            },
+            evidence=CredentialValidationEvidence(
+                contract_id="alpaca-ticket-07-live-v1",
+                live_validation="passed",
+                ticker_count=10,
+            ),
         )
     )
     _, client, headers = _credential_application(
@@ -473,6 +486,18 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
     ]
     assert "PK-VALIDATE" not in validated.text
     assert "validate-secret-value" not in validated.text
+
+
+def test_credential_validation_rejects_arbitrary_secret_bearing_evidence() -> None:
+    with pytest.raises(ValueError, match="source_credential_validation_evidence_invalid"):
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence={"api_secret_key": "must-never-be-persisted"},  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(ValueError, match="source_credential_validation_evidence_invalid"):
+        CredentialValidationEvidence(live_validation="invented")  # type: ignore[arg-type]
 
 
 def test_only_a_valid_managed_credential_can_be_resolved_for_provider_use(
@@ -524,6 +549,129 @@ def test_only_a_valid_managed_credential_can_be_resolved_for_provider_use(
     )
     with pytest.raises(CredentialNotReady, match="source_credential_revoked"):
         resolver.resolve_valid("alpaca-market-data-basic")
+
+
+def test_rest_managed_credential_is_consumed_by_the_application_us_adapter(
+    tmp_path: Path,
+) -> None:
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+    )
+    client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-SHARED-RUNTIME",
+                "api_secret_key": "shared-runtime-secret",
+            }
+        },
+    )
+    client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
+        headers=headers,
+    )
+    transport = SequenceProviderTransport(
+        [
+            ProviderHttpResponse(
+                200,
+                b'{"bars":{"AAPL":[{"t":"2024-01-03T05:00:00Z","o":184.22,"h":185.88,"l":183.43,"c":184.25,"v":58414460}]},"next_page_token":null}',
+            ),
+            ProviderHttpResponse(200, b'{"cash_dividends":[],"next_page_token":null}'),
+            ProviderHttpResponse(
+                200,
+                b'[{"date":"2024-01-03","open":"09:30","close":"16:00"}]',
+            ),
+        ]
+    )
+    adapter = application.build_alpaca_price_adapter(
+        transport=transport,
+        source_access_mode="engineering_double",
+    )
+
+    loaded = adapter.load(
+        SourcePartitionRequest(
+            request_id="request-shared-runtime-credential",
+            trace_id="trace-shared-runtime-credential",
+            source_id="alpaca-us-stock-bars",
+            mode="historical",
+            listing_ids=("70000000-0000-4000-8000-000000000001",),
+            start_date=datetime(2024, 1, 3, tzinfo=UTC).date(),
+            end_date=datetime(2024, 1, 3, tzinfo=UTC).date(),
+            expected_checkpoint=None,
+            distribution_id="alpaca-us-stock-bars-v2",
+            distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+            bundle_members=(
+                SourceBundleMemberRequest(
+                    dataset_id="alpaca-us-corporate-actions-v1",
+                    distribution_id="alpaca-us-corporate-actions-v1",
+                    distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+                    schema_version="alpaca-corporate-actions-v1",
+                ),
+                SourceBundleMemberRequest(
+                    dataset_id="alpaca-us-trading-calendar-v2",
+                    distribution_id="alpaca-us-trading-calendar-v2",
+                    distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+                    schema_version="alpaca-trading-calendar-v2",
+                ),
+            ),
+        )
+    )
+
+    assert loaded.collection.request_id == "request-shared-runtime-credential"
+    assert len(transport.requests) == 3
+    assert all(
+        request.headers["APCA-API-KEY-ID"] == "PK-SHARED-RUNTIME"
+        and request.headers["APCA-API-SECRET-KEY"] == "shared-runtime-secret"
+        for request in transport.requests
+    )
+    assert all("shared-runtime-secret" not in repr(request) for request in transport.requests)
+
+
+def test_revoked_credential_can_be_reapplied_through_the_write_only_rest_seam(
+    tmp_path: Path,
+) -> None:
+    application, client, headers = _credential_application(tmp_path)
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    first = client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-FIRST-APPLICATION",
+                "api_secret_key": "first-application-secret",
+            }
+        },
+    ).json()
+    revoked = client.delete(endpoint, headers=headers).json()
+
+    reapplied = client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-REAPPLIED",
+                "api_secret_key": "reapplied-secret",
+            }
+        },
+    )
+
+    assert reapplied.status_code == 200
+    assert reapplied.json()["readiness"] == "configured"
+    assert reapplied.json()["version"] == revoked["version"] + 1
+    assert reapplied.json()["secret_ref_id"] != first["secret_ref_id"]
+    assert application.secret_provider.checkout(
+        reapplied.json()["secret_ref_id"]
+    ).credential_fields() == {
+        "api_key_id": "PK-REAPPLIED",
+        "api_secret_key": "reapplied-secret",
+    }
+    assert "PK-REAPPLIED" not in reapplied.text
+    assert "reapplied-secret" not in reapplied.text
 
 
 def test_failed_validation_keeps_provider_use_fail_closed(tmp_path: Path) -> None:

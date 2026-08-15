@@ -16,6 +16,7 @@ from stock_forecasting.authorization import (
 from stock_forecasting.data_supply import PRICE_RESEARCH_REQUIRED_USES
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.source_credentials import (
+    CredentialValidationEvidence,
     SecretProvider,
     SourceCredentialValidator,
     project_source_credential_readiness,
@@ -273,27 +274,25 @@ class OperationsControl:
         ):
             validation_readiness = "expired"
             validation_reason = "source_credential_expired"
-            validation_evidence: dict[str, object] = {
-                "contract_id": "alpaca-ticket-07-live-v1",
-                "live_validation": "not_run",
-                "reason_code": "source_credential_expired",
-            }
+            validation_evidence = CredentialValidationEvidence(
+                contract_id="alpaca-ticket-07-live-v1",
+                live_validation="not_run",
+            )
         else:
             try:
                 lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
             except KeyError:
                 validation_readiness = "validation_failed"
                 validation_reason = "source_credential_secret_unavailable"
-                validation_evidence = {
-                    "contract_id": "alpaca-ticket-07-live-v1",
-                    "live_validation": "not_run",
-                    "reason_code": validation_reason,
-                }
+                validation_evidence = CredentialValidationEvidence(
+                    contract_id="alpaca-ticket-07-live-v1",
+                    live_validation="not_run",
+                )
             else:
                 validation = validator.validate(lease.credential_fields())
                 validation_readiness = validation.readiness
                 validation_reason = validation.reason_code
-                validation_evidence = dict(validation.evidence)
+                validation_evidence = validation.evidence
         expected_version = current["version"]
         if not isinstance(expected_version, int):
             raise ValueError("source_credential_version_invalid")
@@ -304,7 +303,7 @@ class OperationsControl:
             validated_at=self._instant(evaluated_at),
             expected_version=expected_version,
             expected_secret_ref_id=str(current["secret_ref_id"]),
-            validation_evidence=validation_evidence,
+            validation_evidence=validation_evidence.as_payload(),
             authorization=authorization,
             trace_id=trace_id,
         )

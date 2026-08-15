@@ -209,6 +209,18 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "source_basis",
     }
     assert "credential_fields" not in credential["properties"]
+    assert set(credential["required"]) == {
+        "provider_id",
+        "readiness",
+        "reason_code",
+        "secret_ref_id",
+        "version",
+        "configured_at",
+        "last_validated_at",
+    }
+    validation_evidence = contract["components"]["schemas"]["CredentialValidationEvidence"]
+    assert validation_evidence["additionalProperties"] is False
+    assert validation_evidence["required"] == ["live_validation"]
     assert "expired" in credential["properties"]["readiness"]["enum"]
     write_request = contract["components"]["schemas"]["SourceCredentialWriteRequest"]
     assert write_request["properties"]["credential_fields"]["additionalProperties"] == {

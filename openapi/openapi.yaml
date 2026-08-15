@@ -761,8 +761,6 @@ components:
         - version
         - configured_at
         - last_validated_at
-        - required_uses
-        - source_basis
       properties:
         provider_id: {type: string}
         display_name: {type: string}
@@ -786,12 +784,29 @@ components:
         last_validated_at: {type: [string, 'null'], format: date-time}
         expires_at: {type: [string, 'null'], format: date-time}
         validation_evidence:
-          type: [object, 'null']
-          additionalProperties: true
+          oneOf:
+            - {$ref: '#/components/schemas/CredentialValidationEvidence'}
+            - {type: 'null'}
         secret_cleanup_pending: {type: boolean}
         revoked_at: {type: [string, 'null'], format: date-time}
         registration_url: {type: string, format: uri}
         key_management_url: {type: string, format: uri}
+    CredentialValidationEvidence:
+      type: object
+      additionalProperties: false
+      required: [live_validation]
+      properties:
+        contract_id: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$'}
+        live_validation: {type: string, enum: [not_run, passed, failed]}
+        ticker_count: {type: integer, minimum: 0}
+        pagination_pages: {type: integer, minimum: 0}
+        datasets:
+          type: array
+          items: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$'}
+        symbol_lifecycle_probe: {type: string, enum: [passed]}
+        source_contract_reason_code:
+          type: string
+          pattern: '^source_contract_[a-z0-9._-]+$'
     SourceCredentialWriteRequest:
       type: object
       additionalProperties: false

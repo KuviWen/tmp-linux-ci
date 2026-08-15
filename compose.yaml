@@ -584,6 +584,8 @@ services:
       - restricted
       - --data-protection-class
       - secret
+      - --principal-classification
+      - individual_non_commercial
 
   ticket-07-authorization-init:
     <<: *application
@@ -685,6 +687,8 @@ services:
       - http://ticket-07-api:8080
       - --key-file
       - /run/stock-forecasting/local-api-key.json
+      - --source-secret-root
+      - /var/lib/stock-forecasting/source-secrets
     depends_on:
       ticket-07-api:
         condition: service_healthy

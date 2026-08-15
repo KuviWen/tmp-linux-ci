@@ -212,6 +212,10 @@ class CollectedSourcePartition:
     coverage: SourceCollectionCoverage
     source_revision: str
     bundle_members: tuple[CollectedSourceBundleMember, ...] = ()
+    requested_listing_ids: tuple[str, ...] = ()
+    reference_graph_version_id: str | None = None
+    reference_graph_lifecycle_verified: bool = False
+    company_action_completeness_verified: bool = False
     expected_company_action_ids: frozenset[str] = frozenset()
     revision_kind: SourceRevisionKind = "original"
 
@@ -698,6 +702,9 @@ class DataSupply:
                 "policy_decision_id": decision.decision_id,
                 "historical_availability_claim_id": (request.historical_availability_claim_id),
             }
+            reference_graph = _reference_graph_lineage_payload(collection)
+            if reference_graph is not None:
+                quarantine_payload["reference_graph"] = reference_graph
             quarantine_id = _artifact_id("quarantine_record", quarantine_payload)
             outcome = PriceMaterializationOutcome(
                 status="quarantined",
@@ -774,6 +781,9 @@ class DataSupply:
                 "normalized_sha256": normalized_object.checksum,
             },
         }
+        reference_graph = _reference_graph_lineage_payload(collection)
+        if reference_graph is not None:
+            dataset_payload["reference_graph"] = reference_graph
         dataset_version_id = _artifact_id("dataset_version", dataset_payload)
         adjusted_closes = _derive_adjusted_closes(decoded)
         provider_cross_check = "matched" if decoded.adjusted_close_cross_checks else "not_provided"
@@ -1194,10 +1204,25 @@ def _source_retrieval_receipt_artifact(
         "checkpoint_before": collection.checkpoint_before,
         "checkpoint_after": collection.checkpoint_after,
     }
+    reference_graph = _reference_graph_lineage_payload(collection)
+    if reference_graph is not None:
+        payload["reference_graph"] = reference_graph
     return {
         "artifact_id": _artifact_id("source_retrieval_receipt", payload),
         "artifact_kind": "source_retrieval_receipt",
         "payload": payload,
+    }
+
+
+def _reference_graph_lineage_payload(
+    collection: CollectedSourcePartition,
+) -> dict[str, object] | None:
+    if collection.reference_graph_version_id is None:
+        return None
+    return {
+        "version_id": collection.reference_graph_version_id,
+        "lifecycle_complete": collection.reference_graph_lifecycle_verified,
+        "company_actions_complete": collection.company_action_completeness_verified,
     }
 
 

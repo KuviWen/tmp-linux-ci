@@ -171,6 +171,8 @@ def test_local_key_cli_initializes_ephemeral_secret_file_without_printing_creden
         "fixture_pipeline.execute",
         "--scope",
         "research_prediction.read",
+        "--principal-classification",
+        "individual_non_commercial",
         "--issued-at",
         issued_at.isoformat(),
         "--expires-at",
@@ -189,6 +191,7 @@ def test_local_key_cli_initializes_ephemeral_secret_file_without_printing_creden
         '{"status": "existing"}',
     ]
     assert identity.credential.authorization_header() not in output
+    assert identity.context.principal_classification == "individual_non_commercial"
 
 
 def test_local_key_cli_defaults_to_a_fresh_short_lived_key(
@@ -666,6 +669,7 @@ def test_zero_fee_authenticated_plan_requires_versioned_terms_and_principal_enti
         issued_at=now - timedelta(hours=1),
         expires_at=now + timedelta(hours=23),
         data_protection_classes={"licensed"},
+        principal_classification="individual_non_commercial",
     )
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
@@ -789,6 +793,50 @@ def test_zero_fee_authenticated_plan_requires_versioned_terms_and_principal_enti
     )
     assert without_qualification.allowed is False
     assert without_qualification.reason_code == "source_entitlement_missing"
+
+    mismatched_identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-commercial-deployment",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+        principal_classification="commercial",
+    )
+    mismatched_policy = AuthorizationPolicy(
+        action_grants=(
+            replace(
+                policy.action_grants[0],
+                principal_id=mismatched_identity.context.principal_id,
+            ),
+        ),
+        source_policies=policy.source_policies,
+        source_entitlements=(
+            replace(
+                policy.source_entitlements[0],
+                principal_id=mismatched_identity.context.principal_id,
+            ),
+        ),
+    )
+
+    mismatch = mismatched_policy.evaluate(
+        mismatched_identity.context,
+        OperationIntent(
+            action="market_data.collect",
+            dataset_id="alpaca-us-stock-bars",
+            purpose="price_research",
+            environment="development",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-ticket-07-principal-classification-mismatch",
+            correlation_id="request-ticket-07-principal-classification-mismatch",
+            required_uses=required_uses,
+            distribution_id=distribution.dataset_id,
+            distribution_url=distribution.distribution_url,
+        ),
+    )
+    assert mismatch.allowed is False
+    assert mismatch.reason_code == "source_policy_principal_classification_denied"
 
 
 def test_conflicting_entitlement_versions_fail_closed_instead_of_using_tuple_order() -> None:

@@ -3,12 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -39,16 +40,65 @@ class SecretProvider(Protocol):
 
 
 @dataclass(frozen=True)
+class CredentialValidationEvidence:
+    contract_id: str | None = None
+    live_validation: Literal["not_run", "passed", "failed"] = "not_run"
+    ticker_count: int | None = None
+    pagination_pages: int | None = None
+    datasets: tuple[str, ...] = ()
+    symbol_lifecycle_probe: Literal["passed"] | None = None
+    source_contract_reason_code: str | None = None
+
+    def __post_init__(self) -> None:
+        identifier = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+        if self.live_validation not in {"not_run", "passed", "failed"}:
+            raise ValueError("source_credential_validation_evidence_invalid")
+        if self.contract_id is not None and identifier.fullmatch(self.contract_id) is None:
+            raise ValueError("source_credential_validation_evidence_invalid")
+        if self.ticker_count is not None and self.ticker_count < 0:
+            raise ValueError("source_credential_validation_evidence_invalid")
+        if self.pagination_pages is not None and self.pagination_pages < 0:
+            raise ValueError("source_credential_validation_evidence_invalid")
+        if any(identifier.fullmatch(dataset) is None for dataset in self.datasets):
+            raise ValueError("source_credential_validation_evidence_invalid")
+        if self.symbol_lifecycle_probe not in {None, "passed"}:
+            raise ValueError("source_credential_validation_evidence_invalid")
+        if self.source_contract_reason_code is not None and not (
+            self.source_contract_reason_code.startswith("source_contract_")
+            and identifier.fullmatch(self.source_contract_reason_code) is not None
+        ):
+            raise ValueError("source_credential_validation_evidence_invalid")
+
+    def as_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {"live_validation": self.live_validation}
+        if self.contract_id is not None:
+            payload["contract_id"] = self.contract_id
+        if self.ticker_count is not None:
+            payload["ticker_count"] = self.ticker_count
+        if self.pagination_pages is not None:
+            payload["pagination_pages"] = self.pagination_pages
+        if self.datasets:
+            payload["datasets"] = list(self.datasets)
+        if self.symbol_lifecycle_probe is not None:
+            payload["symbol_lifecycle_probe"] = self.symbol_lifecycle_probe
+        if self.source_contract_reason_code is not None:
+            payload["source_contract_reason_code"] = self.source_contract_reason_code
+        return payload
+
+
+@dataclass(frozen=True)
 class CredentialValidationResult:
     readiness: str
     reason_code: str
-    evidence: Mapping[str, object] = field(default_factory=dict)
+    evidence: CredentialValidationEvidence = field(default_factory=CredentialValidationEvidence)
 
     def __post_init__(self) -> None:
-        if self.readiness not in {"valid", "validation_failed", "expired"}:
+        if self.readiness not in {"configured", "valid", "validation_failed", "expired"}:
             raise ValueError("source_credential_validation_result_invalid")
         if not self.reason_code:
             raise ValueError("source_credential_validation_reason_required")
+        if not isinstance(self.evidence, CredentialValidationEvidence):
+            raise ValueError("source_credential_validation_evidence_invalid")
 
 
 class SourceCredentialValidator(Protocol):
