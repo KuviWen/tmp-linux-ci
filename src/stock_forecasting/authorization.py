@@ -28,6 +28,7 @@ AuthorizationResourceState = Literal["active"]
 SourceUseRight = Literal[
     "ingest",
     "retain_7_years",
+    "retain_observed_history",
     "transform",
     "model",
     "internal_display",

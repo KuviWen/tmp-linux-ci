@@ -91,7 +91,7 @@ def _qualified_price_policy(
     allowed_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
-            "retain_7_years",
+            "retain_observed_history",
             "transform",
             "model",
             "internal_display",

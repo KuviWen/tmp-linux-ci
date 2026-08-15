@@ -311,7 +311,7 @@ def test_quarantined_listing_ui_never_claims_research_eligibility(tmp_path: Path
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
-            "retain_7_years",
+            "retain_observed_history",
             "transform",
             "model",
             "internal_display",
@@ -508,7 +508,7 @@ def test_rate_limited_listing_is_deferred_without_claiming_saved_candidate_data(
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
-            "retain_7_years",
+            "retain_observed_history",
             "transform",
             "model",
             "internal_display",
@@ -669,7 +669,7 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
-            "retain_7_years",
+            "retain_observed_history",
             "transform",
             "model",
             "internal_display",
@@ -909,7 +909,7 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
             replace(
                 source_policy,
                 version_id="policy-current-rights-use-removed-v2",
-                allowed_uses=required_uses - {"retain_7_years"},
+                allowed_uses=required_uses - {"retain_observed_history"},
             ),
         ),
         source_entitlements=(source_entitlement,),

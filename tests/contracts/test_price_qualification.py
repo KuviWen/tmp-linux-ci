@@ -98,7 +98,7 @@ def test_open_data_source_basis_is_derived_without_qualifying_history(
                 allowed_uses=frozenset(
                     {
                         "ingest",
-                        "retain_7_years",
+                        "retain_observed_history",
                         "transform",
                         "model",
                         "internal_display",
@@ -193,7 +193,7 @@ def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contra
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
-            "retain_7_years",
+            "retain_observed_history",
             "transform",
             "model",
             "internal_display",

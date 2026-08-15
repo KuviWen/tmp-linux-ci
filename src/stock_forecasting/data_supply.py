@@ -347,7 +347,7 @@ class PriceMaterializationOutcome:
 PRICE_RESEARCH_REQUIRED_USES: frozenset[SourceUseRight] = frozenset(
     {
         "ingest",
-        "retain_7_years",
+        "retain_observed_history",
         "transform",
         "model",
         "internal_display",
