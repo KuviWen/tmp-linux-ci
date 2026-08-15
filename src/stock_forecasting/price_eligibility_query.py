@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from stock_forecasting.authorization import (
+    AuthorizationDecision,
     AuthorizationPolicy,
     OperationIntent,
     PolicyDeniedOutcome,
@@ -25,13 +26,13 @@ class PriceEligibilityQuery:
         *,
         authorization_policy: AuthorizationPolicy,
         authorization_time: datetime | None,
-        source_authorization_policy: Callable[[], AuthorizationPolicy] | None = None,
+        source_authorization_policy: Callable[[str], AuthorizationPolicy] | None = None,
     ) -> None:
         self._state_store = state_store
         self._authorization_policy = authorization_policy
         self._authorization_time = authorization_time
         self._source_authorization_policy = source_authorization_policy or (
-            lambda: authorization_policy
+            lambda _principal_id: authorization_policy
         )
 
     def get_listing(
@@ -52,7 +53,6 @@ class PriceEligibilityQuery:
             sources=sources,
             evaluated_at=evaluated_at,
             trace_id=trace_id,
-            security_context=security_context,
         )
         modes = {str(source["source_mode"]) for source in sources}
         required_modes_present = modes == {"current", "historical"}
@@ -117,7 +117,6 @@ class PriceEligibilityQuery:
             sources=self._state_store.list_price_research_eligibility(),
             evaluated_at=self._authorization_time or datetime.now(UTC),
             trace_id=trace_id,
-            security_context=security_context,
         )
 
     def _apply_current_source_rights(
@@ -126,52 +125,54 @@ class PriceEligibilityQuery:
         sources: list[dict[str, object]],
         evaluated_at: datetime,
         trace_id: str,
-        security_context: SecurityContext,
     ) -> list[dict[str, object]]:
-        source_ids = sorted(
-            {str(source["source_id"]) for source in sources if source["status"] == "published"}
-        )
-        if not source_ids:
-            return sources
-        policy = self._source_authorization_policy()
-        source_allowed: dict[str, bool] = {}
-        for source_id in source_ids:
-            decision = policy.evaluate(
-                security_context,
-                OperationIntent(
-                    action="price_research_eligibility.read",
-                    dataset_id=source_id,
-                    purpose="price_research",
-                    environment=security_context.environment,
-                    resource_state="active",
-                    evaluated_at=evaluated_at,
-                    trace_id=trace_id,
-                    correlation_id=f"{trace_id}:{source_id}:current-source-rights",
-                    required_uses=PRICE_RESEARCH_REQUIRED_USES,
-                ),
-            )
-            self._state_store.record_authorization_decision(
-                authorization=authorization_audit_payload(decision),
-                outcome="allowed" if decision.allowed else "denied",
-                trace_id=trace_id,
-            )
-            source_allowed[source_id] = decision.allowed
+        decisions: dict[str, AuthorizationDecision] = {}
         projected_sources: list[dict[str, object]] = []
         for source in sources:
-            source_id = str(source["source_id"])
-            policy_expired = (
-                source["status"] == "published"
-                and _parse_instant(str(source["policy_valid_until"])) <= evaluated_at
-            )
-            if source_allowed.get(source_id, True) and not policy_expired:
-                projected_sources.append(source)
-                continue
             projected = dict(source)
-            projected["status"] = "policy_blocked"
-            projected["reason_code"] = "source_rights_not_effective"
+            projected["current_policy_decision"] = None
+            if source["status"] == "policy_blocked":
+                projected_sources.append(projected)
+                continue
+            evaluation_id = str(source["policy_evaluation_id"])
+            try:
+                decision = decisions.get(evaluation_id)
+                if decision is None:
+                    prior_authorization = self._state_store.get_authorization_decision(
+                        evaluation_id=evaluation_id
+                    )
+                    principal_id = prior_authorization.get("principal_id")
+                    if not isinstance(principal_id, str):
+                        raise ValueError("source_workload_principal_missing")
+                    decision = self._source_authorization_policy(
+                        principal_id
+                    ).reevaluate_source_workload(
+                        prior_authorization,
+                        evaluated_at=evaluated_at,
+                        trace_id=trace_id,
+                        correlation_id=(
+                            f"{trace_id}:{source['source_id']}:{source['source_mode']}:"
+                            "current-source-rights"
+                        ),
+                        required_uses=PRICE_RESEARCH_REQUIRED_USES,
+                    )
+                    self._state_store.record_authorization_decision(
+                        authorization=authorization_audit_payload(decision),
+                        outcome="allowed" if decision.allowed else "denied",
+                        trace_id=trace_id,
+                    )
+                    decisions[evaluation_id] = decision
+                projected["current_policy_decision"] = _current_policy_decision_payload(decision)
+                source_rights_allowed = decision.allowed
+            except (KeyError, ValueError):
+                source_rights_allowed = False
             source_checks = projected.get("checks")
             checks = dict(source_checks) if isinstance(source_checks, dict) else {}
-            checks["policy"] = "blocked"
+            if not source_rights_allowed:
+                checks["policy"] = "blocked"
+                if source["status"] != "deferred":
+                    projected["status"] = "policy_blocked"
+                    projected["reason_code"] = "source_rights_not_effective"
             projected["checks"] = checks
             projected_sources.append(projected)
         return projected_sources
@@ -221,8 +222,18 @@ def _aggregate_qualification_checks(sources: list[dict[str, object]]) -> dict[st
     return aggregated
 
 
-def _parse_instant(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if parsed.tzinfo is None:
-        raise ValueError("price_eligibility_instant_timezone_required")
-    return parsed
+def _current_policy_decision_payload(decision: AuthorizationDecision) -> dict[str, object]:
+    authorization = authorization_audit_payload(decision)
+    return {
+        field: authorization[field]
+        for field in (
+            "evaluation_id",
+            "decision_id",
+            "reason_code",
+            "evaluated_at",
+            "valid_until",
+            "grant_version_id",
+            "source_policy_version_id",
+            "source_entitlement_version_id",
+        )
+    }

@@ -78,9 +78,11 @@ class Application:
             self.state_store,
             authorization_policy=self.authorization_policy,
             authorization_time=fixed_security_time,
-            source_authorization_policy=lambda: self.authorization_policy_repository.get(
-                authorization_policy_set_id,
-                principal_id=self.security_context.principal_id,
+            source_authorization_policy=lambda principal_id: (
+                self.authorization_policy_repository.get(
+                    authorization_policy_set_id,
+                    principal_id=principal_id,
+                )
             ),
         )
         self.security_audit = SecurityAudit(self.state_store)

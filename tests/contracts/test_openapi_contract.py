@@ -109,3 +109,22 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "type": "string",
         "format": "uuid",
     }
+    assert "current_policy_decision" in source["required"]
+    assert source["properties"]["current_policy_decision"] == {
+        "oneOf": [
+            {"$ref": "#/components/schemas/CurrentSourcePolicyDecision"},
+            {"type": "null"},
+        ]
+    }
+    current_decision = contract["components"]["schemas"]["CurrentSourcePolicyDecision"]
+    assert current_decision["additionalProperties"] is False
+    assert set(current_decision["required"]) == {
+        "evaluation_id",
+        "decision_id",
+        "reason_code",
+        "evaluated_at",
+        "valid_until",
+        "grant_version_id",
+        "source_policy_version_id",
+        "source_entitlement_version_id",
+    }

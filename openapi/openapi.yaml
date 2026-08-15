@@ -321,6 +321,27 @@ components:
         schema: {type: string, enum: [passed, blocked, not_evaluated]}
         integrity: {type: string, enum: [passed, blocked, not_evaluated]}
         depth: {type: string, enum: [passed, blocked, not_evaluated]}
+    CurrentSourcePolicyDecision:
+      type: object
+      additionalProperties: false
+      required:
+        - evaluation_id
+        - decision_id
+        - reason_code
+        - evaluated_at
+        - valid_until
+        - grant_version_id
+        - source_policy_version_id
+        - source_entitlement_version_id
+      properties:
+        evaluation_id: {type: string, format: uuid}
+        decision_id: {type: string, format: uuid}
+        reason_code: {type: string}
+        evaluated_at: {type: string, format: date-time}
+        valid_until: {type: string, format: date-time}
+        grant_version_id: {type: [string, 'null']}
+        source_policy_version_id: {type: [string, 'null']}
+        source_entitlement_version_id: {type: [string, 'null']}
     PriceSourceEligibility:
       type: object
       additionalProperties: false
@@ -349,6 +370,7 @@ components:
         - rate_limit_policy_id
         - retry_after_seconds
         - checks
+        - current_policy_decision
       properties:
         status: {type: string, enum: [published, policy_blocked, quarantined, deferred]}
         reason_code: {type: string}
@@ -389,6 +411,10 @@ components:
         retry_after_seconds:
           type: [integer, 'null']
           minimum: 0
+        current_policy_decision:
+          oneOf:
+            - $ref: '#/components/schemas/CurrentSourcePolicyDecision'
+            - {type: 'null'}
         checks:
           $ref: '#/components/schemas/PriceQualificationChecks'
     SourceCollectionCoverage:

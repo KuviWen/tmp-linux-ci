@@ -660,7 +660,7 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
         state_store,
         authorization_policy=current_source_policy[0],
         authorization_time=now,
-        source_authorization_policy=lambda: current_source_policy[0],
+        source_authorization_policy=lambda _principal_id: current_source_policy[0],
     )
     result = query.get_listing(
         listing_id=listing_id,
@@ -1070,6 +1070,7 @@ def test_rate_limited_collection_is_deferred_without_advancing_the_checkpoint(
         state_store,
         authorization_policy=_price_read_policy(identity, now),
         authorization_time=now,
+        source_authorization_policy=lambda _principal_id: _qualified_price_policy(identity, now),
     ).get_listing(
         listing_id=listing_id,
         trace_id="trace-rate-limited-query",

@@ -438,6 +438,18 @@ def _instant(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _parse_instant(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("authorization_instant_invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("authorization_instant_invalid") from error
+    if parsed.tzinfo is None:
+        raise ValueError("authorization_instant_invalid")
+    return parsed
+
+
 def action_grant_version_payload(grant: ActionGrant) -> dict[str, object]:
     return {
         "version_id": grant.version_id,
@@ -547,6 +559,65 @@ class AuthorizationPolicy:
             "source_policy": source_policy_version_payload(policies[0]),
             "source_entitlement": source_entitlement_version_payload(entitlements[0]),
         }
+
+    def reevaluate_source_workload(
+        self,
+        prior_authorization: Mapping[str, object],
+        *,
+        evaluated_at: datetime,
+        trace_id: str,
+        correlation_id: str,
+        required_uses: frozenset[SourceUseRight],
+    ) -> AuthorizationDecision:
+        prior_required_uses = prior_authorization.get("required_uses")
+        protection_class = prior_authorization.get("data_protection_class")
+        environment = prior_authorization.get("environment")
+        authentication_method = prior_authorization.get("authentication_method")
+        if (
+            prior_authorization.get("outcome") != "allowed"
+            or prior_authorization.get("reason_code") != "authorized"
+            or prior_authorization.get("action") != "market_data.collect"
+            or not isinstance(prior_authorization.get("principal_id"), str)
+            or not isinstance(prior_authorization.get("credential_id"), str)
+            or authentication_method != "local_api_key"
+            or not isinstance(prior_authorization.get("dataset_id"), str)
+            or environment not in {"local", "development", "test", "staging", "production"}
+            or protection_class
+            not in {"public_source", "internal", "licensed", "restricted", "secret"}
+            or not isinstance(prior_required_uses, list)
+            or not required_uses <= set(prior_required_uses)
+        ):
+            raise ValueError("source_workload_authorization_evidence_invalid")
+        prior_evaluated_at = _parse_instant(prior_authorization.get("evaluated_at"))
+        prior_valid_until = _parse_instant(prior_authorization.get("valid_until"))
+        if prior_valid_until <= prior_evaluated_at:
+            raise ValueError("source_workload_authorization_evidence_invalid")
+        context = SecurityContext(
+            principal_id=cast(str, prior_authorization["principal_id"]),
+            credential_id=cast(str, prior_authorization["credential_id"]),
+            owner="persisted-source-workload",
+            environment=cast(RuntimeEnvironment, environment),
+            scopes=frozenset({"market_data.collect"}),
+            data_protection_classes=frozenset({cast(DataProtectionClass, protection_class)}),
+            issued_at=prior_evaluated_at,
+            expires_at=prior_valid_until,
+            authentication_method="local_api_key",
+            _issuer=_CONTEXT_ISSUER,
+        )
+        return self.evaluate(
+            context,
+            OperationIntent(
+                action="market_data.collect",
+                dataset_id=cast(str, prior_authorization["dataset_id"]),
+                purpose="price_research",
+                environment=cast(RuntimeEnvironment, environment),
+                resource_state="active",
+                evaluated_at=evaluated_at,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+                required_uses=required_uses,
+            ),
+        )
 
     def evaluate(
         self,

@@ -217,3 +217,40 @@ def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contra
         "operation": "register_historical_availability_claim",
         "reason_code": "candidate_claim_cannot_assert_qualification_evidence",
     }
+
+    partially_denied_policy = AuthorizationPolicy(
+        action_grants=policy.action_grants,
+        source_policies=policy.source_policies,
+        source_entitlements=tuple(
+            replace(
+                entitlement,
+                version_id="entitlement-price-qualification-historical-revoked-v2",
+                status="revoked",
+            )
+            if entitlement.dataset_id == manifest.historical_source_id
+            else entitlement
+            for entitlement in policy.source_entitlements
+        ),
+    )
+    partially_denied_workflow = TaiwanPriceQualificationWorkflow(
+        state_store,
+        authorization_policy=partially_denied_policy,
+        security_context=identity.context,
+        clock=lambda: now,
+    )
+    with pytest.raises(QualificationAuthorizationError, match="source_entitlement_revoked"):
+        partially_denied_workflow.register_formal_qualification_gate(
+            manifest=manifest,
+            historical_availability_claim_id=historical_claim_id,
+            trace_id="trace-partially-denied-formal-gate",
+        )
+
+    partial_audit = state_store.list_audit_events(trace_id="trace-partially-denied-formal-gate")
+    assert len(partial_audit) == 2
+    assert {event["outcome"] for event in partial_audit} == {"allowed", "denied"}
+    partial_trace = state_store.get_trace_evidence("trace-partially-denied-formal-gate")
+    partial_rejection = state_store.get_canonical_artifact(partial_trace["artifact_ids"][0])
+    assert partial_rejection["payload"] == {
+        "operation": "register_formal_qualification_gate",
+        "reason_code": "source_entitlement_revoked",
+    }

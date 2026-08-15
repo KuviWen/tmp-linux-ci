@@ -440,6 +440,24 @@ class StateStore:
                 trace_id=trace_id,
             )
 
+    def get_authorization_decision(self, *, evaluation_id: str) -> dict[str, object]:
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(
+                        security_audit_events.c.outcome,
+                        security_audit_events.c.authorization,
+                    ).where(security_audit_events.c.event_id == evaluation_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None or not isinstance(row["authorization"], dict):
+            raise KeyError(evaluation_id)
+        authorization = deepcopy(cast(dict[str, object], row["authorization"]))
+        authorization["outcome"] = row["outcome"]
+        return authorization
+
     def get_price_research_eligibility(self, *, listing_id: str) -> dict[str, Any]:
         with self.engine.connect() as connection:
             payload = connection.execute(
@@ -592,7 +610,6 @@ class StateStore:
     ) -> str:
         if artifact_kind not in {
             "historical_availability_claim",
-            "qualification_governance_rejection",
             "taiwan_price_qualification_gate",
         }:
             raise ValueError("unsupported_qualification_artifact_kind")
@@ -604,13 +621,64 @@ class StateStore:
                 or authorization.get("reason_code") != "authorized"
             ):
                 raise ValueError("qualification_authorization_invalid")
+        return self._publish_governance_record(
+            artifact_kind=artifact_kind,
+            payload=payload,
+            trace_id=trace_id,
+            authorization_outcomes=[(authorization, "allowed") for authorization in authorizations],
+        )
+
+    def _publish_governance_rejection(
+        self,
+        *,
+        payload: dict[str, object],
+        trace_id: str,
+        authorizations: list[dict[str, object]],
+    ) -> str:
+        if (
+            set(payload) != {"operation", "reason_code"}
+            or payload.get("operation")
+            not in {
+                "register_historical_availability_claim",
+                "register_formal_qualification_gate",
+            }
+            or not isinstance(payload.get("reason_code"), str)
+            or not payload["reason_code"]
+            or not authorizations
+            or any(
+                authorization.get("action") != "price_qualification.govern"
+                for authorization in authorizations
+            )
+        ):
+            raise ValueError("qualification_governance_rejection_invalid")
+        return self._publish_governance_record(
+            artifact_kind="qualification_governance_rejection",
+            payload=payload,
+            trace_id=trace_id,
+            authorization_outcomes=[
+                (
+                    authorization,
+                    "allowed" if authorization.get("reason_code") == "authorized" else "denied",
+                )
+                for authorization in authorizations
+            ],
+        )
+
+    def _publish_governance_record(
+        self,
+        *,
+        artifact_kind: str,
+        payload: dict[str, object],
+        trace_id: str,
+        authorization_outcomes: list[tuple[dict[str, object], str]],
+    ) -> str:
         artifact_id = _canonical_artifact_id(artifact_kind, payload)
         with self.engine.begin() as connection:
-            for authorization in authorizations:
+            for authorization, outcome in authorization_outcomes:
                 self._insert_authorization_decision(
                     connection,
                     authorization=authorization,
-                    outcome="allowed",
+                    outcome=outcome,
                     trace_id=trace_id,
                 )
             existing = (

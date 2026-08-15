@@ -44,7 +44,11 @@ class TaiwanPriceQualificationWorkflow:
         *,
         trace_id: str,
     ) -> str:
-        authorizations = self._authorize_sources((claim.source_id,), trace_id=trace_id)
+        authorizations = self._authorize_sources(
+            (claim.source_id,),
+            trace_id=trace_id,
+            operation="register_historical_availability_claim",
+        )
         try:
             if claim.evidence_status == "qualification_candidate":
                 if claim.qualification_artifact_id is not None:
@@ -52,8 +56,7 @@ class TaiwanPriceQualificationWorkflow:
             else:
                 self._validate_dependency_evidence(claim, authorization=authorizations[0])
         except ValueError as error:
-            self._state_store._publish_authorized_governance_artifact(
-                artifact_kind="qualification_governance_rejection",
+            self._state_store._publish_governance_rejection(
                 payload={
                     "operation": "register_historical_availability_claim",
                     "reason_code": str(error),
@@ -173,6 +176,7 @@ class TaiwanPriceQualificationWorkflow:
         authorizations = self._authorize_sources(
             (manifest.current_source_id, manifest.historical_source_id),
             trace_id=trace_id,
+            operation="register_formal_qualification_gate",
         )
         try:
             claim_payload = self._state_store.get_verified_governance_artifact(
@@ -195,8 +199,7 @@ class TaiwanPriceQualificationWorkflow:
                 authorization=historical_authorization,
             )
         except (KeyError, ValueError) as error:
-            self._state_store._publish_authorized_governance_artifact(
-                artifact_kind="qualification_governance_rejection",
+            self._state_store._publish_governance_rejection(
                 payload={
                     "operation": "register_formal_qualification_gate",
                     "reason_code": "formal_gate_requires_qualified_historical_claim",
@@ -226,6 +229,7 @@ class TaiwanPriceQualificationWorkflow:
         source_ids: Sequence[str],
         *,
         trace_id: str,
+        operation: str,
     ) -> list[dict[str, object]]:
         if (
             self._authorization_policy is None
@@ -251,12 +255,21 @@ class TaiwanPriceQualificationWorkflow:
                 ),
             )
             authorization = authorization_audit_payload(decision)
-            if not decision.allowed:
-                self._state_store.record_authorization_decision(
-                    authorization=authorization,
-                    outcome="denied",
-                    trace_id=trace_id,
-                )
-                raise QualificationAuthorizationError(decision.reason_code)
             authorizations.append(authorization)
+        denied = next(
+            (
+                authorization
+                for authorization in authorizations
+                if authorization["reason_code"] != "authorized"
+            ),
+            None,
+        )
+        if denied is not None:
+            reason_code = str(denied["reason_code"])
+            self._state_store._publish_governance_rejection(
+                payload={"operation": operation, "reason_code": reason_code},
+                trace_id=trace_id,
+                authorizations=authorizations,
+            )
+            raise QualificationAuthorizationError(reason_code)
         return authorizations
