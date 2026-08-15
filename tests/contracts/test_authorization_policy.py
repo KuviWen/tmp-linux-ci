@@ -480,7 +480,7 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
                 allowed_uses=frozenset(
                     {
                         "ingest",
-                        "retain_7_years",
+                        "retain_observed_history",
                         "transform",
                         "model",
                         "internal_display",
@@ -532,7 +532,7 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
             required_uses=frozenset(
                 {
                     "ingest",
-                    "retain_7_years",
+                    "retain_observed_history",
                     "transform",
                     "model",
                     "internal_display",
@@ -567,7 +567,7 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
                 "ingest",
                 "internal_display",
                 "model",
-                "retain_7_years",
+                "retain_observed_history",
                 "transform",
             ],
             "attribution": "政府資料開放授權條款－第1版（OGDL 1.0）",
@@ -613,7 +613,7 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
         required_uses=frozenset(
             {
                 "ingest",
-                "retain_7_years",
+                "retain_observed_history",
                 "transform",
                 "model",
                 "internal_display",
@@ -641,7 +641,7 @@ def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> No
                 required_uses=frozenset(
                     {
                         "ingest",
-                        "retain_7_years",
+                        "retain_observed_history",
                         "transform",
                         "model",
                         "internal_display",
@@ -819,7 +819,7 @@ def test_non_overlapping_entitlement_history_selects_the_version_effective_at_ev
             frozenset(
                 {
                     "ingest",
-                    "retain_7_years",
+                    "retain_observed_history",
                     "transform",
                     "model",
                     "internal_display",
@@ -832,7 +832,7 @@ def test_non_overlapping_entitlement_history_selects_the_version_effective_at_ev
             frozenset(
                 {
                     "ingest",
-                    "retain_7_years",
+                    "retain_observed_history",
                     "transform",
                     "model",
                     "internal_display",
@@ -861,7 +861,7 @@ def test_price_source_rights_fail_closed_when_a_required_use_is_missing(
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
-            "retain_7_years",
+            "retain_observed_history",
             "transform",
             "model",
             "internal_display",
@@ -939,7 +939,7 @@ def test_price_source_rights_allow_collection_only_when_all_required_uses_are_ef
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
-            "retain_7_years",
+            "retain_observed_history",
             "transform",
             "model",
             "internal_display",
@@ -1031,7 +1031,7 @@ def _current_source_rights_contract() -> _CurrentSourceRightsContract:
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
-            "retain_7_years",
+            "retain_observed_history",
             "transform",
             "model",
             "internal_display",
