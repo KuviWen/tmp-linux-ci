@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -7,7 +7,9 @@ import pytest
 
 from stock_forecasting.authorization import (
     ActionGrant,
+    AuthorizationDecision,
     AuthorizationPolicy,
+    CurrentSourcePrincipalAttributes,
     EntitlementStatus,
     IdentityVerificationError,
     LocalApiKeyIdentity,
@@ -793,7 +795,18 @@ def test_price_source_rights_allow_collection_only_when_all_required_uses_are_ef
     assert authorization_audit_payload(decision)["required_uses"] == sorted(required_uses)
 
 
-def test_current_source_rights_reject_prior_authorization_bound_to_another_source() -> None:
+@dataclass(frozen=True)
+class _CurrentSourceRightsContract:
+    now: datetime
+    source_id: str
+    policy: AuthorizationPolicy
+    prior: AuthorizationDecision
+    prior_evidence: dict[str, object]
+    required_uses: frozenset[SourceUseRight]
+    current_subject: CurrentSourcePrincipalAttributes
+
+
+def _current_source_rights_contract() -> _CurrentSourceRightsContract:
     now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
     source_id = "twse-rights-binding-contract"
     identity = LocalApiKeyIdentity.issue(
@@ -871,20 +884,127 @@ def test_current_source_rights_reject_prior_authorization_bound_to_another_sourc
         "outcome": "allowed",
         "trace_id": prior.trace_id,
     }
+    return _CurrentSourceRightsContract(
+        now=now,
+        source_id=source_id,
+        policy=policy,
+        prior=prior,
+        prior_evidence=prior_evidence,
+        required_uses=required_uses,
+        current_subject=CurrentSourcePrincipalAttributes(
+            principal_id=identity.context.principal_id,
+            evidence_id="subject-attributes-rights-binding-v1",
+            environment="development",
+            data_protection_classes=frozenset({"licensed"}),
+            valid_from=now - timedelta(minutes=5),
+            valid_to=now + timedelta(minutes=5),
+        ),
+    )
+
+
+def test_current_source_rights_reject_prior_authorization_bound_to_another_source() -> None:
+    contract = _current_source_rights_contract()
 
     with pytest.raises(
         SourceRightsEvidenceError,
         match="source_rights_prior_evidence_mismatch",
     ):
-        policy.evaluate_current_source_rights(
-            prior_evidence,
+        contract.policy.evaluate_current_source_rights(
+            contract.prior_evidence,
             expected_dataset_id="tpex-rights-binding-contract",
-            expected_evaluation_id=prior.evaluation_id,
-            expected_decision_id=prior.decision_id,
-            expected_trace_id=prior.trace_id,
-            expected_correlation_id=prior.correlation_id,
-            evaluated_at=now + timedelta(minutes=1),
+            expected_evaluation_id=contract.prior.evaluation_id,
+            expected_decision_id=contract.prior.decision_id,
+            expected_trace_id=contract.prior.trace_id,
+            expected_correlation_id=contract.prior.correlation_id,
+            current_runtime_environment="development",
+            current_subject=contract.current_subject,
+            evaluated_at=contract.now + timedelta(minutes=1),
             trace_id="trace-rights-binding-query",
             correlation_id="request-rights-binding-query",
-            required_uses=required_uses,
+            required_uses=contract.required_uses,
+        )
+
+
+def test_current_source_rights_use_current_runtime_and_subject_qualification() -> None:
+    contract = _current_source_rights_contract()
+
+    allowed = contract.policy.evaluate_current_source_rights(
+        contract.prior_evidence,
+        expected_dataset_id=contract.source_id,
+        expected_evaluation_id=contract.prior.evaluation_id,
+        expected_decision_id=contract.prior.decision_id,
+        expected_trace_id=contract.prior.trace_id,
+        expected_correlation_id=contract.prior.correlation_id,
+        current_runtime_environment="development",
+        current_subject=contract.current_subject,
+        evaluated_at=contract.now + timedelta(minutes=1),
+        trace_id="trace-current-subject-allowed",
+        correlation_id="request-current-subject-allowed",
+        required_uses=contract.required_uses,
+    )
+    cross_environment = contract.policy.evaluate_current_source_rights(
+        contract.prior_evidence,
+        expected_dataset_id=contract.source_id,
+        expected_evaluation_id=contract.prior.evaluation_id,
+        expected_decision_id=contract.prior.decision_id,
+        expected_trace_id=contract.prior.trace_id,
+        expected_correlation_id=contract.prior.correlation_id,
+        current_runtime_environment="production",
+        current_subject=replace(contract.current_subject, environment="production"),
+        evaluated_at=contract.now + timedelta(minutes=1),
+        trace_id="trace-current-subject-production",
+        correlation_id="request-current-subject-production",
+        required_uses=contract.required_uses,
+    )
+    qualification_removed = contract.policy.evaluate_current_source_rights(
+        contract.prior_evidence,
+        expected_dataset_id=contract.source_id,
+        expected_evaluation_id=contract.prior.evaluation_id,
+        expected_decision_id=contract.prior.decision_id,
+        expected_trace_id=contract.prior.trace_id,
+        expected_correlation_id=contract.prior.correlation_id,
+        current_runtime_environment="development",
+        current_subject=replace(
+            contract.current_subject,
+            evidence_id="subject-attributes-rights-binding-v2",
+            data_protection_classes=frozenset(),
+        ),
+        evaluated_at=contract.now + timedelta(minutes=1),
+        trace_id="trace-current-subject-qualification-removed",
+        correlation_id="request-current-subject-qualification-removed",
+        required_uses=contract.required_uses,
+    )
+
+    assert allowed.allowed is True
+    assert allowed.reason_code == "authorized"
+    assert allowed.runtime_environment == "development"
+    assert allowed.subject_attributes_evidence_id == contract.current_subject.evidence_id
+    assert allowed.subject_data_protection_classes == frozenset({"licensed"})
+    assert allowed.valid_until == contract.current_subject.valid_to
+    assert cross_environment.allowed is False
+    assert cross_environment.reason_code == "action_grant_environment_denied"
+    assert qualification_removed.allowed is False
+    assert qualification_removed.reason_code == "data_protection_class_denied"
+
+
+def test_current_source_rights_reject_future_dated_prior_authorization() -> None:
+    contract = _current_source_rights_contract()
+
+    with pytest.raises(
+        SourceRightsEvidenceError,
+        match="source_rights_prior_evidence_invalid",
+    ):
+        contract.policy.evaluate_current_source_rights(
+            contract.prior_evidence,
+            expected_dataset_id=contract.source_id,
+            expected_evaluation_id=contract.prior.evaluation_id,
+            expected_decision_id=contract.prior.decision_id,
+            expected_trace_id=contract.prior.trace_id,
+            expected_correlation_id=contract.prior.correlation_id,
+            current_runtime_environment="development",
+            current_subject=contract.current_subject,
+            evaluated_at=contract.now - timedelta(microseconds=1),
+            trace_id="trace-future-prior-evidence",
+            correlation_id="request-future-prior-evidence",
+            required_uses=contract.required_uses,
         )

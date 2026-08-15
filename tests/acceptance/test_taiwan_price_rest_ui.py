@@ -13,6 +13,7 @@ from stock_forecasting.application import Application, build_test_application
 from stock_forecasting.authorization import (
     ActionGrant,
     AuthorizationPolicy,
+    CurrentSourcePrincipalAttributes,
     LocalApiKeyIdentity,
     SourceEntitlement,
     SourcePolicyVersion,
@@ -55,6 +56,21 @@ class RateLimitedAdapter:
             retry_after_seconds=45,
             rate_limit_policy_id="provider-rate-limit-v1",
         )
+
+
+def _current_source_attributes(
+    identity: LocalApiKeyIdentity,
+    *,
+    evidence_id: str,
+) -> CurrentSourcePrincipalAttributes:
+    return CurrentSourcePrincipalAttributes(
+        principal_id=identity.context.principal_id,
+        evidence_id=evidence_id,
+        environment=identity.context.environment,
+        data_protection_classes=identity.context.data_protection_classes,
+        valid_from=identity.context.issued_at,
+        valid_to=identity.context.expires_at,
+    )
 
 
 def _blocked_price_application(
@@ -374,6 +390,10 @@ def test_quarantined_listing_ui_never_claims_research_eligibility(tmp_path: Path
         authorization_policy=application.authorization_policy,
         authorization_time=now,
         source_authorization_policy=lambda _principal_id: collect_policy,
+        source_principal_attributes=lambda _principal_id: _current_source_attributes(
+            workload_identity,
+            evidence_id="subject-attributes-quarantine-v1",
+        ),
     )
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
 
@@ -404,6 +424,10 @@ def test_quarantined_listing_ui_never_claims_research_eligibility(tmp_path: Path
         authorization_policy=application.authorization_policy,
         authorization_time=now,
         source_authorization_policy=lambda _principal_id: revoked_policy,
+        source_principal_attributes=lambda _principal_id: _current_source_attributes(
+            workload_identity,
+            evidence_id="subject-attributes-quarantine-v1",
+        ),
     )
     operations = client.get(
         "/api/v1/operations/sources",
@@ -505,6 +529,10 @@ def test_rate_limited_listing_is_deferred_without_claiming_saved_candidate_data(
         authorization_policy=application.authorization_policy,
         authorization_time=now,
         source_authorization_policy=lambda _principal_id: collect_policy,
+        source_principal_attributes=lambda _principal_id: _current_source_attributes(
+            workload_identity,
+            evidence_id="subject-attributes-rate-limited-v1",
+        ),
     )
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     headers = {"Authorization": identity.credential.authorization_header()}
@@ -546,6 +574,10 @@ def test_rate_limited_listing_is_deferred_without_claiming_saved_candidate_data(
         authorization_policy=application.authorization_policy,
         authorization_time=now,
         source_authorization_policy=lambda _principal_id: revoked_policy,
+        source_principal_attributes=lambda _principal_id: _current_source_attributes(
+            workload_identity,
+            evidence_id="subject-attributes-rate-limited-v1",
+        ),
     )
     revoked = client.get(
         "/api/v1/operations/sources",
@@ -709,6 +741,64 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
     )
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     headers = {"Authorization": identity.credential.authorization_header()}
+    missing_attributes_trace_id = "trace-current-rights-subject-attributes-missing"
+    missing_attributes_response = client.get(
+        "/api/v1/operations/sources",
+        headers={**headers, "X-Trace-Id": missing_attributes_trace_id},
+    )
+
+    assert missing_attributes_response.status_code == 200
+    missing_attributes = missing_attributes_response.json()["items"][0]
+    assert missing_attributes["status"] == "policy_blocked"
+    assert (
+        missing_attributes["current_policy_decision"]["reason_code"]
+        == "source_rights_subject_attributes_unavailable"
+    )
+    missing_attributes_trace = application.state_store.get_trace_evidence(
+        missing_attributes_trace_id
+    )
+    assert "current_source_rights_resolution" in missing_attributes_trace["artifact_kinds"]
+
+    application.price_eligibility_query = PriceEligibilityQuery(
+        application.state_store,
+        authorization_policy=application.authorization_policy,
+        authorization_time=now - timedelta(microseconds=1),
+        source_authorization_policy=lambda _principal_id: collect_policy,
+        source_principal_attributes=lambda _principal_id: _current_source_attributes(
+            workload_identity,
+            evidence_id="subject-attributes-current-rights-v1",
+        ),
+    )
+    future_evidence_trace_id = "trace-current-rights-future-prior-evidence"
+    future_evidence_response = client.get(
+        "/api/v1/operations/sources",
+        headers={**headers, "X-Trace-Id": future_evidence_trace_id},
+    )
+
+    assert future_evidence_response.status_code == 200
+    future_evidence = future_evidence_response.json()["items"][0]
+    assert future_evidence["status"] == "policy_blocked"
+    assert (
+        future_evidence["current_policy_decision"]["reason_code"]
+        == "source_rights_prior_evidence_invalid"
+    )
+    future_trace = application.state_store.get_trace_evidence(future_evidence_trace_id)
+    assert "current_source_rights_resolution" in future_trace["artifact_kinds"]
+    assert (
+        future_evidence["current_policy_decision"]["evidence_artifact_id"]
+        in future_trace["artifact_ids"]
+    )
+
+    application.price_eligibility_query = PriceEligibilityQuery(
+        application.state_store,
+        authorization_policy=application.authorization_policy,
+        authorization_time=now,
+        source_authorization_policy=lambda _principal_id: collect_policy,
+        source_principal_attributes=lambda _principal_id: _current_source_attributes(
+            workload_identity,
+            evidence_id="subject-attributes-current-rights-v1",
+        ),
+    )
 
     allowed_rest = client.get(
         f"/api/v1/research/listings/{listing_id}/price-eligibility",
@@ -721,6 +811,13 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
     assert allowed_rest["sources"][0]["current_policy_decision"]["reason_code"] == "authorized"
     assert allowed_operations["items"][0]["status"] == "published"
     assert allowed_operations["items"][0]["current_policy_decision"]["reason_code"] == "authorized"
+    assert (
+        allowed_operations["items"][0]["current_policy_decision"]["subject_attributes_evidence_id"]
+        == "subject-attributes-current-rights-v1"
+    )
+    assert allowed_operations["items"][0]["current_policy_decision"]["runtime_environment"] == (
+        "development"
+    )
 
     def unavailable_source_policy(_principal_id: str) -> AuthorizationPolicy:
         raise KeyError("current source policy unavailable")
@@ -730,6 +827,10 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
         authorization_policy=application.authorization_policy,
         authorization_time=now,
         source_authorization_policy=unavailable_source_policy,
+        source_principal_attributes=lambda _principal_id: _current_source_attributes(
+            workload_identity,
+            evidence_id="subject-attributes-current-rights-v1",
+        ),
     )
     unavailable_trace_id = "trace-current-rights-policy-unavailable"
     unavailable_response = client.get(
@@ -769,6 +870,10 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
         authorization_policy=application.authorization_policy,
         authorization_time=now,
         source_authorization_policy=lambda _principal_id: revoked_policy,
+        source_principal_attributes=lambda _principal_id: _current_source_attributes(
+            workload_identity,
+            evidence_id="subject-attributes-current-rights-v1",
+        ),
     )
     rest_response = client.get(
         f"/api/v1/research/listings/{listing_id}/price-eligibility",

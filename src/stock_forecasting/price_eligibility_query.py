@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from stock_forecasting.authorization import (
     AuthorizationPolicy,
+    CurrentSourcePrincipalAttributes,
     OperationIntent,
     PolicyDeniedOutcome,
     SecurityContext,
@@ -29,6 +30,9 @@ class PriceEligibilityQuery:
         authorization_policy: AuthorizationPolicy,
         authorization_time: datetime | None,
         source_authorization_policy: Callable[[str], AuthorizationPolicy] | None = None,
+        source_principal_attributes: (
+            Callable[[str], CurrentSourcePrincipalAttributes] | None
+        ) = None,
     ) -> None:
         self._state_store = state_store
         self._authorization_policy = authorization_policy
@@ -36,6 +40,7 @@ class PriceEligibilityQuery:
         self._source_authorization_policy = source_authorization_policy or (
             lambda _principal_id: authorization_policy
         )
+        self._source_principal_attributes = source_principal_attributes
 
     def get_listing(
         self,
@@ -55,6 +60,7 @@ class PriceEligibilityQuery:
             sources=sources,
             evaluated_at=evaluated_at,
             trace_id=trace_id,
+            security_context=security_context,
         )
         modes = {str(source["source_mode"]) for source in sources}
         required_modes_present = modes == {"current", "historical"}
@@ -127,6 +133,7 @@ class PriceEligibilityQuery:
             sources=self._state_store.list_price_research_eligibility(),
             evaluated_at=self._authorization_time or datetime.now(UTC),
             trace_id=trace_id,
+            security_context=security_context,
         )
 
     def _apply_current_source_rights(
@@ -135,6 +142,7 @@ class PriceEligibilityQuery:
         sources: list[dict[str, object]],
         evaluated_at: datetime,
         trace_id: str,
+        security_context: SecurityContext,
     ) -> list[dict[str, object]]:
         decisions: dict[tuple[str, ...], tuple[SourceRightsDecision, str]] = {}
         projected_sources: list[dict[str, object]] = []
@@ -158,6 +166,7 @@ class PriceEligibilityQuery:
             )
             decision_and_artifact = decisions.get(decision_key)
             failure_reason = "source_rights_prior_evidence_missing"
+            current_subject: CurrentSourcePrincipalAttributes | None = None
             try:
                 if decision_and_artifact is None:
                     prior_authorization = self._state_store.get_authorization_decision(
@@ -168,6 +177,11 @@ class PriceEligibilityQuery:
                         raise SourceRightsEvidenceError("source_rights_prior_evidence_invalid")
                     failure_reason = "source_rights_policy_unavailable"
                     policy = self._source_authorization_policy(principal_id)
+                    failure_reason = "source_rights_subject_attributes_unavailable"
+                    current_subject = self._resolve_current_source_principal_attributes(
+                        principal_id=principal_id,
+                        security_context=security_context,
+                    )
                     failure_reason = "source_rights_prior_evidence_invalid"
                     decision = policy.evaluate_current_source_rights(
                         prior_authorization,
@@ -176,6 +190,8 @@ class PriceEligibilityQuery:
                         expected_decision_id=decision_id,
                         expected_trace_id=source_trace_id,
                         expected_correlation_id=source_correlation_id,
+                        current_runtime_environment=security_context.environment,
+                        current_subject=current_subject,
                         evaluated_at=evaluated_at,
                         trace_id=trace_id,
                         correlation_id=(
@@ -206,6 +222,8 @@ class PriceEligibilityQuery:
                     evaluated_at=evaluated_at,
                     trace_id=trace_id,
                     reason_code=failure_reason,
+                    runtime_environment=security_context.environment,
+                    current_subject=current_subject,
                 )
                 payload = decision.as_payload()
                 evidence_artifact_id = self._state_store.publish_current_source_rights_resolution(
@@ -229,6 +247,21 @@ class PriceEligibilityQuery:
             projected["checks"] = checks
             projected_sources.append(projected)
         return projected_sources
+
+    def _resolve_current_source_principal_attributes(
+        self,
+        *,
+        principal_id: str,
+        security_context: SecurityContext,
+    ) -> CurrentSourcePrincipalAttributes:
+        if self._source_principal_attributes is not None:
+            attributes = self._source_principal_attributes(principal_id)
+            if not isinstance(attributes, CurrentSourcePrincipalAttributes):
+                raise SourceRightsEvidenceError("source_rights_subject_attributes_invalid")
+            return attributes
+        if principal_id == security_context.principal_id:
+            return CurrentSourcePrincipalAttributes.from_verified_security_context(security_context)
+        raise SourceRightsEvidenceError("source_rights_subject_attributes_unavailable")
 
     def _authorize(
         self,

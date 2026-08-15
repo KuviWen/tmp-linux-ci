@@ -330,6 +330,10 @@ components:
         - outcome
         - reason_code
         - subject_principal_id
+        - runtime_environment
+        - subject_attributes_evidence_id
+        - subject_attributes_valid_until
+        - subject_data_protection_classes
         - dataset_id
         - prior_evaluation_id
         - prior_decision_id
@@ -347,6 +351,16 @@ components:
         outcome: {type: string, enum: [allowed, denied]}
         reason_code: {type: string}
         subject_principal_id: {type: [string, 'null'], format: uuid}
+        runtime_environment:
+          type: string
+          enum: [local, development, test, staging, production]
+        subject_attributes_evidence_id: {type: [string, 'null']}
+        subject_attributes_valid_until: {type: [string, 'null'], format: date-time}
+        subject_data_protection_classes:
+          type: [array, 'null']
+          items:
+            type: string
+            enum: [public_source, internal, licensed, restricted, secret]
         dataset_id: {type: string}
         prior_evaluation_id: {type: string, format: uuid}
         prior_decision_id: {type: [string, 'null'], format: uuid}

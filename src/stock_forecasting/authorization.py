@@ -102,6 +102,39 @@ class SecurityContext:
 
 
 @dataclass(frozen=True)
+class CurrentSourcePrincipalAttributes:
+    principal_id: str
+    evidence_id: str
+    environment: RuntimeEnvironment
+    data_protection_classes: frozenset[DataProtectionClass]
+    valid_from: datetime
+    valid_to: datetime
+
+    def __post_init__(self) -> None:
+        if not self.principal_id or not self.evidence_id:
+            raise ValueError("source_principal_attributes_identity_required")
+        if self.valid_from.tzinfo is None or self.valid_to.tzinfo is None:
+            raise ValueError("source_principal_attributes_times_require_timezone")
+        if self.valid_to <= self.valid_from:
+            raise ValueError("source_principal_attributes_validity_invalid")
+
+    @classmethod
+    def from_verified_security_context(
+        cls,
+        context: SecurityContext,
+    ) -> CurrentSourcePrincipalAttributes:
+        evidence_digest = hashlib.sha256(context.credential_id.encode("utf-8")).hexdigest()
+        return cls(
+            principal_id=context.principal_id,
+            evidence_id=f"verified-security-context-sha256:{evidence_digest}",
+            environment=context.environment,
+            data_protection_classes=context.data_protection_classes,
+            valid_from=context.issued_at,
+            valid_to=context.expires_at,
+        )
+
+
+@dataclass(frozen=True)
 class LocalApiKeyVerifier:
     key_id: str
     principal_id: str
@@ -426,6 +459,10 @@ class SourceRightsDecision:
     allowed: bool
     reason_code: str
     subject_principal_id: str | None
+    runtime_environment: RuntimeEnvironment
+    subject_attributes_evidence_id: str | None
+    subject_attributes_valid_until: datetime | None
+    subject_data_protection_classes: frozenset[DataProtectionClass] | None
     dataset_id: str
     prior_evaluation_id: str
     prior_decision_id: str | None
@@ -444,6 +481,18 @@ class SourceRightsDecision:
             "outcome": "allowed" if self.allowed else "denied",
             "reason_code": self.reason_code,
             "subject_principal_id": self.subject_principal_id,
+            "runtime_environment": self.runtime_environment,
+            "subject_attributes_evidence_id": self.subject_attributes_evidence_id,
+            "subject_attributes_valid_until": (
+                _instant(self.subject_attributes_valid_until)
+                if self.subject_attributes_valid_until is not None
+                else None
+            ),
+            "subject_data_protection_classes": (
+                sorted(self.subject_data_protection_classes)
+                if self.subject_data_protection_classes is not None
+                else None
+            ),
             "dataset_id": self.dataset_id,
             "prior_evaluation_id": self.prior_evaluation_id,
             "prior_decision_id": self.prior_decision_id,
@@ -584,13 +633,28 @@ def source_rights_resolution_failure(
     evaluated_at: datetime,
     trace_id: str,
     reason_code: str,
+    runtime_environment: RuntimeEnvironment,
+    current_subject: CurrentSourcePrincipalAttributes | None,
 ) -> SourceRightsDecision:
     identity = "/".join(
         (
             dataset_id,
             prior_evaluation_id,
             prior_decision_id or "no-prior-decision",
+            prior_trace_id or "no-prior-trace",
+            prior_correlation_id or "no-prior-correlation",
             reason_code,
+            runtime_environment,
+            (
+                current_subject.evidence_id
+                if current_subject is not None
+                else "no-subject-attributes"
+            ),
+            (
+                f"classes:{','.join(sorted(current_subject.data_protection_classes))}"
+                if current_subject is not None
+                else "no-subject-classes"
+            ),
             trace_id,
         )
     )
@@ -601,7 +665,19 @@ def source_rights_resolution_failure(
         ),
         allowed=False,
         reason_code=reason_code,
-        subject_principal_id=None,
+        subject_principal_id=(
+            current_subject.principal_id if current_subject is not None else None
+        ),
+        runtime_environment=runtime_environment,
+        subject_attributes_evidence_id=(
+            current_subject.evidence_id if current_subject is not None else None
+        ),
+        subject_attributes_valid_until=(
+            current_subject.valid_to if current_subject is not None else None
+        ),
+        subject_data_protection_classes=(
+            current_subject.data_protection_classes if current_subject is not None else None
+        ),
         dataset_id=dataset_id,
         prior_evaluation_id=prior_evaluation_id,
         prior_decision_id=prior_decision_id,
@@ -662,6 +738,8 @@ class AuthorizationPolicy:
         expected_decision_id: str,
         expected_trace_id: str,
         expected_correlation_id: str,
+        current_runtime_environment: RuntimeEnvironment,
+        current_subject: CurrentSourcePrincipalAttributes,
         evaluated_at: datetime,
         trace_id: str,
         correlation_id: str,
@@ -694,13 +772,20 @@ class AuthorizationPolicy:
             prior_valid_until = _parse_instant(prior_authorization.get("valid_until"))
         except ValueError as error:
             raise SourceRightsEvidenceError("source_rights_prior_evidence_invalid") from error
-        if prior_valid_until <= prior_evaluated_at:
+        if prior_valid_until <= prior_evaluated_at or prior_evaluated_at > evaluated_at:
             raise SourceRightsEvidenceError("source_rights_prior_evidence_invalid")
+        if (
+            current_subject.principal_id != principal_id
+            or current_subject.environment != current_runtime_environment
+            or not current_subject.evidence_id
+            or not current_subject.valid_from <= evaluated_at < current_subject.valid_to
+        ):
+            raise SourceRightsEvidenceError("source_rights_subject_attributes_invalid")
         intent = OperationIntent(
             action="market_data.collect",
             dataset_id=expected_dataset_id,
             purpose="price_research",
-            environment=cast(RuntimeEnvironment, environment),
+            environment=current_runtime_environment,
             resource_state="active",
             evaluated_at=evaluated_at,
             trace_id=trace_id,
@@ -710,7 +795,7 @@ class AuthorizationPolicy:
         rights = self._resolve_rights(
             principal_id=principal_id,
             intent=intent,
-            data_protection_classes=frozenset({cast(DataProtectionClass, protection_class)}),
+            data_protection_classes=current_subject.data_protection_classes,
         )
         reason_code = rights.reason_code
         if evaluated_at >= prior_valid_until:
@@ -725,6 +810,7 @@ class AuthorizationPolicy:
         ):
             valid_until = min(
                 prior_valid_until,
+                current_subject.valid_to,
                 rights.grant.valid_to,
                 rights.source_policy.valid_to,
                 rights.source_entitlement.valid_to,
@@ -733,6 +819,8 @@ class AuthorizationPolicy:
             (
                 principal_id,
                 expected_dataset_id,
+                current_runtime_environment,
+                current_subject.evidence_id,
                 rights.grant.version_id if rights.grant is not None else "no-grant",
                 rights.source_policy.version_id
                 if rights.source_policy is not None
@@ -743,6 +831,7 @@ class AuthorizationPolicy:
                 reason_code,
                 trace_id,
                 correlation_id,
+                f"classes:{','.join(sorted(current_subject.data_protection_classes))}",
                 f"uses:{','.join(sorted(required_uses))}",
             )
         )
@@ -754,6 +843,10 @@ class AuthorizationPolicy:
             allowed=allowed,
             reason_code=reason_code,
             subject_principal_id=principal_id,
+            runtime_environment=current_runtime_environment,
+            subject_attributes_evidence_id=current_subject.evidence_id,
+            subject_attributes_valid_until=current_subject.valid_to,
+            subject_data_protection_classes=current_subject.data_protection_classes,
             dataset_id=expected_dataset_id,
             prior_evaluation_id=expected_evaluation_id,
             prior_decision_id=expected_decision_id,
