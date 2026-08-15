@@ -300,7 +300,7 @@ class PriceMaterializationOutcome:
         }
 
 
-_PRICE_RESEARCH_REQUIRED_USES: frozenset[SourceUseRight] = frozenset(
+PRICE_RESEARCH_REQUIRED_USES: frozenset[SourceUseRight] = frozenset(
     {
         "ingest",
         "retain_7_years",
@@ -345,7 +345,7 @@ class DataSupply:
                 evaluated_at=evaluated_at,
                 trace_id=request.trace_id,
                 correlation_id=request.request_id,
-                required_uses=_PRICE_RESEARCH_REQUIRED_USES,
+                required_uses=PRICE_RESEARCH_REQUIRED_USES,
             ),
         )
         if decision.allowed:

@@ -83,6 +83,7 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "qualified",
         "policy_blocked",
         "quarantined",
+        "deferred",
     ]
     source = contract["components"]["schemas"]["PriceSourceEligibility"]
     assert source["properties"]["status"]["enum"] == [

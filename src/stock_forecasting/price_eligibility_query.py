@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from stock_forecasting.authorization import (
@@ -9,7 +10,10 @@ from stock_forecasting.authorization import (
     SecurityContext,
     authorization_audit_payload,
 )
-from stock_forecasting.data_supply import load_taiwan_stock_pool_manifest
+from stock_forecasting.data_supply import (
+    PRICE_RESEARCH_REQUIRED_USES,
+    load_taiwan_stock_pool_manifest,
+)
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
 
@@ -21,10 +25,14 @@ class PriceEligibilityQuery:
         *,
         authorization_policy: AuthorizationPolicy,
         authorization_time: datetime | None,
+        source_authorization_policy: Callable[[], AuthorizationPolicy] | None = None,
     ) -> None:
         self._state_store = state_store
         self._authorization_policy = authorization_policy
         self._authorization_time = authorization_time
+        self._source_authorization_policy = source_authorization_policy or (
+            lambda: authorization_policy
+        )
 
     def get_listing(
         self,
@@ -50,6 +58,12 @@ class PriceEligibilityQuery:
             sources,
         )
         evaluated_at = self._authorization_time or datetime.now(UTC)
+        current_source_rights_allowed = self._current_source_rights_allowed(
+            sources=sources,
+            evaluated_at=evaluated_at,
+            trace_id=trace_id,
+            security_context=security_context,
+        )
         source_rights_expired = any(
             _parse_instant(str(source["policy_valid_until"])) <= evaluated_at
             for source in sources
@@ -59,14 +73,14 @@ class PriceEligibilityQuery:
             status = "policy_blocked"
             reason_code = "dependency_evidence_unverified"
         elif "deferred" in statuses:
-            status = "policy_blocked"
+            status = "deferred"
             reason_code = "source_collection_deferred"
+        elif source_rights_expired or not current_source_rights_allowed:
+            status = "policy_blocked"
+            reason_code = "source_rights_not_effective"
         elif not required_modes_present:
             status = "policy_blocked"
             reason_code = "dependency_evidence_unverified"
-        elif source_rights_expired:
-            status = "policy_blocked"
-            reason_code = "source_rights_not_effective"
         elif "quarantined" in statuses:
             status = "quarantined"
             reason_code = next(
@@ -104,6 +118,44 @@ class PriceEligibilityQuery:
         if denied is not None:
             return denied
         return self._state_store.list_price_research_eligibility()
+
+    def _current_source_rights_allowed(
+        self,
+        *,
+        sources: list[dict[str, object]],
+        evaluated_at: datetime,
+        trace_id: str,
+        security_context: SecurityContext,
+    ) -> bool:
+        published_source_ids = sorted(
+            {str(source["source_id"]) for source in sources if source["status"] == "published"}
+        )
+        if not published_source_ids:
+            return True
+        policy = self._source_authorization_policy()
+        allowed = True
+        for source_id in published_source_ids:
+            decision = policy.evaluate(
+                security_context,
+                OperationIntent(
+                    action="price_research_eligibility.read",
+                    dataset_id=source_id,
+                    purpose="price_research",
+                    environment=security_context.environment,
+                    resource_state="active",
+                    evaluated_at=evaluated_at,
+                    trace_id=trace_id,
+                    correlation_id=f"{trace_id}:{source_id}:current-source-rights",
+                    required_uses=PRICE_RESEARCH_REQUIRED_USES,
+                ),
+            )
+            self._state_store.record_authorization_decision(
+                authorization=authorization_audit_payload(decision),
+                outcome="allowed" if decision.allowed else "denied",
+                trace_id=trace_id,
+            )
+            allowed = allowed and decision.allowed
+        return allowed
 
     def _authorize(
         self,

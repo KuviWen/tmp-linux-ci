@@ -21,6 +21,7 @@ AuthorizationAction = Literal[
     "research_prediction.read",
     "market_data.collect",
     "price_research_eligibility.read",
+    "price_qualification.govern",
 ]
 AuthorizationPurpose = Literal["fixture_research", "price_research"]
 AuthorizationResourceState = Literal["active"]
@@ -293,6 +294,7 @@ class LocalApiKeyIdentity:
                         "research_prediction.read",
                         "market_data.collect",
                         "price_research_eligibility.read",
+                        "price_qualification.govern",
                     }
                     for scope in scopes
                 )

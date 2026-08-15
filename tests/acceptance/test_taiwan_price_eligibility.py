@@ -97,7 +97,7 @@ def _qualified_price_policy(
             ActionGrant(
                 version_id="grant-price-v1",
                 principal_id=identity.context.principal_id,
-                actions=frozenset({"market_data.collect"}),
+                actions=frozenset({"market_data.collect", "price_qualification.govern"}),
                 environment="development",
                 valid_from=now - timedelta(days=1),
                 valid_to=now + timedelta(days=1),
@@ -107,7 +107,13 @@ def _qualified_price_policy(
             SourcePolicyVersion(
                 version_id="policy-tw-price-v1",
                 dataset_id="twse-current-qualified-price",
-                allowed_actions=frozenset({"market_data.collect"}),
+                allowed_actions=frozenset(
+                    {
+                        "market_data.collect",
+                        "price_qualification.govern",
+                        "price_research_eligibility.read",
+                    }
+                ),
                 purposes=frozenset({"price_research"}),
                 environments=frozenset({"development"}),
                 data_protection_class="licensed",
@@ -121,7 +127,13 @@ def _qualified_price_policy(
                 principal_id=identity.context.principal_id,
                 dataset_id="twse-current-qualified-price",
                 status="active",
-                allowed_actions=frozenset({"market_data.collect"}),
+                allowed_actions=frozenset(
+                    {
+                        "market_data.collect",
+                        "price_qualification.govern",
+                        "price_research_eligibility.read",
+                    }
+                ),
                 purposes=frozenset({"price_research"}),
                 environments=frozenset({"development"}),
                 valid_from=now - timedelta(days=1),
@@ -171,6 +183,24 @@ def _price_read_policy(
                 valid_to=now + timedelta(days=1),
             ),
         ),
+    )
+
+
+def _combined_price_policy(
+    identity: LocalApiKeyIdentity,
+    now: datetime,
+) -> AuthorizationPolicy:
+    collect = _qualified_price_policy(identity, now)
+    read = _price_read_policy(identity, now)
+    return AuthorizationPolicy(
+        action_grants=(
+            replace(
+                collect.action_grants[0],
+                actions=(collect.action_grants[0].actions | read.action_grants[0].actions),
+            ),
+        ),
+        source_policies=collect.source_policies + read.source_policies,
+        source_entitlements=collect.source_entitlements + read.source_entitlements,
     )
 
 
@@ -543,7 +573,11 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
     identity = LocalApiKeyIdentity.issue(
         owner="ticket-06-test",
         environment="development",
-        scopes={"market_data.collect", "price_research_eligibility.read"},
+        scopes={
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "price_qualification.govern",
+        },
         issued_at=now - timedelta(hours=1),
         expires_at=now + timedelta(days=10),
         data_protection_classes={"licensed"},
@@ -569,7 +603,10 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
         create_schema=True,
     )
     historical_claim_id = TaiwanPriceQualificationWorkflow(
-        state_store
+        state_store,
+        authorization_policy=_qualified_price_policy(identity, now),
+        security_context=identity.context,
+        clock=lambda: now,
     ).register_historical_availability_claim(
         HistoricalAvailabilityClaim(
             source_id=current.collection.source_id,
@@ -618,11 +655,14 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
     assert [outcome.status for outcome in outcomes] == ["published", "published"]
     assert outcomes[1].historical_availability_claim_id == historical_claim_id
 
-    result = PriceEligibilityQuery(
+    current_source_policy = [_combined_price_policy(identity, now)]
+    query = PriceEligibilityQuery(
         state_store,
-        authorization_policy=_price_read_policy(identity, now),
+        authorization_policy=current_source_policy[0],
         authorization_time=now,
-    ).get_listing(
+        source_authorization_policy=lambda: current_source_policy[0],
+    )
+    result = query.get_listing(
         listing_id=listing_id,
         trace_id="trace-candidate-query",
         security_context=identity.context,
@@ -634,10 +674,34 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
     assert result["formally_qualified"] is False
     assert result["checks"]["policy"] == "blocked"  # type: ignore[index]
 
+    current_source_policy[0] = AuthorizationPolicy(
+        action_grants=current_source_policy[0].action_grants,
+        source_policies=current_source_policy[0].source_policies,
+        source_entitlements=tuple(
+            replace(
+                entitlement,
+                version_id=f"{entitlement.version_id}-revoked",
+                status="revoked",
+            )
+            if entitlement.dataset_id == current.collection.source_id
+            else entitlement
+            for entitlement in current_source_policy[0].source_entitlements
+        ),
+    )
+    revoked_result = query.get_listing(
+        listing_id=listing_id,
+        trace_id="trace-revoked-source-rights-query",
+        security_context=identity.context,
+    )
+    assert isinstance(revoked_result, dict)
+    assert revoked_result["status"] == "policy_blocked"
+    assert revoked_result["reason_code"] == "source_rights_not_effective"
+    assert revoked_result["checks"]["policy"] == "blocked"  # type: ignore[index]
+
     after_source_rights_expiry = now + timedelta(days=2)
     expired_result = PriceEligibilityQuery(
         state_store,
-        authorization_policy=_price_read_policy(identity, after_source_rights_expiry),
+        authorization_policy=_combined_price_policy(identity, after_source_rights_expiry),
         authorization_time=after_source_rights_expiry,
     ).get_listing(
         listing_id=listing_id,
@@ -1012,8 +1076,9 @@ def test_rate_limited_collection_is_deferred_without_advancing_the_checkpoint(
         security_context=identity.context,
     )
     assert isinstance(query_result, dict)
-    assert query_result["status"] == "policy_blocked"
+    assert query_result["status"] == "deferred"
     assert query_result["reason_code"] == "source_collection_deferred"
+    assert query_result["checks"]["policy"] == "passed"  # type: ignore[index]
 
     published = data_supply.materialize(replace(request, trace_id="trace-rate-limited-retry"))
 

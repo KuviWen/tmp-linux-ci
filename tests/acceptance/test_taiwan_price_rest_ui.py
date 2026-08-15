@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -26,7 +27,9 @@ from stock_forecasting.data_supply import (
     LoadedSourcePartition,
     SourceCollectionCoverage,
     SourcePartitionRequest,
+    SourceRateLimited,
 )
+from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
 
 
 class NeverCalledAdapter:
@@ -44,6 +47,14 @@ class LiteralQuarantineAdapter:
 
     def load(self, request: SourcePartitionRequest) -> LoadedSourcePartition:
         return self.loaded
+
+
+class RateLimitedAdapter:
+    def load(self, request: SourcePartitionRequest) -> NoReturn:
+        raise SourceRateLimited(
+            retry_after_seconds=45,
+            rate_limit_policy_id="provider-rate-limit-v1",
+        )
 
 
 def _blocked_price_application(
@@ -331,3 +342,249 @@ def test_quarantined_listing_ui_never_claims_research_eligibility(tmp_path: Path
     assert "不具研究資格" in response.text
     assert "incomplete_coverage" in response.text
     assert "已具研究資格" not in response.text
+
+
+def test_rate_limited_listing_is_deferred_without_claiming_saved_candidate_data(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    application, identity = _blocked_price_application(tmp_path, now)
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    source_id = "twse-rate-limited-contract"
+    required_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_7_years",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
+    )
+    collect_policy = AuthorizationPolicy(
+        action_grants=application.authorization_policy.action_grants,
+        source_policies=(
+            SourcePolicyVersion(
+                version_id="policy-rate-limited-v1",
+                dataset_id=source_id,
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                allowed_uses=required_uses,
+            ),
+        ),
+        source_entitlements=(
+            SourceEntitlement(
+                version_id="entitlement-rate-limited-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id=source_id,
+                status="active",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+                allowed_uses=required_uses,
+            ),
+        ),
+    )
+    outcome = DataSupply(
+        authorization_policy=collect_policy,
+        security_context=identity.context,
+        adapters={source_id: RateLimitedAdapter()},
+        object_repository=application.object_repository,
+        state_store=application.state_store,
+        clock=lambda: now,
+    ).materialize(
+        SourcePartitionRequest(
+            request_id="request-rate-limited-ui",
+            trace_id="trace-rate-limited-ui",
+            source_id=source_id,
+            mode="current",
+            listing_ids=(listing_id,),
+            start_date=date(2026, 8, 14),
+            end_date=date(2026, 8, 14),
+            expected_checkpoint=None,
+        )
+    )
+    assert outcome.status == "deferred"
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    headers = {"Authorization": identity.credential.authorization_header()}
+
+    rest_response = client.get(
+        f"/api/v1/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+    ui_response = client.get(
+        f"/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+
+    assert rest_response.status_code == 200
+    rest = rest_response.json()
+    assert rest["status"] == "deferred"
+    assert rest["reason_code"] == "source_collection_deferred"
+    assert rest["checks"]["policy"] == "passed"
+    assert rest["sources"][0]["raw_object_id"] is None
+    assert ui_response.status_code == 200
+    assert "來源限流，尚未取得資料" in ui_response.text
+    assert "checkpoint 未前進" in ui_response.text
+    assert "來源候選資料已保存" not in ui_response.text
+    assert "已具研究資格" not in ui_response.text
+
+
+def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    application, identity = _blocked_price_application(tmp_path, now)
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    source_id = "twse-current-rights-contract"
+    required_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_7_years",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
+    )
+    source_policy = SourcePolicyVersion(
+        version_id="policy-current-rights-v1",
+        dataset_id=source_id,
+        allowed_actions=frozenset({"market_data.collect", "price_research_eligibility.read"}),
+        purposes=frozenset({"price_research"}),
+        environments=frozenset({"development"}),
+        data_protection_class="licensed",
+        resource_states=frozenset({"active"}),
+        valid_from=now - timedelta(days=1),
+        valid_to=now + timedelta(days=1),
+        allowed_uses=required_uses,
+    )
+    source_entitlement = SourceEntitlement(
+        version_id="entitlement-current-rights-v1",
+        principal_id=identity.context.principal_id,
+        dataset_id=source_id,
+        status="active",
+        allowed_actions=frozenset({"market_data.collect", "price_research_eligibility.read"}),
+        purposes=frozenset({"price_research"}),
+        environments=frozenset({"development"}),
+        valid_from=now - timedelta(days=1),
+        valid_to=now + timedelta(days=1),
+        allowed_uses=required_uses,
+    )
+    collect_policy = AuthorizationPolicy(
+        action_grants=application.authorization_policy.action_grants,
+        source_policies=(source_policy,),
+        source_entitlements=(source_entitlement,),
+    )
+    coverage = SourceCollectionCoverage(
+        requested_start=date(2026, 8, 14),
+        requested_end=date(2026, 8, 14),
+        observed_start=date(2026, 8, 14),
+        observed_end=date(2026, 8, 14),
+        complete=True,
+    )
+    loaded = LoadedSourcePartition(
+        collection=CollectedSourcePartition(
+            request_id="request-current-rights",
+            source_id=source_id,
+            acquired_at=now,
+            sanitized_source_uri="provider://current-rights-contract",
+            media_type="application/json",
+            raw_payload=b'{"close":"100"}',
+            checkpoint_before=None,
+            checkpoint_after="page:1",
+            coverage=coverage,
+            source_revision="revision-current-rights-v1",
+        ),
+        decoded=DecodedSourcePartition(
+            source_id=source_id,
+            schema_version="taiwan-unadjusted-eod-v1",
+            source_revision="revision-current-rights-v1",
+            prices=(
+                CanonicalPriceRow(
+                    listing_id=listing_id,
+                    session_date=date(2026, 8, 14),
+                    open=Decimal("100"),
+                    high=Decimal("101"),
+                    low=Decimal("99"),
+                    close=Decimal("100"),
+                    volume=1,
+                ),
+            ),
+            company_actions=(),
+            listing_lifecycle=(
+                ListingLifecycleRecord(
+                    listing_id=listing_id,
+                    effective_date=date(2026, 8, 14),
+                    status="active",
+                    source_event_id="lifecycle-current-rights",
+                ),
+            ),
+            adjusted_close_cross_checks=(Decimal("100"),),
+            identity_assertion_ids=("identity-current-rights",),
+            parent_object_ids=(),
+        ),
+    )
+    DataSupply(
+        authorization_policy=collect_policy,
+        security_context=identity.context,
+        adapters={source_id: LiteralQuarantineAdapter(loaded)},
+        object_repository=application.object_repository,
+        state_store=application.state_store,
+        clock=lambda: now,
+    ).materialize(
+        SourcePartitionRequest(
+            request_id=loaded.collection.request_id,
+            trace_id="trace-current-rights-materialization",
+            source_id=source_id,
+            mode="current",
+            listing_ids=(listing_id,),
+            start_date=coverage.requested_start,
+            end_date=coverage.requested_end,
+            expected_checkpoint=None,
+        )
+    )
+    revoked_policy = AuthorizationPolicy(
+        action_grants=application.authorization_policy.action_grants,
+        source_policies=application.authorization_policy.source_policies
+        + (
+            replace(
+                source_policy,
+                version_id="policy-current-rights-use-removed-v2",
+                allowed_uses=required_uses - {"retain_7_years"},
+            ),
+        ),
+        source_entitlements=application.authorization_policy.source_entitlements
+        + (source_entitlement,),
+    )
+    application.price_eligibility_query = PriceEligibilityQuery(
+        application.state_store,
+        authorization_policy=application.authorization_policy,
+        authorization_time=now,
+        source_authorization_policy=lambda: revoked_policy,
+    )
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    headers = {"Authorization": identity.credential.authorization_header()}
+
+    rest_response = client.get(
+        f"/api/v1/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+    ui_response = client.get(
+        f"/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+
+    assert rest_response.status_code == 200
+    rest = rest_response.json()
+    assert rest["status"] == "policy_blocked"
+    assert rest["reason_code"] == "source_rights_not_effective"
+    assert rest["checks"]["policy"] == "blocked"
+    assert ui_response.status_code == 200
+    assert "資格阻擋" in ui_response.text
+    assert "已具研究資格" not in ui_response.text

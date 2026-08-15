@@ -582,15 +582,36 @@ class StateStore:
             raise KeyError(artifact_id)
         return deepcopy(dict(row))
 
-    def publish_governance_artifact(
+    def _publish_authorized_governance_artifact(
         self,
         *,
         artifact_kind: str,
         payload: dict[str, object],
         trace_id: str,
+        authorizations: list[dict[str, object]],
     ) -> str:
+        if artifact_kind not in {
+            "historical_availability_claim",
+            "taiwan_price_qualification_gate",
+        }:
+            raise ValueError("unsupported_qualification_artifact_kind")
+        if not authorizations:
+            raise ValueError("qualification_authorization_required")
+        for authorization in authorizations:
+            if (
+                authorization.get("action") != "price_qualification.govern"
+                or authorization.get("reason_code") != "authorized"
+            ):
+                raise ValueError("qualification_authorization_invalid")
         artifact_id = _canonical_artifact_id(artifact_kind, payload)
         with self.engine.begin() as connection:
+            for authorization in authorizations:
+                self._insert_authorization_decision(
+                    connection,
+                    authorization=authorization,
+                    outcome="allowed",
+                    trace_id=trace_id,
+                )
             existing = (
                 connection.execute(
                     select(

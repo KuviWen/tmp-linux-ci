@@ -301,7 +301,7 @@ components:
         market: {type: string, const: XTAI}
         status:
           type: string
-          enum: [qualified, policy_blocked, quarantined]
+          enum: [qualified, policy_blocked, quarantined, deferred]
         reason_code: {type: string}
         dependency_id: {type: string, const: DEP-MKT-TW-01}
         formally_qualified: {type: boolean}
