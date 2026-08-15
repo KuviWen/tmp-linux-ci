@@ -18,6 +18,7 @@ from stock_forecasting.data_supply import (
     PRICE_RESEARCH_REQUIRED_USES,
     load_taiwan_stock_pool_manifest,
 )
+from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
 
@@ -33,6 +34,7 @@ class PriceEligibilityQuery:
         source_principal_attributes: (
             Callable[[str], CurrentSourcePrincipalAttributes] | None
         ) = None,
+        object_repository: FilesystemObjectRepository | None = None,
     ) -> None:
         self._state_store = state_store
         self._authorization_policy = authorization_policy
@@ -41,6 +43,7 @@ class PriceEligibilityQuery:
             lambda _principal_id: authorization_policy
         )
         self._source_principal_attributes = source_principal_attributes
+        self._object_repository = object_repository
 
     def get_listing(
         self,
@@ -67,7 +70,8 @@ class PriceEligibilityQuery:
         statuses = {str(source["status"]) for source in sources}
         manifest = load_taiwan_stock_pool_manifest()
         formal_evidence_available = TaiwanPriceQualificationWorkflow(
-            self._state_store
+            self._state_store,
+            object_repository=self._object_repository,
         ).formal_qualification_available(
             manifest,
             sources,

@@ -15,6 +15,7 @@ from stock_forecasting.data_supply import (
     HistoricalAvailabilityClaim,
     TaiwanStockPoolManifest,
 )
+from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 
 
@@ -32,11 +33,13 @@ class TaiwanPriceQualificationWorkflow:
         authorization_policy: AuthorizationPolicy | None = None,
         security_context: SecurityContext | None = None,
         clock: Callable[[], datetime] | None = None,
+        object_repository: FilesystemObjectRepository | None = None,
     ) -> None:
         self._state_store = state_store
         self._authorization_policy = authorization_policy
         self._security_context = security_context
         self._clock = clock
+        self._object_repository = object_repository
 
     def register_historical_availability_claim(
         self,
@@ -138,6 +141,9 @@ class TaiwanPriceQualificationWorkflow:
         ):
             return False
         try:
+            source_archive_bindings = manifest.verified_source_archive_bindings(
+                self._object_repository
+            )
             claim_payload = self._state_store.get_verified_governance_artifact(
                 artifact_id=claim_id,
                 artifact_kind="historical_availability_claim",
@@ -162,6 +168,7 @@ class TaiwanPriceQualificationWorkflow:
             "historical_source_id": manifest.historical_source_id,
             "historical_availability_claim_id": claim_id,
             "dependency_qualification_artifact_id": claim.qualification_artifact_id,
+            "selection_source_archive_bindings": source_archive_bindings,
             "evidence_status": "qualified",
             "permitted_use": "historical_training_backtest_and_internal_research",
         }
@@ -178,6 +185,21 @@ class TaiwanPriceQualificationWorkflow:
             trace_id=trace_id,
             operation="register_formal_qualification_gate",
         )
+        try:
+            source_archive_bindings = manifest.verified_source_archive_bindings(
+                self._object_repository
+            )
+        except ValueError as error:
+            reason_code = "formal_gate_requires_verified_source_archive"
+            self._state_store._publish_governance_rejection(
+                payload={
+                    "operation": "register_formal_qualification_gate",
+                    "reason_code": reason_code,
+                },
+                trace_id=trace_id,
+                authorizations=authorizations,
+            )
+            raise ValueError(reason_code) from error
         try:
             claim_payload = self._state_store.get_verified_governance_artifact(
                 artifact_id=historical_availability_claim_id,
@@ -217,6 +239,7 @@ class TaiwanPriceQualificationWorkflow:
                 "historical_source_id": manifest.historical_source_id,
                 "historical_availability_claim_id": historical_availability_claim_id,
                 "dependency_qualification_artifact_id": claim.qualification_artifact_id,
+                "selection_source_archive_bindings": source_archive_bindings,
                 "evidence_status": "qualified",
                 "permitted_use": "historical_training_backtest_and_internal_research",
             },

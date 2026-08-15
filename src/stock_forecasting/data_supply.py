@@ -1255,6 +1255,29 @@ class TaiwanStockPoolManifest:
             if hashlib.sha256(content).hexdigest() != reference.observed_content_sha256:
                 raise ValueError("taiwan_stock_pool_source_archive_invalid")
 
+    def verified_source_archive_bindings(
+        self,
+        object_repository: FilesystemObjectRepository | None,
+    ) -> list[dict[str, str]]:
+        if not self.source_references or any(
+            reference.archival_status != "verified" for reference in self.source_references
+        ):
+            raise ValueError("taiwan_stock_pool_source_archive_incomplete")
+        self.verify_source_archive(object_repository)
+        return [
+            {
+                "source_reference_id": reference.source_reference_id,
+                "observed_content_sha256": reference.observed_content_sha256,
+                "raw_object_id": cast(str, reference.raw_object_id),
+                "retrieval_receipt_id": cast(str, reference.retrieval_receipt_id),
+                "acquired_at": cast(datetime, reference.acquired_at).isoformat(),
+            }
+            for reference in sorted(
+                self.source_references,
+                key=lambda reference: reference.source_reference_id,
+            )
+        ]
+
     def matches_formal_source_lineage(
         self,
         sources: Sequence[Mapping[str, object]],
@@ -1415,5 +1438,6 @@ def load_taiwan_stock_pool_manifest(
         ),
         evidence_status=cast(ManifestEvidenceStatus, payload["evidence_status"]),
     )
-    manifest.verify_source_archive(object_repository)
+    if object_repository is not None:
+        manifest.verify_source_archive(object_repository)
     return manifest

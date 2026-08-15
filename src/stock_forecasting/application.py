@@ -68,6 +68,7 @@ class Application:
             principal_id=self.security_context.principal_id,
         )
         self._fixed_security_time = fixed_security_time
+        self.object_repository = FilesystemObjectRepository(object_root)
         self.research_query = ResearchQuery(
             self.state_store,
             security_context=self.security_context,
@@ -84,10 +85,10 @@ class Application:
                     principal_id=principal_id,
                 )
             ),
+            object_repository=self.object_repository,
         )
         self.security_audit = SecurityAudit(self.state_store)
         self.operations_control = OperationsControl(self.state_store)
-        self.object_repository = FilesystemObjectRepository(object_root)
         self._relay_fault = relay_fault or NoRelayFault()
         self._event_compatibility = event_compatibility or EventCompatibility.current()
         self._relay_clock = relay_clock or SystemRelayClock()

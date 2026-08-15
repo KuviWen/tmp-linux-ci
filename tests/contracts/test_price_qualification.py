@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from io import BytesIO
+from pathlib import Path
 
 import pytest
 
@@ -15,8 +18,10 @@ from stock_forecasting.authorization import (
 )
 from stock_forecasting.data_supply import (
     HistoricalAvailabilityClaim,
+    TaiwanStockPoolManifest,
     load_taiwan_stock_pool_manifest,
 )
+from stock_forecasting.platform.object_repository import FilesystemObjectRepository, ObjectRef
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_qualification import (
     QualificationAuthorizationError,
@@ -54,7 +59,9 @@ def test_historical_claim_cannot_be_minted_without_qualification_authorization()
         state_store.get_trace_evidence("trace-unauthorized-candidate-claim")
 
 
-def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contract() -> None:
+def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contract(
+    tmp_path: Path,
+) -> None:
     now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
@@ -169,7 +176,7 @@ def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contra
     assert audit[0]["action"] == "price_qualification.govern"
     assert audit[0]["outcome"] == "allowed"
 
-    with pytest.raises(ValueError, match="formal_gate_requires_qualified_historical_claim"):
+    with pytest.raises(ValueError, match="formal_gate_requires_verified_source_archive"):
         workflow.register_formal_qualification_gate(
             manifest=manifest,
             historical_availability_claim_id=historical_claim_id,
@@ -184,8 +191,36 @@ def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contra
     rejection = state_store.get_canonical_artifact(rejection_trace["artifact_ids"][0])
     assert rejection["payload"] == {
         "operation": "register_formal_qualification_gate",
-        "reason_code": "formal_gate_requires_qualified_historical_claim",
+        "reason_code": "formal_gate_requires_verified_source_archive",
     }
+
+    repository = FilesystemObjectRepository(tmp_path / "source-archive")
+    archived_manifest, archive_objects = _archive_selection_sources(
+        manifest,
+        repository=repository,
+        acquired_at=now,
+    )
+    archive_workflow = TaiwanPriceQualificationWorkflow(
+        state_store,
+        authorization_policy=policy,
+        security_context=identity.context,
+        clock=lambda: now,
+        object_repository=repository,
+    )
+    with pytest.raises(ValueError, match="formal_gate_requires_qualified_historical_claim"):
+        archive_workflow.register_formal_qualification_gate(
+            manifest=archived_manifest,
+            historical_availability_claim_id=historical_claim_id,
+            trace_id="trace-archive-valid-claim-rejected",
+        )
+
+    Path(archive_objects[0].uri).write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="formal_gate_requires_verified_source_archive"):
+        archive_workflow.register_formal_qualification_gate(
+            manifest=archived_manifest,
+            historical_availability_claim_id=historical_claim_id,
+            trace_id="trace-archive-corrupt-gate-rejected",
+        )
 
     with pytest.raises(
         ValueError,
@@ -254,3 +289,37 @@ def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contra
         "operation": "register_formal_qualification_gate",
         "reason_code": "source_entitlement_revoked",
     }
+
+
+def _archive_selection_sources(
+    manifest: TaiwanStockPoolManifest,
+    *,
+    repository: FilesystemObjectRepository,
+    acquired_at: datetime,
+) -> tuple[TaiwanStockPoolManifest, list[ObjectRef]]:
+    archived_sources = []
+    object_refs = []
+    for reference in manifest.source_references:
+        content = f"selection-source:{reference.source_reference_id}".encode()
+        checksum = hashlib.sha256(content).hexdigest()
+        object_ref = repository.put_verified(
+            BytesIO(content),
+            expected_checksum=checksum,
+            metadata={"source_reference_id": reference.source_reference_id},
+        )
+        pending = replace(
+            reference,
+            observed_content_sha256=checksum,
+            archival_status="verified",
+            acquired_at=acquired_at,
+            raw_object_id=object_ref.object_id,
+            retrieval_receipt_id="pending",
+        )
+        archived_sources.append(
+            replace(
+                pending,
+                retrieval_receipt_id=pending.expected_retrieval_receipt_id,
+            )
+        )
+        object_refs.append(object_ref)
+    return replace(manifest, source_references=tuple(archived_sources)), object_refs
