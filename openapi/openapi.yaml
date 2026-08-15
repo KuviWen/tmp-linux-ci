@@ -190,7 +190,7 @@ paths:
           description: Provider API validation result without secret material.
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/SourceCredentialMetadata'}
+              schema: {$ref: '#/components/schemas/SourceCredentialValidationResponse'}
         '401': {$ref: '#/components/responses/ProblemResponse'}
         '403': {$ref: '#/components/responses/ProblemResponse'}
         '404': {$ref: '#/components/responses/ProblemResponse'}
@@ -594,6 +594,7 @@ components:
         - subject_attributes_evidence_id
         - subject_attributes_valid_until
         - subject_data_protection_classes
+        - subject_principal_classification
         - dataset_id
         - prior_evaluation_id
         - prior_decision_id
@@ -621,6 +622,7 @@ components:
           items:
             type: string
             enum: [public_source, internal, licensed, restricted, secret]
+        subject_principal_classification: {type: [string, 'null']}
         dataset_id: {type: string}
         prior_evaluation_id: {type: string, format: uuid}
         prior_decision_id: {type: [string, 'null'], format: uuid}
@@ -794,19 +796,47 @@ components:
     CredentialValidationEvidence:
       type: object
       additionalProperties: false
-      required: [live_validation]
+      required: [authentication_status]
       properties:
-        contract_id: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$'}
+        authentication_status: {type: string, enum: [not_run, passed, failed]}
+    SourceContractAssessment:
+      type: object
+      additionalProperties: false
+      required:
+        - contract_id
+        - live_validation
+        - ticker_count
+        - pagination_pages
+        - datasets
+        - symbol_lifecycle_probe
+        - source_contract_reason_code
+      properties:
+        contract_id: {type: [string, 'null']}
         live_validation: {type: string, enum: [not_run, passed, failed]}
-        ticker_count: {type: integer, minimum: 0}
-        pagination_pages: {type: integer, minimum: 0}
+        ticker_count: {type: [integer, 'null'], minimum: 0}
+        pagination_pages: {type: [integer, 'null'], minimum: 0}
         datasets:
           type: array
-          items: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$'}
-        symbol_lifecycle_probe: {type: string, enum: [passed]}
+          items: {type: string}
+        symbol_lifecycle_probe:
+          type: [string, 'null']
+          enum: [passed, null]
         source_contract_reason_code:
-          type: string
-          pattern: '^source_contract_[a-z0-9._-]+$'
+          type: [string, 'null']
+    SourceCredentialValidationResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - credential
+        - source_contract_assessment
+        - source_contract_assessment_artifact_id
+      properties:
+        credential: {$ref: '#/components/schemas/SourceCredentialMetadata'}
+        source_contract_assessment:
+          oneOf:
+            - {$ref: '#/components/schemas/SourceContractAssessment'}
+            - {type: 'null'}
+        source_contract_assessment_artifact_id: {type: [string, 'null']}
     SourceCredentialWriteRequest:
       type: object
       additionalProperties: false

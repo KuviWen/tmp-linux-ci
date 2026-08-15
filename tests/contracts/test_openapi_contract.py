@@ -174,6 +174,7 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "subject_attributes_evidence_id",
         "subject_attributes_valid_until",
         "subject_data_protection_classes",
+        "subject_principal_classification",
         "dataset_id",
         "prior_evaluation_id",
         "prior_decision_id",
@@ -220,7 +221,30 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     }
     validation_evidence = contract["components"]["schemas"]["CredentialValidationEvidence"]
     assert validation_evidence["additionalProperties"] is False
-    assert validation_evidence["required"] == ["live_validation"]
+    assert validation_evidence["required"] == ["authentication_status"]
+    assert set(validation_evidence["properties"]) == {"authentication_status"}
+    source_contract_assessment = contract["components"]["schemas"]["SourceContractAssessment"]
+    assert source_contract_assessment["additionalProperties"] is False
+    assert set(source_contract_assessment["required"]) == {
+        "contract_id",
+        "live_validation",
+        "ticker_count",
+        "pagination_pages",
+        "datasets",
+        "symbol_lifecycle_probe",
+        "source_contract_reason_code",
+    }
+    validation_response = contract["components"]["schemas"]["SourceCredentialValidationResponse"]
+    assert validation_response["additionalProperties"] is False
+    assert set(validation_response["required"]) == {
+        "credential",
+        "source_contract_assessment",
+        "source_contract_assessment_artifact_id",
+    }
+    validation_schema = contract["paths"][
+        "/api/v1/operations/source-credentials/{provider_id}/validations"
+    ]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
+    assert validation_schema == {"$ref": "#/components/schemas/SourceCredentialValidationResponse"}
     assert "expired" in credential["properties"]["readiness"]["enum"]
     write_request = contract["components"]["schemas"]["SourceCredentialWriteRequest"]
     assert write_request["properties"]["credential_fields"]["additionalProperties"] == {

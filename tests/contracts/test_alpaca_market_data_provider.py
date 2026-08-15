@@ -384,7 +384,11 @@ def test_alpaca_credential_validator_separates_auth_from_source_contract_health(
 
     assert result.readiness == expected_readiness
     assert result.reason_code == expected_reason
-    assert result.evidence.source_contract_reason_code == expected_source_contract_reason
+    assert (
+        result.source_contract_assessment.source_contract_reason_code
+        if result.source_contract_assessment is not None
+        else None
+    ) == expected_source_contract_reason
 
 
 def test_alpaca_live_contract_probes_pool_data_pagination_actions_and_calendar() -> None:
@@ -448,7 +452,9 @@ def test_alpaca_live_contract_probes_pool_data_pagination_actions_and_calendar()
 
     assert result.readiness == "valid"
     assert result.reason_code == "source_credential_valid"
-    assert result.evidence.as_payload() == {
+    assert result.evidence.as_payload() == {"authentication_status": "passed"}
+    assert result.source_contract_assessment is not None
+    assert result.source_contract_assessment.as_payload() == {
         "contract_id": "alpaca-ticket-07-live-v1",
         "live_validation": "passed",
         "ticker_count": 10,
@@ -459,6 +465,7 @@ def test_alpaca_live_contract_probes_pool_data_pagination_actions_and_calendar()
             "alpaca-us-corporate-actions-v1",
             "alpaca-us-trading-calendar-v2",
         ],
+        "source_contract_reason_code": None,
     }
     assert [request.url for request in transport.requests] == [
         "https://data.alpaca.markets/v2/stocks/bars",
@@ -519,8 +526,13 @@ def test_live_contract_keeps_an_authenticated_credential_valid_when_source_probe
 
     assert result.readiness == "valid"
     assert result.reason_code == "source_credential_valid"
-    assert result.evidence.live_validation == "failed"
-    assert result.evidence.source_contract_reason_code == "source_contract_unavailable"
+    assert result.evidence.authentication_status == "passed"
+    assert result.source_contract_assessment is not None
+    assert result.source_contract_assessment.live_validation == "failed"
+    assert (
+        result.source_contract_assessment.source_contract_reason_code
+        == "source_contract_unavailable"
+    )
 
 
 def test_alpaca_collector_rejects_a_repeated_pagination_token() -> None:
@@ -768,11 +780,133 @@ def test_alpaca_collector_derives_company_action_completeness_from_reference_gra
     assert collection.company_action_completeness_verified is True
     assert collection.reference_graph_lifecycle_verified is True
     assert collection.reference_graph_version_id == graph.version_id
-    assert json.loads(collection.raw_payload)["reference_graph"] == graph.partition_payload(
-        listing_ids=(listing_id,),
-        start_date=date(2024, 1, 3),
-        end_date=date(2024, 1, 3),
+
+
+def test_alpaca_collector_requests_each_alias_overlapping_the_partition() -> None:
+    listing_id = "70000000-0000-4000-8000-000000000012"
+    reference_graph = AlpacaReferenceGraph(
+        version_id="engineering-us-reference-graph-alias-v1",
+        listings=(
+            AlpacaReferenceListing(
+                listing_id=listing_id,
+                aliases=(
+                    ExternalSecurityAlias(
+                        security_code="OLD",
+                        security_name="Example Corp.",
+                        valid_from=date(2010, 1, 4),
+                        valid_to=date(2023, 12, 31),
+                    ),
+                    ExternalSecurityAlias(
+                        security_code="NEW",
+                        security_name="Example Corp.",
+                        valid_from=date(2024, 1, 1),
+                        valid_to=None,
+                    ),
+                ),
+                lifecycle=(
+                    ListingLifecycleRecord(
+                        listing_id=listing_id,
+                        effective_date=date(2010, 1, 4),
+                        status="active",
+                        source_event_id="engineering-active-example",
+                    ),
+                ),
+            ),
+        ),
+        company_action_expectations=(),
+        lifecycle_complete=True,
+        company_actions_complete=True,
     )
+    transport = SequenceProviderTransport(
+        [
+            ProviderHttpResponse(
+                200,
+                b'{"bars":{"OLD":[{"t":"2023-12-29T05:00:00Z","o":10,"h":11,"l":9,"c":10.5,"v":100}],"NEW":[{"t":"2024-01-02T05:00:00Z","o":11,"h":12,"l":10,"c":11.5,"v":120}]},"next_page_token":null}',
+            ),
+            ProviderHttpResponse(200, b'{"cash_dividends":[],"next_page_token":null}'),
+            ProviderHttpResponse(
+                200,
+                b'[{"date":"2023-12-29","open":"09:30","close":"16:00"},{"date":"2024-01-02","open":"09:30","close":"16:00"}]',
+            ),
+        ]
+    )
+    collector = AlpacaSourceCollector(
+        source_id="alpaca-us-stock-bars",
+        provider_id="alpaca-market-data-basic",
+        reference_graph=reference_graph,
+        credential_resolver=LiteralCredentialResolver(),
+        transport=transport,
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+    )
+
+    collection = collector.collect(
+        SourcePartitionRequest(
+            request_id="request-ticket-07-alias-window",
+            trace_id="trace-ticket-07-alias-window",
+            source_id="alpaca-us-stock-bars",
+            mode="historical",
+            listing_ids=(listing_id,),
+            start_date=date(2023, 12, 29),
+            end_date=date(2024, 1, 2),
+            expected_checkpoint=None,
+            distribution_id="alpaca-us-stock-bars-v2",
+            distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+            bundle_members=_bundle_member_requests(),
+        )
+    )
+
+    assert transport.requests[0].query["symbols"] == "OLD,NEW"
+    assert collection.coverage.complete is True
+    assert json.loads(collection.raw_payload)[
+        "reference_graph"
+    ] == reference_graph.partition_payload(
+        listing_ids=(listing_id,),
+        start_date=date(2023, 12, 29),
+        end_date=date(2024, 1, 2),
+    )
+
+    pre_change_transport = SequenceProviderTransport(
+        [
+            ProviderHttpResponse(
+                200,
+                b'{"bars":{"OLD":[{"t":"2023-12-29T05:00:00Z","o":10,"h":11,"l":9,"c":10.5,"v":100}]},"next_page_token":null}',
+            ),
+            ProviderHttpResponse(200, b'{"cash_dividends":[],"next_page_token":null}'),
+            ProviderHttpResponse(
+                200,
+                b'[{"date":"2023-12-29","open":"09:30","close":"16:00"}]',
+            ),
+        ]
+    )
+    pre_change_collector = AlpacaSourceCollector(
+        source_id="alpaca-us-stock-bars",
+        provider_id="alpaca-market-data-basic",
+        reference_graph=reference_graph,
+        credential_resolver=LiteralCredentialResolver(),
+        transport=pre_change_transport,
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+    )
+
+    pre_change = pre_change_collector.collect(
+        SourcePartitionRequest(
+            request_id="request-ticket-07-pre-change-alias",
+            trace_id="trace-ticket-07-pre-change-alias",
+            source_id="alpaca-us-stock-bars",
+            mode="historical",
+            listing_ids=(listing_id,),
+            start_date=date(2023, 12, 29),
+            end_date=date(2023, 12, 29),
+            expected_checkpoint=None,
+            distribution_id="alpaca-us-stock-bars-v2",
+            distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+            bundle_members=_bundle_member_requests(),
+        )
+    )
+
+    assert pre_change_transport.requests[0].query["symbols"] == "OLD"
+    assert pre_change.coverage.complete is True
 
 
 def test_alpaca_collector_preserves_provider_retry_after_and_policy_id() -> None:

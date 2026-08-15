@@ -20,17 +20,23 @@ from stock_forecasting.authorization import (
     SourceEntitlement,
     SourcePolicyVersion,
 )
-from stock_forecasting.data_supply import SourceBundleMemberRequest, SourcePartitionRequest
+from stock_forecasting.data_supply import (
+    SourceBundleMemberRequest,
+    SourceCredentialRequired,
+    SourcePartitionRequest,
+)
 from stock_forecasting.operations_control import OperationsControl
 from stock_forecasting.source_credentials import (
     CredentialNotReady,
     CredentialValidationEvidence,
     CredentialValidationResult,
+    EncryptedFilesystemSecretProvider,
     InMemorySecretProvider,
     ManagedSourceCredentialResolver,
     SecretLease,
     SecretProvider,
     SecretRef,
+    SourceContractAssessment,
 )
 
 
@@ -437,13 +443,16 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
             readiness="valid",
             reason_code="source_credential_valid",
             evidence=CredentialValidationEvidence(
+                authentication_status="passed",
+            ),
+            source_contract_assessment=SourceContractAssessment(
                 contract_id="alpaca-ticket-07-live-v1",
                 live_validation="passed",
                 ticker_count=10,
             ),
         )
     )
-    _, client, headers = _credential_application(
+    application, client, headers = _credential_application(
         tmp_path,
         credential_validator=validator,
     )
@@ -464,7 +473,8 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
     )
 
     assert validated.status_code == 200
-    assert validated.json() == {
+    payload = validated.json()
+    assert payload["credential"] == {
         "provider_id": "alpaca-market-data-basic",
         "readiness": "valid",
         "reason_code": "source_credential_valid",
@@ -472,12 +482,42 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
         "version": 2,
         "configured_at": "2026-08-15T08:00:00Z",
         "last_validated_at": "2026-08-15T08:00:00Z",
-        "validation_evidence": {
-            "contract_id": "alpaca-ticket-07-live-v1",
-            "live_validation": "passed",
-            "ticker_count": 10,
+        "validation_evidence": {"authentication_status": "passed"},
+    }
+    assert payload["source_contract_assessment"] == {
+        "contract_id": "alpaca-ticket-07-live-v1",
+        "live_validation": "passed",
+        "ticker_count": 10,
+        "pagination_pages": None,
+        "datasets": [],
+        "symbol_lifecycle_probe": None,
+        "source_contract_reason_code": None,
+    }
+    assert re.fullmatch(
+        r"sha256:[0-9a-f]{64}",
+        payload["source_contract_assessment_artifact_id"],
+    )
+    trace = application.state_store.get_trace_evidence("trace-p2-credential-validation")
+    assert payload["source_contract_assessment_artifact_id"] in trace["artifact_ids"]
+    assessment_artifact = application.state_store.get_canonical_artifact(
+        payload["source_contract_assessment_artifact_id"]
+    )
+    assert assessment_artifact == {
+        "artifact_kind": "source_contract_assessment",
+        "execution_purpose": "source_administration",
+        "payload": {
+            "provider_id": "alpaca-market-data-basic",
+            "assessed_at": "2026-08-15T08:00:00Z",
+            "credential_version": 2,
+            "assessment": payload["source_contract_assessment"],
         },
     }
+    listed = client.get(
+        "/api/v1/operations/source-credentials",
+        headers=headers,
+    ).json()["items"][0]
+    assert listed["validation_evidence"] == {"authentication_status": "passed"}
+    assert "source_contract_assessment" not in listed
     assert validator.calls == [
         {
             "api_key_id": "PK-VALIDATE",
@@ -497,7 +537,65 @@ def test_credential_validation_rejects_arbitrary_secret_bearing_evidence() -> No
         )
 
     with pytest.raises(ValueError, match="source_credential_validation_evidence_invalid"):
-        CredentialValidationEvidence(live_validation="invented")  # type: ignore[arg-type]
+        CredentialValidationEvidence(
+            authentication_status="invented"  # type: ignore[arg-type]
+        )
+
+    with pytest.raises(ValueError, match="source_credential_validation_reason_invalid"):
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="super-secret-value",
+        )
+
+    with pytest.raises(ValueError, match="source_contract_assessment_invalid"):
+        SourceContractAssessment(contract_id="super-secret-value")
+
+    with pytest.raises(ValueError, match="source_contract_assessment_invalid"):
+        SourceContractAssessment(datasets=("super-secret-value",))
+
+
+def test_operations_rejects_validator_output_that_echoes_a_credential_value(
+    tmp_path: Path,
+) -> None:
+    secret_value = "alpaca-ticket-07-live-v1"
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            source_contract_assessment=SourceContractAssessment(
+                contract_id=secret_value,
+                live_validation="passed",
+            ),
+        )
+    )
+    _, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+    )
+    client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-SECRET-ECHO",
+                "api_secret_key": secret_value,
+            }
+        },
+    )
+
+    validated = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
+        headers=headers,
+    )
+
+    assert validated.status_code == 200
+    assert validated.json()["credential"]["readiness"] == "validation_failed"
+    assert validated.json()["credential"]["reason_code"] == (
+        "source_credential_validator_output_rejected"
+    )
+    assert "validation_evidence" not in validated.json()["credential"]
+    assert validated.json()["source_contract_assessment"] is None
+    assert secret_value not in validated.text
 
 
 def test_only_a_valid_managed_credential_can_be_resolved_for_provider_use(
@@ -702,7 +800,7 @@ def test_failed_validation_keeps_provider_use_fail_closed(tmp_path: Path) -> Non
     )
 
     assert validated.status_code == 200
-    assert validated.json()["readiness"] == "validation_failed"
+    assert validated.json()["credential"]["readiness"] == "validation_failed"
     resolver = ManagedSourceCredentialResolver(
         application.state_store,
         application.secret_provider,
@@ -804,8 +902,8 @@ def test_expired_credential_is_fail_closed_without_contacting_provider(tmp_path:
     )
 
     assert validated.status_code == 200
-    assert validated.json()["readiness"] == "expired"
-    assert validated.json()["reason_code"] == "source_credential_expired"
+    assert validated.json()["credential"]["readiness"] == "expired"
+    assert validated.json()["credential"]["reason_code"] == "source_credential_expired"
     assert validator.calls == []
     resolver = ManagedSourceCredentialResolver(
         application.state_store,
@@ -838,7 +936,7 @@ def test_a_previously_valid_credential_fails_closed_after_its_expiry(tmp_path: P
         "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
         headers=headers,
     )
-    assert validated.json()["readiness"] == "valid"
+    assert validated.json()["credential"]["readiness"] == "valid"
 
     resolver = ManagedSourceCredentialResolver(
         application.state_store,
@@ -984,9 +1082,93 @@ def test_validation_projects_a_missing_secret_as_not_ready(tmp_path: Path) -> No
     )
 
     assert validated.status_code == 200
-    assert validated.json()["readiness"] == "validation_failed"
-    assert validated.json()["reason_code"] == "source_credential_secret_unavailable"
+    assert validated.json()["credential"]["readiness"] == "validation_failed"
+    assert validated.json()["credential"]["reason_code"] == ("source_credential_secret_unavailable")
     assert validator.calls == []
+
+
+def test_validation_projects_a_corrupt_encrypted_secret_as_fail_closed(
+    tmp_path: Path,
+) -> None:
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+    )
+    secret_root = tmp_path / "encrypted-source-secrets"
+    secret_provider = EncryptedFilesystemSecretProvider(secret_root)
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+        secret_provider=secret_provider,
+    )
+    client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-CORRUPT-LEASE",
+                "api_secret_key": "corrupt-lease-secret",
+            }
+        },
+    )
+    initially_valid = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
+        headers=headers,
+    )
+    assert initially_valid.json()["credential"]["readiness"] == "valid"
+    secret_file = next(secret_root.glob("*.secret"))
+    secret_file.write_bytes(b"not-a-valid-encrypted-secret")
+    transport = SequenceProviderTransport([])
+    adapter = application.build_alpaca_price_adapter(
+        transport=transport,
+        source_access_mode="engineering_double",
+    )
+
+    with pytest.raises(SourceCredentialRequired, match="source_credential_secret_corrupt"):
+        adapter.load(
+            SourcePartitionRequest(
+                request_id="request-corrupt-runtime-credential",
+                trace_id="trace-corrupt-runtime-credential",
+                source_id="alpaca-us-stock-bars",
+                mode="historical",
+                listing_ids=("70000000-0000-4000-8000-000000000001",),
+                start_date=datetime(2024, 1, 3, tzinfo=UTC).date(),
+                end_date=datetime(2024, 1, 3, tzinfo=UTC).date(),
+                expected_checkpoint=None,
+                distribution_id="alpaca-us-stock-bars-v2",
+                distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+                bundle_members=(
+                    SourceBundleMemberRequest(
+                        dataset_id="alpaca-us-corporate-actions-v1",
+                        distribution_id="alpaca-us-corporate-actions-v1",
+                        distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+                        schema_version="alpaca-corporate-actions-v1",
+                    ),
+                    SourceBundleMemberRequest(
+                        dataset_id="alpaca-us-trading-calendar-v2",
+                        distribution_id="alpaca-us-trading-calendar-v2",
+                        distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+                        schema_version="alpaca-trading-calendar-v2",
+                    ),
+                ),
+            )
+        )
+    assert transport.requests == []
+
+    validated = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
+        headers=headers,
+    )
+
+    assert validated.status_code == 200
+    assert validated.json()["credential"]["readiness"] == "validation_failed"
+    assert validated.json()["credential"]["reason_code"] == ("source_credential_secret_corrupt")
+    assert len(validator.calls) == 1
+    resolver = ManagedSourceCredentialResolver(
+        application.state_store,
+        application.secret_provider,
+    )
+    with pytest.raises(CredentialNotReady, match="source_credential_secret_corrupt"):
+        resolver.resolve_valid("alpaca-market-data-basic")
 
 
 def test_failed_secret_cleanup_is_durable_and_retried_from_operations(

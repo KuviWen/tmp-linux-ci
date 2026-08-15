@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
@@ -17,7 +18,10 @@ from stock_forecasting.data_supply import PRICE_RESEARCH_REQUIRED_USES
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.source_credentials import (
     CredentialValidationEvidence,
+    SecretCorruptError,
     SecretProvider,
+    SecretUnavailableError,
+    SourceContractAssessment,
     SourceCredentialValidator,
     project_source_credential_readiness,
 )
@@ -268,6 +272,8 @@ class OperationsControl:
             raise ValueError("source_credential_validator_unavailable")
         evaluated_at = self._clock()
         expires_at = current.get("expires_at")
+        validation_evidence: CredentialValidationEvidence | None
+        source_contract_assessment: SourceContractAssessment | None = None
         if (
             isinstance(expires_at, str)
             and datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= evaluated_at
@@ -275,24 +281,45 @@ class OperationsControl:
             validation_readiness = "expired"
             validation_reason = "source_credential_expired"
             validation_evidence = CredentialValidationEvidence(
-                contract_id="alpaca-ticket-07-live-v1",
-                live_validation="not_run",
+                authentication_status="not_run",
             )
         else:
             try:
                 lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
-            except KeyError:
+            except (SecretUnavailableError, SecretCorruptError) as error:
                 validation_readiness = "validation_failed"
-                validation_reason = "source_credential_secret_unavailable"
+                validation_reason = str(error.args[0])
                 validation_evidence = CredentialValidationEvidence(
-                    contract_id="alpaca-ticket-07-live-v1",
-                    live_validation="not_run",
+                    authentication_status="not_run",
                 )
             else:
-                validation = validator.validate(lease.credential_fields())
-                validation_readiness = validation.readiness
-                validation_reason = validation.reason_code
-                validation_evidence = validation.evidence
+                credential_fields = lease.credential_fields()
+                validation = validator.validate(credential_fields)
+                serialized_validation = json.dumps(
+                    {
+                        "reason_code": validation.reason_code,
+                        "evidence": validation.evidence.as_payload(),
+                        "source_contract_assessment": (
+                            validation.source_contract_assessment.as_payload()
+                            if validation.source_contract_assessment is not None
+                            else None
+                        ),
+                    },
+                    sort_keys=True,
+                )
+                if any(
+                    credential_value in serialized_validation
+                    for credential_value in credential_fields.values()
+                ):
+                    validation_readiness = "validation_failed"
+                    validation_reason = "source_credential_validator_output_rejected"
+                    validation_evidence = None
+                    source_contract_assessment = None
+                else:
+                    validation_readiness = validation.readiness
+                    validation_reason = validation.reason_code
+                    validation_evidence = validation.evidence
+                    source_contract_assessment = validation.source_contract_assessment
         expected_version = current["version"]
         if not isinstance(expected_version, int):
             raise ValueError("source_credential_version_invalid")
@@ -303,7 +330,14 @@ class OperationsControl:
             validated_at=self._instant(evaluated_at),
             expected_version=expected_version,
             expected_secret_ref_id=str(current["secret_ref_id"]),
-            validation_evidence=validation_evidence.as_payload(),
+            validation_evidence=(
+                validation_evidence.as_payload() if validation_evidence is not None else {}
+            ),
+            source_contract_assessment=(
+                source_contract_assessment.as_payload()
+                if source_contract_assessment is not None
+                else None
+            ),
             authorization=authorization,
             trace_id=trace_id,
         )

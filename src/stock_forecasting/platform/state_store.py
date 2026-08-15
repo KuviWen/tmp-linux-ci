@@ -695,6 +695,7 @@ class StateStore:
         expected_version: int,
         expected_secret_ref_id: str,
         validation_evidence: dict[str, object],
+        source_contract_assessment: dict[str, object] | None,
         authorization: dict[str, object],
         trace_id: str,
     ) -> dict[str, object]:
@@ -737,7 +738,33 @@ class StateStore:
                     revoked_at=None,
                 )
             )
-        result = {
+            source_contract_assessment_artifact_id: str | None = None
+            if source_contract_assessment is not None:
+                assessment_payload: dict[str, object] = {
+                    "provider_id": provider_id,
+                    "assessed_at": validated_at,
+                    "credential_version": version,
+                    "assessment": source_contract_assessment,
+                }
+                source_contract_assessment_artifact_id = _canonical_artifact_id(
+                    "source_contract_assessment",
+                    assessment_payload,
+                )
+                connection.execute(
+                    canonical_artifacts.insert().values(
+                        artifact_id=source_contract_assessment_artifact_id,
+                        artifact_kind="source_contract_assessment",
+                        execution_purpose="source_administration",
+                        payload=assessment_payload,
+                    )
+                )
+                connection.execute(
+                    trace_artifact_refs.insert().values(
+                        trace_id=trace_id,
+                        artifact_id=source_contract_assessment_artifact_id,
+                    )
+                )
+        credential = {
             "provider_id": provider_id,
             "readiness": readiness,
             "reason_code": reason_code,
@@ -747,10 +774,14 @@ class StateStore:
             "last_validated_at": validated_at,
         }
         if current["expires_at"] is not None:
-            result["expires_at"] = current["expires_at"]
+            credential["expires_at"] = current["expires_at"]
         if validation_evidence:
-            result["validation_evidence"] = validation_evidence
-        return result
+            credential["validation_evidence"] = validation_evidence
+        return {
+            "credential": credential,
+            "source_contract_assessment": source_contract_assessment,
+            "source_contract_assessment_artifact_id": (source_contract_assessment_artifact_id),
+        }
 
     def list_pending_source_secret_cleanup(self, *, provider_id: str) -> list[str]:
         with self.engine.connect() as connection:
@@ -1031,6 +1062,7 @@ class StateStore:
             "subject_attributes_evidence_id",
             "subject_attributes_valid_until",
             "subject_data_protection_classes",
+            "subject_principal_classification",
             "dataset_id",
             "prior_evaluation_id",
             "prior_decision_id",

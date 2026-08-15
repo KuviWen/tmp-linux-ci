@@ -644,6 +644,7 @@ class SourceRightsDecision:
     subject_attributes_evidence_id: str | None
     subject_attributes_valid_until: datetime | None
     subject_data_protection_classes: frozenset[DataProtectionClass] | None
+    subject_principal_classification: str | None
     dataset_id: str
     prior_evaluation_id: str
     prior_decision_id: str | None
@@ -674,6 +675,7 @@ class SourceRightsDecision:
                 if self.subject_data_protection_classes is not None
                 else None
             ),
+            "subject_principal_classification": self.subject_principal_classification,
             "dataset_id": self.dataset_id,
             "prior_evaluation_id": self.prior_evaluation_id,
             "prior_decision_id": self.prior_decision_id,
@@ -888,6 +890,11 @@ def source_rights_resolution_failure(
                 if current_subject is not None
                 else "no-subject-classes"
             ),
+            (
+                f"principal-classification:{current_subject.principal_classification}"
+                if current_subject is not None
+                else "no-principal-classification"
+            ),
             trace_id,
         )
     )
@@ -910,6 +917,9 @@ def source_rights_resolution_failure(
         ),
         subject_data_protection_classes=(
             current_subject.data_protection_classes if current_subject is not None else None
+        ),
+        subject_principal_classification=(
+            current_subject.principal_classification if current_subject is not None else None
         ),
         dataset_id=dataset_id,
         prior_evaluation_id=prior_evaluation_id,
@@ -1081,6 +1091,7 @@ class AuthorizationPolicy:
                 trace_id,
                 correlation_id,
                 f"classes:{','.join(sorted(current_subject.data_protection_classes))}",
+                f"principal-classification:{current_subject.principal_classification}",
                 f"uses:{','.join(sorted(required_uses))}",
             )
         )
@@ -1096,6 +1107,7 @@ class AuthorizationPolicy:
             subject_attributes_evidence_id=current_subject.evidence_id,
             subject_attributes_valid_until=current_subject.valid_to,
             subject_data_protection_classes=current_subject.data_protection_classes,
+            subject_principal_classification=current_subject.principal_classification,
             dataset_id=expected_dataset_id,
             prior_evaluation_id=expected_evaluation_id,
             prior_decision_id=expected_decision_id,

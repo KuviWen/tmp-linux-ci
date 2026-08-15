@@ -34,6 +34,7 @@ from stock_forecasting.source_credentials import (
     CredentialNotReady,
     CredentialValidationEvidence,
     CredentialValidationResult,
+    SourceContractAssessment,
     SourceCredentialResolver,
 )
 
@@ -363,12 +364,13 @@ class AlpacaCredentialValidator:
             return CredentialValidationResult(
                 readiness="validation_failed",
                 reason_code="source_credential_authentication_failed",
+                evidence=CredentialValidationEvidence(authentication_status="failed"),
             )
         if response.status_code == 429:
             return CredentialValidationResult(
                 readiness="configured",
                 reason_code="source_credential_validation_inconclusive",
-                evidence=CredentialValidationEvidence(
+                source_contract_assessment=SourceContractAssessment(
                     contract_id="alpaca-credential-probe-v1",
                     live_validation="failed",
                     source_contract_reason_code="source_contract_rate_limited",
@@ -378,7 +380,7 @@ class AlpacaCredentialValidator:
             return CredentialValidationResult(
                 readiness="configured",
                 reason_code="source_credential_validation_inconclusive",
-                evidence=CredentialValidationEvidence(
+                source_contract_assessment=SourceContractAssessment(
                     contract_id="alpaca-credential-probe-v1",
                     live_validation="failed",
                     source_contract_reason_code="source_contract_unavailable",
@@ -392,7 +394,8 @@ class AlpacaCredentialValidator:
             return CredentialValidationResult(
                 readiness="valid",
                 reason_code="source_credential_valid",
-                evidence=CredentialValidationEvidence(
+                evidence=CredentialValidationEvidence(authentication_status="passed"),
+                source_contract_assessment=SourceContractAssessment(
                     contract_id="alpaca-credential-probe-v1",
                     live_validation="failed",
                     source_contract_reason_code="source_contract_schema_invalid",
@@ -401,6 +404,13 @@ class AlpacaCredentialValidator:
         return CredentialValidationResult(
             readiness="valid",
             reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+            source_contract_assessment=SourceContractAssessment(
+                contract_id="alpaca-credential-probe-v1",
+                live_validation="passed",
+                ticker_count=1,
+                datasets=("alpaca-us-stock-bars-v2",),
+            ),
         )
 
 
@@ -556,6 +566,9 @@ class AlpacaLiveContractValidator:
             readiness="valid",
             reason_code="source_credential_valid",
             evidence=CredentialValidationEvidence(
+                authentication_status="passed",
+            ),
+            source_contract_assessment=SourceContractAssessment(
                 contract_id="alpaca-ticket-07-live-v1",
                 live_validation="passed",
                 ticker_count=10,
@@ -628,7 +641,7 @@ class AlpacaLiveContractValidator:
             return CredentialValidationResult(
                 readiness="configured",
                 reason_code="source_credential_validation_inconclusive",
-                evidence=CredentialValidationEvidence(
+                source_contract_assessment=SourceContractAssessment(
                     contract_id="alpaca-ticket-07-live-v1",
                     live_validation="failed",
                     source_contract_reason_code=source_contract_reason,
@@ -637,10 +650,7 @@ class AlpacaLiveContractValidator:
         return CredentialValidationResult(
             readiness="validation_failed",
             reason_code=reason_code,
-            evidence=CredentialValidationEvidence(
-                contract_id="alpaca-ticket-07-live-v1",
-                live_validation="failed",
-            ),
+            evidence=CredentialValidationEvidence(authentication_status="failed"),
         )
 
     @staticmethod
@@ -649,7 +659,10 @@ class AlpacaLiveContractValidator:
     ) -> CredentialValidationResult:
         if result.reason_code == "source_credential_authentication_failed":
             return result
-        reason = result.evidence.source_contract_reason_code or "source_contract_probe_failed"
+        assessment = result.source_contract_assessment
+        reason = (
+            assessment.source_contract_reason_code if assessment is not None else None
+        ) or "source_contract_probe_failed"
         return AlpacaLiveContractValidator._source_contract_failure(reason)
 
     @staticmethod
@@ -657,7 +670,8 @@ class AlpacaLiveContractValidator:
         return CredentialValidationResult(
             readiness="valid",
             reason_code="source_credential_valid",
-            evidence=CredentialValidationEvidence(
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+            source_contract_assessment=SourceContractAssessment(
                 contract_id="alpaca-ticket-07-live-v1",
                 live_validation="failed",
                 source_contract_reason_code=reason_code,
@@ -692,10 +706,6 @@ class AlpacaSourceCollector:
         self._source_id = source_id
         self._provider_id = provider_id
         self._reference_graph = reference_graph
-        self._listing_symbols = {
-            listing.listing_id: tuple(alias.security_code for alias in listing.aliases)
-            for listing in reference_graph.listings
-        }
         self._credential_resolver = credential_resolver
         self._transport = transport
         self._clock = clock
@@ -715,15 +725,33 @@ class AlpacaSourceCollector:
         if request.source_id != self._source_id:
             raise ValueError("source_adapter_request_mismatch")
         try:
+            partition_aliases = {
+                listing_id: tuple(
+                    alias
+                    for alias in self._reference_graph.listing(listing_id).aliases
+                    if self._alias_overlaps(
+                        alias,
+                        start_date=request.start_date,
+                        end_date=request.end_date,
+                    )
+                )
+                for listing_id in request.listing_ids
+            }
+            if any(not aliases for aliases in partition_aliases.values()):
+                raise ValueError("source_reference_graph_alias_missing")
             requested_symbols = tuple(
-                self._listing_symbols[listing_id][-1] for listing_id in request.listing_ids
+                dict.fromkeys(
+                    alias.security_code
+                    for aliases in partition_aliases.values()
+                    for alias in aliases
+                )
             )
             all_symbols = tuple(
                 sorted(
                     {
-                        symbol
+                        alias.security_code
                         for listing_id in request.listing_ids
-                        for symbol in self._listing_symbols[listing_id]
+                        for alias in self._reference_graph.listing(listing_id).aliases
                     }
                 )
             )
@@ -798,7 +826,13 @@ class AlpacaSourceCollector:
         observed_dates = self._observed_bar_dates(bars_pages)
         session_dates = {date.fromisoformat(str(session["date"])) for session in calendar}
         complete = bool(session_dates) and all(
-            session_dates <= observed_dates.get(symbol, set()) for symbol in requested_symbols
+            self._listing_session_observed(
+                aliases=aliases,
+                session_date=session_date,
+                observed_dates=observed_dates,
+            )
+            for aliases in partition_aliases.values()
+            for session_date in session_dates
         )
         all_observed_dates = {
             observed_date for dates in observed_dates.values() for observed_date in dates
@@ -940,6 +974,34 @@ class AlpacaSourceCollector:
             return json.loads(response.body)
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise ValueError("source_provider_schema_invalid") from error
+
+    @staticmethod
+    def _alias_overlaps(
+        alias: ExternalSecurityAlias,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> bool:
+        return (alias.valid_from is None or alias.valid_from <= end_date) and (
+            alias.valid_to is None or alias.valid_to >= start_date
+        )
+
+    @staticmethod
+    def _listing_session_observed(
+        *,
+        aliases: tuple[ExternalSecurityAlias, ...],
+        session_date: date,
+        observed_dates: Mapping[str, set[date]],
+    ) -> bool:
+        active_symbols = tuple(
+            alias.security_code
+            for alias in aliases
+            if (alias.valid_from is None or alias.valid_from <= session_date)
+            and (alias.valid_to is None or alias.valid_to >= session_date)
+        )
+        return bool(active_symbols) and any(
+            session_date in observed_dates.get(symbol, set()) for symbol in active_symbols
+        )
 
     @staticmethod
     def _observed_bar_dates(

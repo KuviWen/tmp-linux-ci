@@ -1209,6 +1209,7 @@ def _current_source_rights_contract() -> _CurrentSourceRightsContract:
         issued_at=now - timedelta(hours=1),
         expires_at=now + timedelta(hours=23),
         data_protection_classes={"licensed"},
+        principal_classification="individual_non_commercial",
     )
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
@@ -1289,6 +1290,7 @@ def _current_source_rights_contract() -> _CurrentSourceRightsContract:
             evidence_id="subject-attributes-rights-binding-v1",
             environment="development",
             data_protection_classes=frozenset({"licensed"}),
+            principal_classification="individual_non_commercial",
             valid_from=now - timedelta(minutes=5),
             valid_to=now + timedelta(minutes=5),
         ),
@@ -1373,11 +1375,35 @@ def test_current_source_rights_use_current_runtime_and_subject_qualification() -
     assert allowed.runtime_environment == "development"
     assert allowed.subject_attributes_evidence_id == contract.current_subject.evidence_id
     assert allowed.subject_data_protection_classes == frozenset({"licensed"})
+    assert allowed.subject_principal_classification == "individual_non_commercial"
+    assert allowed.as_payload()["subject_principal_classification"] == ("individual_non_commercial")
     assert allowed.valid_until == contract.current_subject.valid_to
     assert cross_environment.allowed is False
     assert cross_environment.reason_code == "action_grant_environment_denied"
     assert qualification_removed.allowed is False
     assert qualification_removed.reason_code == "data_protection_class_denied"
+    classification_changed = contract.policy.evaluate_current_source_rights(
+        contract.prior_evidence,
+        expected_dataset_id=contract.source_id,
+        expected_evaluation_id=contract.prior.evaluation_id,
+        expected_decision_id=contract.prior.decision_id,
+        expected_trace_id=contract.prior.trace_id,
+        expected_correlation_id=contract.prior.correlation_id,
+        current_runtime_environment="development",
+        current_subject=replace(
+            contract.current_subject,
+            evidence_id="subject-attributes-rights-binding-commercial",
+            principal_classification="commercial",
+        ),
+        evaluated_at=contract.now + timedelta(minutes=1),
+        trace_id="trace-current-subject-classification-changed",
+        correlation_id="request-current-subject-classification-changed",
+        required_uses=contract.required_uses,
+    )
+    assert classification_changed.allowed is True
+    assert classification_changed.reason_code == "authorized"
+    assert classification_changed.subject_principal_classification == "commercial"
+    assert classification_changed.decision_id != allowed.decision_id
 
 
 def test_current_source_rights_reject_future_dated_prior_authorization() -> None:
