@@ -110,8 +110,19 @@ source_credential_versions = Table(
     Column("readiness", String(32), nullable=False),
     Column("reason_code", String(128), nullable=False),
     Column("configured_at", String(32), nullable=False),
+    Column("expires_at", String(32), nullable=True),
     Column("last_validated_at", String(32), nullable=True),
+    Column("validation_evidence", JSON, nullable=True),
     Column("revoked_at", String(32), nullable=True),
+)
+
+source_secret_cleanup_queue = Table(
+    "security_source_secret_cleanup_queue",
+    metadata,
+    Column("secret_ref_id", String(256), primary_key=True),
+    Column("provider_id", String(128), nullable=False),
+    Column("queued_at", String(32), nullable=False),
+    Column("completed_at", String(32), nullable=True),
 )
 
 fixture_prediction_results = Table(

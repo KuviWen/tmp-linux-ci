@@ -445,6 +445,7 @@ components:
         - schema_version
         - price_semantics
         - qualification_status
+        - materialization_role
         - known_gaps
       properties:
         provider_id: {type: string, minLength: 1}
@@ -458,6 +459,9 @@ components:
         qualification_status:
           type: string
           enum: [candidate_terms_not_archived, candidate_scope_limited]
+        materialization_role:
+          type: string
+          enum: [required_observation, supplemental_qualification_reference]
         known_gaps:
           type: array
           minItems: 1
@@ -509,6 +513,7 @@ components:
         - source_basis_id
         - source_basis
         - formally_qualified
+        - downstream_readiness
         - checks
         - sources
       properties:
@@ -524,12 +529,26 @@ components:
             - {$ref: '#/components/schemas/OpenDataSourceBasis'}
             - {$ref: '#/components/schemas/ZeroFeeAuthenticatedSourceBasis'}
         formally_qualified: {type: boolean}
+        downstream_readiness:
+          $ref: '#/components/schemas/PriceDownstreamReadiness'
         checks:
           $ref: '#/components/schemas/PriceQualificationChecks'
         sources:
           type: array
           minItems: 1
           items: {$ref: '#/components/schemas/PriceSourceEligibility'}
+    PriceDownstreamReadiness:
+      type: object
+      additionalProperties: false
+      required: [new_collection, feature_materialization, training, research_display]
+      properties:
+        new_collection: {$ref: '#/components/schemas/PriceDownstreamState'}
+        feature_materialization: {$ref: '#/components/schemas/PriceDownstreamState'}
+        training: {$ref: '#/components/schemas/PriceDownstreamState'}
+        research_display: {$ref: '#/components/schemas/PriceDownstreamState'}
+    PriceDownstreamState:
+      type: string
+      enum: [ready, credential_required, policy_blocked, quarantined, deferred]
     PriceQualificationChecks:
       type: object
       additionalProperties: false
@@ -729,12 +748,17 @@ components:
           items: {type: string}
         readiness:
           type: string
-          enum: [missing, configured, valid, validation_failed, revoked]
+          enum: [missing, configured, valid, validation_failed, expired, revoked]
         reason_code: {type: string}
         secret_ref_id: {type: [string, 'null']}
         version: {type: [integer, 'null'], minimum: 1}
         configured_at: {type: [string, 'null'], format: date-time}
         last_validated_at: {type: [string, 'null'], format: date-time}
+        expires_at: {type: [string, 'null'], format: date-time}
+        validation_evidence:
+          type: [object, 'null']
+          additionalProperties: true
+        secret_cleanup_pending: {type: boolean}
         revoked_at: {type: [string, 'null'], format: date-time}
         registration_url: {type: string, format: uri}
         key_management_url: {type: string, format: uri}
@@ -749,6 +773,7 @@ components:
           additionalProperties:
             type: string
             writeOnly: true
+        expires_at: {type: [string, 'null'], format: date-time}
     ProblemDetails:
       type: object
       additionalProperties: false

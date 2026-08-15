@@ -31,6 +31,7 @@
         "schema_version": "us-unadjusted-eod-v1",
         "price_semantics": "unadjusted",
         "qualification_status": "candidate_terms_not_archived",
+        "materialization_role": "required_observation",
         "known_gaps": ["realized_depth_requires_live_probe"]
       },
       {
@@ -41,6 +42,7 @@
         "schema_version": "alpaca-corporate-actions-v1",
         "price_semantics": null,
         "qualification_status": "candidate_terms_not_archived",
+        "materialization_role": "required_observation",
         "known_gaps": ["provider_creation_time_not_guaranteed"]
       },
       {
@@ -51,6 +53,7 @@
         "schema_version": "alpaca-trading-calendar-v2",
         "price_semantics": null,
         "qualification_status": "candidate_terms_not_archived",
+        "materialization_role": "required_observation",
         "known_gaps": ["calendar_history_subject_to_provider_coverage"]
       },
       {
@@ -61,6 +64,7 @@
         "schema_version": "nasdaq-symbol-directory-current",
         "price_semantics": null,
         "qualification_status": "candidate_scope_limited",
+        "materialization_role": "supplemental_qualification_reference",
         "known_gaps": ["current_snapshot_not_complete_symbol_history"]
       }
     ]

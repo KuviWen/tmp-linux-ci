@@ -26,6 +26,7 @@ Status: ready-for-agent
 ## Implementation notes
 
 - 公共 seam：共同 `DataSupply.materialize`、研究資格 REST／UI、Operations credential REST／UI，以及隔離的 Ticket 07 Compose acceptance；來源秘密只由可替換 `SecretProvider` 解密並以短生命週期 lease 提供給 validator／collector。
-- Alpaca Basic 工程契約涵蓋 raw SIP daily bars、完整公司行動分頁、calendar、checkpoint、rate／coverage／revision、永久 listing identity 與內部 AdjustmentVersion；provider double 明確只屬 engineering contract。
-- 驗證：`python -m pytest --basetemp=.pytest-tmp/full-final`（212 passed）、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、`docker compose -f compose.yaml config --quiet`，以及隔離 Compose `ticket-07-acceptance`（8/8 checks passed）。
-- 本機未提供真實來源憑證，因此 `formal_qualification=false`、`live_validation=not_run`；實際 API authentication／schema／pagination probe 由 credential validate contract 在 opt-in 真實合格憑證存在時執行，歷史深度與正式 backfill qualification 由 Ticket 08 承接。
+- Alpaca Basic 工程契約涵蓋 raw SIP daily bars、官方 grouped corporate-actions schema、完整分頁、calendar、checkpoint、rate／coverage／revision、永久 listing identity 與內部 AdjustmentVersion；bars、actions 與 calendar 各有獨立 policy、raw object、coverage、schema、gap 與 lineage receipt，provider double 明確只屬 engineering contract。
+- Operations 的 set／rotate／revoke／validate 在授權後執行，支援 expiry、stale-validation fencing、補償式 secret write 與持久 cleanup retry；研究資格 REST／UI 明列新擷取、特徵、訓練及研究展示的同一 fail-closed readiness。
+- 驗證：`python -m pytest --basetemp=.pytest-tmp/full-final-review`（225 passed）、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、`docker compose -f compose.yaml config --quiet`、Docker image build，以及隔離 Compose `ticket-07-acceptance`（8/8 checks passed）。
+- 本機未提供真實來源憑證，因此 `formal_qualification=false`、`live_validation=not_run`；opt-in credential validate contract 會對 10 檔 manifest ticker、raw SIP daily bars、強制分頁、官方公司行動 schema 與半日曆執行真實 API probe，只保存去識別化 evidence。長期歷史深度與正式 backfill qualification 由 Ticket 08 承接。

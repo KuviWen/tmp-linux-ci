@@ -51,6 +51,28 @@ def test_alembic_upgrade_builds_the_canonical_schema(tmp_path: Path) -> None:
     }
 
 
+def test_ticket_07_credential_lifecycle_upgrades_an_existing_ticket_07_schema(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ticket-07-lifecycle-upgrade.db'}"
+    prior_upgrade = _upgrade(database_url, "20260815_06")
+    assert prior_upgrade.returncode == 0, prior_upgrade.stderr
+    engine = create_engine(database_url)
+    assert "expires_at" not in {
+        column["name"]
+        for column in inspect(engine).get_columns("security_source_credential_versions")
+    }
+
+    final_upgrade = _upgrade(database_url, "head")
+
+    assert final_upgrade.returncode == 0, final_upgrade.stderr
+    assert {
+        column["name"]
+        for column in inspect(engine).get_columns("security_source_credential_versions")
+    } >= {"expires_at", "validation_evidence"}
+    assert "security_source_secret_cleanup_queue" in inspect(engine).get_table_names()
+
+
 def test_ticket_03_upgrade_backfills_existing_research_projection_status(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'upgrade.db'}"
     first_upgrade = _upgrade(database_url, "20260813_01")

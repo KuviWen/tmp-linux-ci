@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 from stock_forecasting.alpaca_market_data import (
-    AlpacaCredentialValidator,
+    AlpacaLiveContractValidator,
     UrllibProviderHttpTransport,
 )
 from stock_forecasting.application import Application, build_application
@@ -114,6 +114,8 @@ class RuntimeSettings:
             authorization_policy_set_id=self.authorization_policy_set_id,
             secret_provider=EncryptedFilesystemSecretProvider(self.source_secret_root),
             source_credential_validators={
-                "alpaca-market-data-basic": AlpacaCredentialValidator(UrllibProviderHttpTransport())
+                "alpaca-market-data-basic": AlpacaLiveContractValidator(
+                    UrllibProviderHttpTransport()
+                )
             },
         )

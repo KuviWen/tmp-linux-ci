@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Any
 
 from stock_forecasting.authorization import (
+    AuthorizationAction,
+    AuthorizationDecision,
     AuthorizationPolicy,
     OperationIntent,
     PolicyDeniedOutcome,
@@ -53,19 +55,10 @@ class OperationsControl:
         trace_id: str,
         security_context: SecurityContext,
     ) -> list[dict[str, object]] | PolicyDeniedOutcome:
-        evaluated_at = self._clock()
-        decision = self._authorization_policy.evaluate(
-            security_context,
-            OperationIntent(
-                action="source_credential.read",
-                dataset_id="source-credential-metadata",
-                purpose="source_administration",
-                environment=security_context.environment,
-                resource_state="active",
-                evaluated_at=evaluated_at,
-                trace_id=trace_id,
-                correlation_id=trace_id,
-            ),
+        decision = self._authorize(
+            action="source_credential.read",
+            trace_id=trace_id,
+            security_context=security_context,
         )
         self._state_store.record_authorization_decision(
             authorization=authorization_audit_payload(decision),
@@ -76,26 +69,27 @@ class OperationsControl:
             return PolicyDeniedOutcome.from_decision(decision)
         results: list[dict[str, object]] = []
         for provider in _SOURCE_CREDENTIAL_PROVIDERS:
-            readiness = self._state_store.get_source_credential(
-                provider_id=str(provider["provider_id"])
-            )
-            results.append(
-                {
-                    **provider,
-                    **(
-                        readiness
-                        if readiness is not None
-                        else {
-                            "readiness": "missing",
-                            "reason_code": "source_credential_missing",
-                            "secret_ref_id": None,
-                            "version": None,
-                            "configured_at": None,
-                            "last_validated_at": None,
-                        }
-                    ),
-                }
-            )
+            provider_id = str(provider["provider_id"])
+            cleanup_pending = self._drain_secret_cleanup(provider_id=provider_id)
+            readiness = self._state_store.get_source_credential(provider_id=provider_id)
+            result = {
+                **provider,
+                **(
+                    readiness
+                    if readiness is not None
+                    else {
+                        "readiness": "missing",
+                        "reason_code": "source_credential_missing",
+                        "secret_ref_id": None,
+                        "version": None,
+                        "configured_at": None,
+                        "last_validated_at": None,
+                    }
+                ),
+            }
+            if cleanup_pending:
+                result["secret_cleanup_pending"] = True
+            results.append(result)
         return results
 
     def set_source_credential(
@@ -103,35 +97,14 @@ class OperationsControl:
         *,
         provider_id: str,
         credential_fields: dict[str, str],
+        expires_at: str | None = None,
         trace_id: str,
         security_context: SecurityContext,
     ) -> dict[str, object] | PolicyDeniedOutcome:
-        provider = next(
-            (item for item in _SOURCE_CREDENTIAL_PROVIDERS if item["provider_id"] == provider_id),
-            None,
-        )
-        if provider is None:
-            raise KeyError(provider_id)
-        required_fields = provider["required_fields"]
-        if (
-            not isinstance(required_fields, list)
-            or set(credential_fields) != set(required_fields)
-            or any(not value for value in credential_fields.values())
-        ):
-            raise ValueError("source_credential_fields_invalid")
-        evaluated_at = self._clock()
-        decision = self._authorization_policy.evaluate(
-            security_context,
-            OperationIntent(
-                action="source_credential.manage",
-                dataset_id="source-credential-metadata",
-                purpose="source_administration",
-                environment=security_context.environment,
-                resource_state="active",
-                evaluated_at=evaluated_at,
-                trace_id=trace_id,
-                correlation_id=trace_id,
-            ),
+        decision = self._authorize(
+            action="source_credential.manage",
+            trace_id=trace_id,
+            security_context=security_context,
         )
         authorization = authorization_audit_payload(decision)
         if not decision.allowed:
@@ -141,54 +114,42 @@ class OperationsControl:
                 trace_id=trace_id,
             )
             return PolicyDeniedOutcome.from_decision(decision)
+        provider = self._provider(provider_id)
+        self._validate_fields(provider, credential_fields)
+        canonical_expires_at = self._canonical_expiry(expires_at)
+        evaluated_at = self._clock()
         secret_ref = self._secret_provider.put(
             provider_id=provider_id,
             credential_fields=credential_fields,
         )
-        return self._state_store.publish_source_credential(
-            provider_id=provider_id,
-            secret_ref_id=secret_ref.secret_ref_id,
-            readiness="configured",
-            reason_code="source_credential_not_validated",
-            configured_at=evaluated_at.isoformat().replace("+00:00", "Z"),
-            authorization=authorization,
-            trace_id=trace_id,
-        )
+        try:
+            return self._state_store.publish_source_credential(
+                provider_id=provider_id,
+                secret_ref_id=secret_ref.secret_ref_id,
+                readiness="configured",
+                reason_code="source_credential_not_validated",
+                configured_at=self._instant(evaluated_at),
+                expires_at=canonical_expires_at,
+                authorization=authorization,
+                trace_id=trace_id,
+            )
+        except Exception:
+            self._secret_provider.revoke(secret_ref.secret_ref_id)
+            raise
 
     def rotate_source_credential(
         self,
         *,
         provider_id: str,
         credential_fields: dict[str, str],
+        expires_at: str | None = None,
         trace_id: str,
         security_context: SecurityContext,
     ) -> dict[str, object] | PolicyDeniedOutcome:
-        provider = next(
-            (item for item in _SOURCE_CREDENTIAL_PROVIDERS if item["provider_id"] == provider_id),
-            None,
-        )
-        if provider is None:
-            raise KeyError(provider_id)
-        required_fields = provider["required_fields"]
-        if (
-            not isinstance(required_fields, list)
-            or set(credential_fields) != set(required_fields)
-            or any(not value for value in credential_fields.values())
-        ):
-            raise ValueError("source_credential_fields_invalid")
-        evaluated_at = self._clock()
-        decision = self._authorization_policy.evaluate(
-            security_context,
-            OperationIntent(
-                action="source_credential.manage",
-                dataset_id="source-credential-metadata",
-                purpose="source_administration",
-                environment=security_context.environment,
-                resource_state="active",
-                evaluated_at=evaluated_at,
-                trace_id=trace_id,
-                correlation_id=trace_id,
-            ),
+        decision = self._authorize(
+            action="source_credential.manage",
+            trace_id=trace_id,
+            security_context=security_context,
         )
         authorization = authorization_audit_payload(decision)
         if not decision.allowed:
@@ -198,20 +159,30 @@ class OperationsControl:
                 trace_id=trace_id,
             )
             return PolicyDeniedOutcome.from_decision(decision)
+        provider = self._provider(provider_id)
+        self._validate_fields(provider, credential_fields)
+        canonical_expires_at = self._canonical_expiry(expires_at)
+        evaluated_at = self._clock()
         secret_ref = self._secret_provider.put(
             provider_id=provider_id,
             credential_fields=credential_fields,
         )
-        outcome, prior_secret_ref_id = self._state_store.rotate_source_credential(
-            provider_id=provider_id,
-            secret_ref_id=secret_ref.secret_ref_id,
-            readiness="configured",
-            reason_code="source_credential_not_validated",
-            configured_at=evaluated_at.isoformat().replace("+00:00", "Z"),
-            authorization=authorization,
-            trace_id=trace_id,
-        )
-        self._secret_provider.revoke(prior_secret_ref_id)
+        try:
+            outcome, _ = self._state_store.rotate_source_credential(
+                provider_id=provider_id,
+                secret_ref_id=secret_ref.secret_ref_id,
+                readiness="configured",
+                reason_code="source_credential_not_validated",
+                configured_at=self._instant(evaluated_at),
+                expires_at=canonical_expires_at,
+                authorization=authorization,
+                trace_id=trace_id,
+            )
+        except Exception:
+            self._secret_provider.revoke(secret_ref.secret_ref_id)
+            raise
+        if self._drain_secret_cleanup(provider_id=provider_id):
+            outcome["secret_cleanup_pending"] = True
         return outcome
 
     def revoke_source_credential(
@@ -221,23 +192,10 @@ class OperationsControl:
         trace_id: str,
         security_context: SecurityContext,
     ) -> dict[str, object] | PolicyDeniedOutcome:
-        if not any(
-            provider["provider_id"] == provider_id for provider in _SOURCE_CREDENTIAL_PROVIDERS
-        ):
-            raise KeyError(provider_id)
-        evaluated_at = self._clock()
-        decision = self._authorization_policy.evaluate(
-            security_context,
-            OperationIntent(
-                action="source_credential.manage",
-                dataset_id="source-credential-metadata",
-                purpose="source_administration",
-                environment=security_context.environment,
-                resource_state="active",
-                evaluated_at=evaluated_at,
-                trace_id=trace_id,
-                correlation_id=trace_id,
-            ),
+        decision = self._authorize(
+            action="source_credential.manage",
+            trace_id=trace_id,
+            security_context=security_context,
         )
         authorization = authorization_audit_payload(decision)
         if not decision.allowed:
@@ -247,16 +205,19 @@ class OperationsControl:
                 trace_id=trace_id,
             )
             return PolicyDeniedOutcome.from_decision(decision)
+        self._provider(provider_id)
+        evaluated_at = self._clock()
         current = self._state_store.get_source_credential(provider_id=provider_id)
         if current is None or current["readiness"] == "revoked":
             raise ValueError("source_credential_not_configured")
         outcome = self._state_store.revoke_source_credential(
             provider_id=provider_id,
-            revoked_at=evaluated_at.isoformat().replace("+00:00", "Z"),
+            revoked_at=self._instant(evaluated_at),
             authorization=authorization,
             trace_id=trace_id,
         )
-        self._secret_provider.revoke(str(current["secret_ref_id"]))
+        if self._drain_secret_cleanup(provider_id=provider_id):
+            outcome["secret_cleanup_pending"] = True
         return outcome
 
     def validate_source_credential(
@@ -266,29 +227,10 @@ class OperationsControl:
         trace_id: str,
         security_context: SecurityContext,
     ) -> dict[str, object] | PolicyDeniedOutcome:
-        if not any(
-            provider["provider_id"] == provider_id for provider in _SOURCE_CREDENTIAL_PROVIDERS
-        ):
-            raise KeyError(provider_id)
-        current = self._state_store.get_source_credential(provider_id=provider_id)
-        if current is None or current["readiness"] == "revoked":
-            raise ValueError("source_credential_not_configured")
-        validator = self._source_credential_validators.get(provider_id)
-        if validator is None:
-            raise ValueError("source_credential_validator_unavailable")
-        evaluated_at = self._clock()
-        decision = self._authorization_policy.evaluate(
-            security_context,
-            OperationIntent(
-                action="source_credential.manage",
-                dataset_id="source-credential-metadata",
-                purpose="source_administration",
-                environment=security_context.environment,
-                resource_state="active",
-                evaluated_at=evaluated_at,
-                trace_id=trace_id,
-                correlation_id=trace_id,
-            ),
+        decision = self._authorize(
+            action="source_credential.manage",
+            trace_id=trace_id,
+            security_context=security_context,
         )
         authorization = authorization_audit_payload(decision)
         if not decision.allowed:
@@ -298,16 +240,117 @@ class OperationsControl:
                 trace_id=trace_id,
             )
             return PolicyDeniedOutcome.from_decision(decision)
-        lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
-        validation = validator.validate(lease.credential_fields())
+        self._provider(provider_id)
+        current = self._state_store.get_source_credential(provider_id=provider_id)
+        if current is None or current["readiness"] == "revoked":
+            raise ValueError("source_credential_not_configured")
+        validator = self._source_credential_validators.get(provider_id)
+        if validator is None:
+            raise ValueError("source_credential_validator_unavailable")
+        evaluated_at = self._clock()
+        expires_at = current.get("expires_at")
+        if (
+            isinstance(expires_at, str)
+            and datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= evaluated_at
+        ):
+            validation_readiness = "expired"
+            validation_reason = "source_credential_expired"
+            validation_evidence: dict[str, object] = {
+                "contract_id": "alpaca-ticket-07-live-v1",
+                "live_validation": "not_run",
+                "reason_code": "source_credential_expired",
+            }
+        else:
+            lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
+            validation = validator.validate(lease.credential_fields())
+            validation_readiness = validation.readiness
+            validation_reason = validation.reason_code
+            validation_evidence = dict(validation.evidence)
+        expected_version = current["version"]
+        if not isinstance(expected_version, int):
+            raise ValueError("source_credential_version_invalid")
         return self._state_store.record_source_credential_validation(
             provider_id=provider_id,
-            readiness=validation.readiness,
-            reason_code=validation.reason_code,
-            validated_at=evaluated_at.isoformat().replace("+00:00", "Z"),
+            readiness=validation_readiness,
+            reason_code=validation_reason,
+            validated_at=self._instant(evaluated_at),
+            expected_version=expected_version,
+            expected_secret_ref_id=str(current["secret_ref_id"]),
+            validation_evidence=validation_evidence,
             authorization=authorization,
             trace_id=trace_id,
         )
+
+    def _authorize(
+        self,
+        *,
+        action: AuthorizationAction,
+        trace_id: str,
+        security_context: SecurityContext,
+    ) -> AuthorizationDecision:
+        return self._authorization_policy.evaluate(
+            security_context,
+            OperationIntent(
+                action=action,
+                dataset_id="source-credential-metadata",
+                purpose="source_administration",
+                environment=security_context.environment,
+                resource_state="active",
+                evaluated_at=self._clock(),
+                trace_id=trace_id,
+                correlation_id=trace_id,
+            ),
+        )
+
+    @staticmethod
+    def _provider(provider_id: str) -> dict[str, object]:
+        provider = next(
+            (item for item in _SOURCE_CREDENTIAL_PROVIDERS if item["provider_id"] == provider_id),
+            None,
+        )
+        if provider is None:
+            raise KeyError(provider_id)
+        return provider
+
+    @staticmethod
+    def _validate_fields(provider: Mapping[str, object], credential_fields: dict[str, str]) -> None:
+        required_fields = provider["required_fields"]
+        if (
+            not isinstance(required_fields, list)
+            or set(credential_fields) != set(required_fields)
+            or any(not value for value in credential_fields.values())
+        ):
+            raise ValueError("source_credential_fields_invalid")
+
+    @staticmethod
+    def _canonical_expiry(expires_at: str | None) -> str | None:
+        if expires_at is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("source_credential_expiry_invalid") from error
+        if parsed.tzinfo is None:
+            raise ValueError("source_credential_expiry_invalid")
+        return OperationsControl._instant(parsed)
+
+    def _drain_secret_cleanup(self, *, provider_id: str) -> bool:
+        for secret_ref_id in self._state_store.list_pending_source_secret_cleanup(
+            provider_id=provider_id
+        ):
+            try:
+                self._secret_provider.revoke(secret_ref_id)
+            except Exception:
+                continue
+            self._state_store.complete_source_secret_cleanup(
+                secret_ref_id=secret_ref_id,
+                completed_at=self._instant(self._clock()),
+            )
+        return bool(self._state_store.list_pending_source_secret_cleanup(provider_id=provider_id))
+
+    @staticmethod
+    def _instant(value: datetime) -> str:
+        return value.isoformat().replace("+00:00", "Z")
 
     def list_health(self, *, scope: str) -> list[dict[str, object]]:
         return self._state_store.list_health(scope=scope)

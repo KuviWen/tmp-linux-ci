@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,13 +15,19 @@ from stock_forecasting.authorization import (
     ActionGrant,
     AuthorizationPolicy,
     LocalApiKeyIdentity,
+    PolicyDeniedOutcome,
     SourceEntitlement,
     SourcePolicyVersion,
 )
+from stock_forecasting.operations_control import OperationsControl
 from stock_forecasting.source_credentials import (
     CredentialNotReady,
     CredentialValidationResult,
+    InMemorySecretProvider,
     ManagedSourceCredentialResolver,
+    SecretLease,
+    SecretProvider,
+    SecretRef,
 )
 
 
@@ -33,10 +41,46 @@ class LiteralCredentialValidator:
         return self.result
 
 
+class CallbackCredentialValidator:
+    def __init__(self) -> None:
+        self.callback: Callable[[], None] | None = None
+
+    def validate(self, credential_fields: Mapping[str, str]) -> CredentialValidationResult:
+        assert credential_fields["api_key_id"] == "PK-STALE-FIRST"
+        assert self.callback is not None
+        self.callback()
+        return CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+        )
+
+
+class RecordingSecretProvider:
+    def __init__(self) -> None:
+        self.delegate = InMemorySecretProvider()
+        self.refs: set[str] = set()
+        self.fail_revoke = False
+
+    def put(self, *, provider_id: str, credential_fields: Mapping[str, str]) -> SecretRef:
+        ref = self.delegate.put(provider_id=provider_id, credential_fields=credential_fields)
+        self.refs.add(ref.secret_ref_id)
+        return ref
+
+    def checkout(self, secret_ref_id: str) -> SecretLease:
+        return self.delegate.checkout(secret_ref_id)
+
+    def revoke(self, secret_ref_id: str) -> None:
+        if self.fail_revoke:
+            raise OSError("injected_secret_delete_failure")
+        self.delegate.revoke(secret_ref_id)
+        self.refs.discard(secret_ref_id)
+
+
 def _credential_application(
     tmp_path: Path,
     *,
     credential_validator: LiteralCredentialValidator | None = None,
+    secret_provider: SecretProvider | None = None,
 ) -> tuple[Application, TestClient, dict[str, str]]:
     now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
     identity = LocalApiKeyIdentity.issue(
@@ -96,6 +140,7 @@ def _credential_application(
             if credential_validator is not None
             else None
         ),
+        secret_provider=secret_provider,
     )
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     return application, client, {"Authorization": identity.credential.authorization_header()}
@@ -358,6 +403,11 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
         CredentialValidationResult(
             readiness="valid",
             reason_code="source_credential_valid",
+            evidence={
+                "contract_id": "alpaca-ticket-07-live-v1",
+                "live_validation": "passed",
+                "ticker_count": 10,
+            },
         )
     )
     _, client, headers = _credential_application(
@@ -389,6 +439,11 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
         "version": 2,
         "configured_at": "2026-08-15T08:00:00Z",
         "last_validated_at": "2026-08-15T08:00:00Z",
+        "validation_evidence": {
+            "contract_id": "alpaca-ticket-07-live-v1",
+            "live_validation": "passed",
+            "ticker_count": 10,
+        },
     }
     assert validator.calls == [
         {
@@ -486,3 +541,261 @@ def test_failed_validation_keeps_provider_use_fail_closed(tmp_path: Path) -> Non
     )
     with pytest.raises(CredentialNotReady, match="source_credential_authentication_failed"):
         resolver.resolve_valid("alpaca-market-data-basic")
+
+
+def test_operations_page_can_mutate_with_an_http_only_session_and_csrf_token(
+    tmp_path: Path,
+) -> None:
+    _, client, headers = _credential_application(tmp_path)
+
+    page = client.get("/operations/source-credentials", headers=headers)
+
+    assert page.status_code == 200
+    assert "HttpOnly" in page.headers["set-cookie"]
+    assert 'name="expires_at"' in page.text
+    csrf_match = re.search(r'<meta name="csrf-token" content="([^"]+)">', page.text)
+    assert csrf_match is not None
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    without_csrf = client.put(
+        endpoint,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-BROWSER",
+                "api_secret_key": "browser-secret",
+            }
+        },
+    )
+    assert without_csrf.status_code == 403
+
+    configured = client.put(
+        endpoint,
+        headers={"X-CSRF-Token": csrf_match.group(1)},
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-BROWSER",
+                "api_secret_key": "browser-secret",
+            }
+        },
+    )
+
+    assert configured.status_code == 200
+    assert configured.json()["readiness"] == "configured"
+    assert "PK-BROWSER" not in configured.text
+    assert "browser-secret" not in configured.text
+
+
+def test_validation_authorizes_before_reading_restricted_credential_state(
+    tmp_path: Path,
+) -> None:
+    application, _, _ = _credential_application(tmp_path)
+    unauthorized = LocalApiKeyIdentity.issue(
+        owner="ticket-07-read-only-caller",
+        environment="development",
+        scopes={"source_credential.read"},
+        issued_at=datetime(2026, 8, 15, 7, 59, tzinfo=UTC),
+        expires_at=datetime(2026, 8, 16, 8, 0, tzinfo=UTC),
+        data_protection_classes={"restricted"},
+    )
+
+    outcome = application.operations_control.validate_source_credential(
+        provider_id="alpaca-market-data-basic",
+        trace_id="trace-p2-credential-denied-before-read",
+        security_context=unauthorized.context,
+    )
+
+    assert isinstance(outcome, PolicyDeniedOutcome)
+
+
+def test_expired_credential_is_fail_closed_without_contacting_provider(tmp_path: Path) -> None:
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+    )
+    configured = client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-EXPIRED-BY-METADATA",
+                "api_secret_key": "expired-by-metadata-secret",
+            },
+            "expires_at": "2026-08-15T07:59:00Z",
+        },
+    )
+    assert configured.status_code == 200
+
+    validated = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
+        headers=headers,
+    )
+
+    assert validated.status_code == 200
+    assert validated.json()["readiness"] == "expired"
+    assert validated.json()["reason_code"] == "source_credential_expired"
+    assert validator.calls == []
+    resolver = ManagedSourceCredentialResolver(
+        application.state_store,
+        application.secret_provider,
+    )
+    with pytest.raises(CredentialNotReady, match="source_credential_expired"):
+        resolver.resolve_valid("alpaca-market-data-basic")
+
+
+def test_a_previously_valid_credential_fails_closed_after_its_expiry(tmp_path: Path) -> None:
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+    )
+    client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-VALID-THEN-EXPIRED",
+                "api_secret_key": "valid-then-expired-secret",
+            },
+            "expires_at": "2026-08-15T08:01:00Z",
+        },
+    )
+    validated = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
+        headers=headers,
+    )
+    assert validated.json()["readiness"] == "valid"
+
+    resolver = ManagedSourceCredentialResolver(
+        application.state_store,
+        application.secret_provider,
+        clock=lambda: datetime(2026, 8, 15, 8, 2, tzinfo=UTC),
+    )
+
+    with pytest.raises(CredentialNotReady, match="source_credential_expired"):
+        resolver.resolve_valid("alpaca-market-data-basic")
+
+
+def test_validation_result_cannot_be_applied_to_a_concurrently_rotated_secret(
+    tmp_path: Path,
+) -> None:
+    validator = CallbackCredentialValidator()
+    application, client, headers = _credential_application(tmp_path)
+    application.operations_control = OperationsControl(
+        application.state_store,
+        authorization_policy=application.authorization_policy,
+        secret_provider=application.secret_provider,
+        source_credential_validators={"alpaca-market-data-basic": validator},
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+    )
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-STALE-FIRST",
+                "api_secret_key": "stale-first-secret",
+            }
+        },
+    )
+
+    def rotate_during_validation() -> None:
+        outcome = application.operations_control.rotate_source_credential(
+            provider_id="alpaca-market-data-basic",
+            credential_fields={
+                "api_key_id": "PK-STALE-SECOND",
+                "api_secret_key": "stale-second-secret",
+            },
+            expires_at=None,
+            trace_id="trace-p2-credential-race-rotate",
+            security_context=application.security_context,
+        )
+        assert not isinstance(outcome, PolicyDeniedOutcome)
+
+    validator.callback = rotate_during_validation
+
+    response = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "source_credential_validation_stale"
+    current = application.state_store.get_source_credential(provider_id="alpaca-market-data-basic")
+    assert current is not None
+    assert current["readiness"] == "configured"
+    assert current["version"] == 2
+
+
+def test_secret_write_is_compensated_when_metadata_commit_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_provider = RecordingSecretProvider()
+    application, _, _ = _credential_application(tmp_path, secret_provider=secret_provider)
+
+    def fail_publish(**_: Any) -> dict[str, object]:
+        raise RuntimeError("injected_metadata_commit_failure")
+
+    monkeypatch.setattr(application.state_store, "publish_source_credential", fail_publish)
+
+    with pytest.raises(RuntimeError, match="injected_metadata_commit_failure"):
+        application.operations_control.set_source_credential(
+            provider_id="alpaca-market-data-basic",
+            credential_fields={
+                "api_key_id": "PK-COMPENSATE",
+                "api_secret_key": "compensate-secret",
+            },
+            expires_at=None,
+            trace_id="trace-p2-credential-compensate",
+            security_context=application.security_context,
+        )
+
+    assert secret_provider.refs == set()
+
+
+def test_failed_secret_cleanup_is_durable_and_retried_from_operations(
+    tmp_path: Path,
+) -> None:
+    secret_provider = RecordingSecretProvider()
+    application, client, headers = _credential_application(
+        tmp_path,
+        secret_provider=secret_provider,
+    )
+    first = client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-CLEANUP-FIRST",
+                "api_secret_key": "cleanup-first-secret",
+            }
+        },
+    ).json()
+    secret_provider.fail_revoke = True
+
+    rotated = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/rotations",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-CLEANUP-SECOND",
+                "api_secret_key": "cleanup-second-secret",
+            }
+        },
+    )
+
+    assert rotated.status_code == 200
+    assert rotated.json()["secret_cleanup_pending"] is True
+    assert first["secret_ref_id"] in secret_provider.refs
+    secret_provider.fail_revoke = False
+
+    listed = client.get("/api/v1/operations/source-credentials", headers=headers)
+
+    assert listed.status_code == 200
+    assert first["secret_ref_id"] not in secret_provider.refs
+    assert "secret_cleanup_pending" not in listed.json()["items"][0]

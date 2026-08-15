@@ -17,7 +17,11 @@ from stock_forecasting.authorization_repository import (
     TICKET_07_ENGINEERING_POLICY_SET,
     AuthorizationPolicyRepository,
 )
-from stock_forecasting.data_supply import DataSupply, SourcePartitionRequest
+from stock_forecasting.data_supply import (
+    DataSupply,
+    SourceBundleMemberRequest,
+    SourcePartitionRequest,
+)
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.source_credentials import (
@@ -111,6 +115,19 @@ def run_ticket_07_acceptance(
             expected_checkpoint=None,
             distribution_id="alpaca-us-stock-bars-v2",
             distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+            source_basis_id="ENGINEERING-ALPACA-CONTRACT-01",
+            bundle_members=(
+                SourceBundleMemberRequest(
+                    dataset_id="alpaca-us-corporate-actions-v1",
+                    distribution_id="alpaca-us-corporate-actions-v1",
+                    distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+                ),
+                SourceBundleMemberRequest(
+                    dataset_id="alpaca-us-trading-calendar-v2",
+                    distribution_id="alpaca-us-trading-calendar-v2",
+                    distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+                ),
+            ),
         )
     )
     research_status, research_text = _get(

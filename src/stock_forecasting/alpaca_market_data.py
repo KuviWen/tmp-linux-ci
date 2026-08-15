@@ -14,6 +14,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from stock_forecasting.data_supply import (
     CanonicalPriceRow,
+    CollectedSourceBundleMember,
     CollectedSourcePartition,
     CollectorDecoderPriceSourceAdapter,
     CompanyActionRecord,
@@ -208,7 +209,221 @@ class AlpacaCredentialValidator:
         )
 
 
+class AlpacaLiveContractValidator:
+    """Opt-in provider contract probe; evidence never contains credential material."""
+
+    _REGULAR_SYMBOLS = ("AAPL", "AMZN", "BRK.B", "GME", "GOOG", "GOOGL", "META", "NVDA", "TSM")
+    _BARS_URL = "https://data.alpaca.markets/v2/stocks/bars"
+    _SINGLE_BARS_URL = "https://data.alpaca.markets/v2/stocks/AAPL/bars"
+    _ACTIONS_URL = "https://data.alpaca.markets/v1/corporate-actions"
+    _CALENDAR_URL = "https://paper-api.alpaca.markets/v2/calendar"
+
+    def __init__(self, transport: ProviderHttpTransport) -> None:
+        self._transport = transport
+
+    def validate(
+        self,
+        credential_fields: Mapping[str, str],
+    ) -> CredentialValidationResult:
+        try:
+            headers = {
+                "APCA-API-KEY-ID": credential_fields["api_key_id"],
+                "APCA-API-SECRET-KEY": credential_fields["api_secret_key"],
+                "Accept": "application/json",
+            }
+        except KeyError:
+            return self._failure("source_credential_fields_invalid")
+
+        regular = self._request_json(
+            self._BARS_URL,
+            {
+                "adjustment": "raw",
+                "end": "2024-01-04T00:00:00Z",
+                "feed": "sip",
+                "start": "2024-01-03T00:00:00Z",
+                "symbols": ",".join(self._REGULAR_SYMBOLS),
+                "timeframe": "1Day",
+            },
+            headers,
+        )
+        if isinstance(regular, CredentialValidationResult):
+            return regular
+        if not self._valid_multi_symbol_bars(regular, set(self._REGULAR_SYMBOLS)):
+            return self._failure("source_credential_provider_schema_invalid")
+
+        sivb = self._request_json(
+            self._BARS_URL,
+            {
+                "adjustment": "raw",
+                "end": "2023-03-09T00:00:00Z",
+                "feed": "sip",
+                "start": "2023-03-08T00:00:00Z",
+                "symbols": "SIVB",
+                "timeframe": "1Day",
+            },
+            headers,
+        )
+        if isinstance(sivb, CredentialValidationResult):
+            return sivb
+        if not self._valid_multi_symbol_bars(sivb, {"SIVB"}):
+            return self._failure("source_credential_provider_schema_invalid")
+
+        pagination_pages = 0
+        page_token: str | None = None
+        seen_tokens: set[str] = set()
+        while True:
+            query = {
+                "adjustment": "raw",
+                "end": "2024-01-05T23:59:59Z",
+                "feed": "sip",
+                "limit": "1",
+                "start": "2024-01-03T00:00:00Z",
+                "timeframe": "1Day",
+            }
+            if page_token is not None:
+                query["page_token"] = page_token
+            page = self._request_json(self._SINGLE_BARS_URL, query, headers)
+            if isinstance(page, CredentialValidationResult):
+                return page
+            if not self._valid_single_symbol_page(page):
+                return self._failure("source_credential_provider_schema_invalid")
+            pagination_pages += 1
+            next_token = cast(dict[str, object], page).get("next_page_token")
+            if next_token is None:
+                break
+            if (
+                not isinstance(next_token, str)
+                or not next_token
+                or next_token in seen_tokens
+                or pagination_pages >= 20
+            ):
+                return self._failure("source_credential_provider_schema_invalid")
+            seen_tokens.add(next_token)
+            page_token = next_token
+        if pagination_pages < 2:
+            return self._failure("source_credential_provider_schema_invalid")
+
+        actions = self._request_json(
+            self._ACTIONS_URL,
+            {"symbols": "AAPL", "start": "2024-02-01", "end": "2024-02-29"},
+            headers,
+        )
+        if isinstance(actions, CredentialValidationResult):
+            return actions
+        dividends = cast(dict[str, object], actions).get("cash_dividends")
+        if not isinstance(dividends, list) or not any(
+            isinstance(item, dict)
+            and item.get("symbol") == "AAPL"
+            and isinstance(item.get("rate"), str | int | float)
+            and isinstance(item.get("ex_date"), str)
+            for item in dividends
+        ):
+            return self._failure("source_credential_provider_schema_invalid")
+
+        calendar = self._request_json(
+            self._CALENDAR_URL,
+            {"start": "2024-11-29", "end": "2024-11-29"},
+            headers,
+        )
+        if isinstance(calendar, CredentialValidationResult):
+            return calendar
+        if not isinstance(calendar, list) or not any(
+            isinstance(item, dict)
+            and item.get("date") == "2024-11-29"
+            and item.get("close") == "13:00"
+            for item in calendar
+        ):
+            return self._failure("source_credential_provider_schema_invalid")
+
+        return CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence={
+                "contract_id": "alpaca-ticket-07-live-v1",
+                "live_validation": "passed",
+                "ticker_count": 10,
+                "pagination_pages": pagination_pages,
+                "datasets": [
+                    "alpaca-us-stock-bars-v2",
+                    "alpaca-us-corporate-actions-v1",
+                    "alpaca-us-trading-calendar-v2",
+                ],
+            },
+        )
+
+    def _request_json(
+        self,
+        url: str,
+        query: Mapping[str, str],
+        headers: Mapping[str, str],
+    ) -> object | CredentialValidationResult:
+        response = self._transport.send(
+            ProviderHttpRequest(method="GET", url=url, query=query, headers=headers)
+        )
+        if response.status_code in {401, 403}:
+            return self._failure("source_credential_authentication_failed")
+        if response.status_code == 429:
+            return self._failure("source_credential_validation_rate_limited")
+        if response.status_code != 200:
+            return self._failure("source_credential_provider_unavailable")
+        try:
+            return cast(object, json.loads(response.body))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return self._failure("source_credential_provider_schema_invalid")
+
+    @staticmethod
+    def _valid_bar(item: object) -> bool:
+        return isinstance(item, dict) and all(
+            isinstance(item.get(field), str | int | float)
+            for field in ("t", "o", "h", "l", "c", "v")
+        )
+
+    @classmethod
+    def _valid_multi_symbol_bars(cls, payload: object, symbols: set[str]) -> bool:
+        if not isinstance(payload, dict) or not isinstance(payload.get("bars"), dict):
+            return False
+        bars = payload["bars"]
+        return set(bars) == symbols and all(
+            isinstance(items, list) and items and all(cls._valid_bar(item) for item in items)
+            for items in bars.values()
+        )
+
+    @classmethod
+    def _valid_single_symbol_page(cls, payload: object) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        bars = payload.get("bars")
+        return (
+            isinstance(bars, dict)
+            and isinstance(bars.get("AAPL"), list)
+            and all(cls._valid_bar(item) for item in bars["AAPL"])
+        )
+
+    @staticmethod
+    def _failure(reason_code: str) -> CredentialValidationResult:
+        return CredentialValidationResult(
+            readiness="validation_failed",
+            reason_code=reason_code,
+            evidence={
+                "contract_id": "alpaca-ticket-07-live-v1",
+                "live_validation": "failed",
+                "reason_code": reason_code,
+            },
+        )
+
+
 class AlpacaSourceCollector:
+    _REQUIRED_BUNDLE_MEMBERS = {
+        "alpaca-us-corporate-actions-v1": (
+            "alpaca-us-corporate-actions-v1",
+            "https://data.alpaca.markets/v1/corporate-actions",
+        ),
+        "alpaca-us-trading-calendar-v2": (
+            "alpaca-us-trading-calendar-v2",
+            "https://paper-api.alpaca.markets/v2/calendar",
+        ),
+    }
+
     def __init__(
         self,
         *,
@@ -229,6 +444,12 @@ class AlpacaSourceCollector:
         self._rate_limit_policy_id = rate_limit_policy_id
 
     def collect(self, request: SourcePartitionRequest) -> CollectedSourcePartition:
+        declared_members = {
+            member.dataset_id: (member.distribution_id, member.distribution_url)
+            for member in request.bundle_members
+        }
+        if declared_members != self._REQUIRED_BUNDLE_MEMBERS:
+            raise ValueError("source_bundle_member_request_mismatch")
         try:
             credential_fields = self._credential_resolver.resolve_valid(self._provider_id)
         except CredentialNotReady as error:
@@ -273,11 +494,9 @@ class AlpacaSourceCollector:
         corporate_action_pages = self._paginated_request(
             url="https://data.alpaca.markets/v1/corporate-actions",
             query={
-                "data_quality": "complete",
                 "end": request.end_date.isoformat(),
                 "limit": "1000",
                 "region": "us",
-                "sort": "asc",
                 "start": request.start_date.isoformat(),
                 "symbols": ",".join(all_symbols),
             },
@@ -321,6 +540,20 @@ class AlpacaSourceCollector:
         all_observed_dates = {
             observed_date for dates in observed_dates.values() for observed_date in dates
         }
+        action_payload = json.dumps(
+            corporate_action_pages,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        calendar_payload = json.dumps(
+            calendar,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        calendar_observed_start = min(session_dates) if session_dates else None
+        calendar_observed_end = max(session_dates) if session_dates else None
         return CollectedSourcePartition(
             request_id=request.request_id,
             source_id=request.source_id,
@@ -338,6 +571,40 @@ class AlpacaSourceCollector:
                 complete=complete,
             ),
             source_revision=checkpoint,
+            bundle_members=(
+                CollectedSourceBundleMember(
+                    dataset_id="alpaca-us-corporate-actions-v1",
+                    distribution_id="alpaca-us-corporate-actions-v1",
+                    distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+                    media_type="application/json",
+                    raw_payload=action_payload,
+                    coverage=SourceCollectionCoverage(
+                        requested_start=request.start_date,
+                        requested_end=request.end_date,
+                        observed_start=request.start_date,
+                        observed_end=request.end_date,
+                        complete=True,
+                    ),
+                    schema_version="alpaca-corporate-actions-v1",
+                    known_gaps=("provider_creation_time_not_guaranteed",),
+                ),
+                CollectedSourceBundleMember(
+                    dataset_id="alpaca-us-trading-calendar-v2",
+                    distribution_id="alpaca-us-trading-calendar-v2",
+                    distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+                    media_type="application/json",
+                    raw_payload=calendar_payload,
+                    coverage=SourceCollectionCoverage(
+                        requested_start=request.start_date,
+                        requested_end=request.end_date,
+                        observed_start=calendar_observed_start,
+                        observed_end=calendar_observed_end,
+                        complete=bool(session_dates),
+                    ),
+                    schema_version="alpaca-trading-calendar-v2",
+                    known_gaps=("calendar_history_subject_to_provider_coverage",),
+                ),
+            ),
         )
 
     def _paginated_request(
@@ -423,6 +690,7 @@ class AlpacaSourceDecoder:
         *,
         source_id: str,
         listing_symbols: Mapping[str, tuple[str, ...]],
+        expected_company_action_ids: frozenset[str] = frozenset(),
     ) -> None:
         self._source_id = source_id
         self._listing_symbols = dict(listing_symbols)
@@ -435,6 +703,7 @@ class AlpacaSourceDecoder:
                     raise ValueError("source_identity_mapping_ambiguous")
                 symbol_to_listing[symbol] = listing_id
         self._symbol_to_listing = symbol_to_listing
+        self._expected_company_action_ids = expected_company_action_ids
 
     def decode(self, collection: CollectedSourcePartition) -> DecodedSourcePartition:
         if collection.source_id != self._source_id:
@@ -490,6 +759,12 @@ class AlpacaSourceDecoder:
             parent_object_ids=(),
             symbol_identities=tuple(symbol_identities),
             market_sessions=tuple(market_sessions),
+            revision_kind=(
+                "correction"
+                if collection.checkpoint_before is not None
+                and collection.checkpoint_before != collection.checkpoint_after
+                else "original"
+            ),
             quality_issues=tuple(sorted(quality_issues)),
         )
 
@@ -547,12 +822,13 @@ class AlpacaSourceDecoder:
         for page in pages:
             if not isinstance(page, dict):
                 raise ValueError("source_provider_schema_invalid")
-            actions = self._action_rows(page.get("corporate_actions"))
+            actions = self._action_rows(page)
             for action in actions:
                 action_id = action.get("id")
                 action_type = action.get("type") or action.get("corporate_action_type")
                 if not isinstance(action_id, str) or not isinstance(action_type, str):
                     raise ValueError("source_provider_schema_invalid")
+                assertion_ids.add(action_id)
                 if action_type == "name_change":
                     old_symbol = action.get("old_symbol") or action.get("initiating_symbol")
                     new_symbol = action.get("new_symbol") or action.get("target_symbol")
@@ -579,7 +855,6 @@ class AlpacaSourceDecoder:
                             ),
                         )
                     )
-                    assertion_ids.add(action_id)
                     continue
                 symbol = action.get("symbol") or action.get("initiating_symbol")
                 listing_id = self._symbol_to_listing.get(str(symbol))
@@ -592,7 +867,11 @@ class AlpacaSourceDecoder:
                             listing_id=listing_id,
                             effective_date=self._action_date(action),
                             kind="cash_dividend",
-                            value=Decimal(str(action.get("cash") or action.get("amount"))),
+                            value=Decimal(
+                                str(
+                                    action.get("rate") or action.get("cash") or action.get("amount")
+                                )
+                            ),
                             currency="USD",
                             source_action_id=action_id,
                         )
@@ -612,27 +891,36 @@ class AlpacaSourceDecoder:
                             source_action_id=action_id,
                         )
                     )
+                else:
+                    quality_issues.add("missing_company_action")
+        if not self._expected_company_action_ids <= assertion_ids:
+            quality_issues.add("missing_company_action")
         return company_actions, symbol_identities, assertion_ids
 
     @staticmethod
     def _action_rows(payload: object) -> list[dict[str, object]]:
-        if isinstance(payload, list) and all(isinstance(item, dict) for item in payload):
-            return payload
-        if isinstance(payload, dict):
-            rows: list[dict[str, object]] = []
-            for action_type, values in payload.items():
-                if not isinstance(values, list) or not all(
-                    isinstance(item, dict) for item in values
-                ):
-                    raise ValueError("source_provider_schema_invalid")
-                for value in values:
-                    rows.append({"type": action_type, **value})
-            return rows
-        raise ValueError("source_provider_schema_invalid")
+        if not isinstance(payload, dict):
+            raise ValueError("source_provider_schema_invalid")
+        provider_types = {
+            "cash_dividends": "cash_dividend",
+            "forward_splits": "forward_split",
+            "name_changes": "name_change",
+            "reverse_splits": "reverse_split",
+        }
+        rows: list[dict[str, object]] = []
+        for provider_type, values in payload.items():
+            if provider_type == "next_page_token":
+                continue
+            if not isinstance(values, list) or not all(isinstance(item, dict) for item in values):
+                raise ValueError("source_provider_schema_invalid")
+            action_type = provider_types.get(provider_type, provider_type)
+            for value in values:
+                rows.append({"type": action_type, **value})
+        return rows
 
     @staticmethod
     def _action_date(action: Mapping[str, object]) -> date:
-        value = action.get("effective_date") or action.get("ex_date")
+        value = action.get("effective_date") or action.get("ex_date") or action.get("process_date")
         if not isinstance(value, str):
             raise ValueError("source_provider_schema_invalid")
         return date.fromisoformat(value)

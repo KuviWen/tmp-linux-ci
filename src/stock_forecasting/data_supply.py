@@ -64,6 +64,21 @@ _APPROVED_PRICE_SCHEMA_VERSIONS = frozenset({"taiwan-unadjusted-eod-v1", "us-una
 
 
 @dataclass(frozen=True)
+class SourceBundleMemberRequest:
+    dataset_id: str
+    distribution_id: str
+    distribution_url: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.dataset_id.strip()
+            or not self.distribution_id.strip()
+            or not self.distribution_url.startswith("https://")
+        ):
+            raise ValueError("source_bundle_member_request_invalid")
+
+
+@dataclass(frozen=True)
 class SourcePartitionRequest:
     request_id: str
     trace_id: str
@@ -77,6 +92,8 @@ class SourcePartitionRequest:
     historical_availability_claim_id: str | None = None
     distribution_id: str | None = None
     distribution_url: str | None = None
+    source_basis_id: str | None = None
+    bundle_members: tuple[SourceBundleMemberRequest, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.distribution_id is None) != (self.distribution_url is None):
@@ -86,6 +103,10 @@ class SourcePartitionRequest:
             or not cast(str, self.distribution_url).startswith("https://")
         ):
             raise ValueError("source_distribution_request_invalid")
+        if self.source_basis_id is not None and not self.source_basis_id.strip():
+            raise ValueError("source_basis_request_invalid")
+        if len({member.dataset_id for member in self.bundle_members}) != len(self.bundle_members):
+            raise ValueError("source_bundle_member_request_duplicate")
 
 
 @dataclass(frozen=True)
@@ -158,6 +179,18 @@ class HistoricalAvailabilityClaim:
 
 
 @dataclass(frozen=True)
+class CollectedSourceBundleMember:
+    dataset_id: str
+    distribution_id: str
+    distribution_url: str
+    media_type: str
+    raw_payload: bytes
+    coverage: SourceCollectionCoverage
+    schema_version: str
+    known_gaps: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class CollectedSourcePartition:
     request_id: str
     source_id: str
@@ -169,6 +202,7 @@ class CollectedSourcePartition:
     checkpoint_after: str | None
     coverage: SourceCollectionCoverage
     source_revision: str
+    bundle_members: tuple[CollectedSourceBundleMember, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -305,6 +339,17 @@ class CollectorDecoderPriceSourceAdapter:
             raise ValueError("source_collection_distribution_mismatch")
         if collection.checkpoint_before != request.expected_checkpoint:
             raise ValueError("source_checkpoint_mismatch")
+        requested_members = {member.dataset_id: member for member in request.bundle_members}
+        collected_members = {member.dataset_id: member for member in collection.bundle_members}
+        if requested_members.keys() != collected_members.keys():
+            raise ValueError("source_bundle_member_mismatch")
+        for dataset_id, member in collected_members.items():
+            requested = requested_members[dataset_id]
+            if (
+                member.distribution_id != requested.distribution_id
+                or member.distribution_url != requested.distribution_url
+            ):
+                raise ValueError("source_bundle_member_distribution_mismatch")
         decoded = self._decoder.decode(collection)
         if (
             decoded.source_id != collection.source_id
@@ -415,29 +460,52 @@ class DataSupply:
         if request.policy_decision_id is not None:
             raise ValueError("source_policy_decision_must_be_internal")
         evaluated_at = self._clock()
-        decision = self._authorization_policy.evaluate(
-            self._security_context,
-            OperationIntent(
-                action="market_data.collect",
-                dataset_id=request.source_id,
-                purpose="price_research",
-                environment=self._security_context.environment,
-                resource_state="active",
-                evaluated_at=evaluated_at,
-                trace_id=request.trace_id,
-                correlation_id=request.request_id,
-                required_uses=PRICE_RESEARCH_REQUIRED_USES,
-                distribution_id=request.distribution_id,
-                distribution_url=request.distribution_url,
-            ),
+        decision = self._evaluate_collection_rights(
+            dataset_id=request.source_id,
+            distribution_id=request.distribution_id,
+            distribution_url=request.distribution_url,
+            evaluated_at=evaluated_at,
+            trace_id=request.trace_id,
+            correlation_id=request.request_id,
         )
         if decision.allowed:
-            return self._materialize_allowed(request, decision)
+            member_decisions: dict[str, AuthorizationDecision] = {}
+            for member in request.bundle_members:
+                member_decision = self._evaluate_collection_rights(
+                    dataset_id=member.dataset_id,
+                    distribution_id=member.distribution_id,
+                    distribution_url=member.distribution_url,
+                    evaluated_at=evaluated_at,
+                    trace_id=request.trace_id,
+                    correlation_id=f"{request.request_id}:{member.dataset_id}",
+                )
+                if not member_decision.allowed:
+                    self._state_store.record_authorization_decision(
+                        authorization=authorization_audit_payload(decision),
+                        outcome="allowed",
+                        trace_id=request.trace_id,
+                    )
+                    return self._publish_policy_blocked(request, member_decision)
+                member_decisions[member.dataset_id] = member_decision
+            for member_decision in member_decisions.values():
+                self._state_store.record_authorization_decision(
+                    authorization=authorization_audit_payload(member_decision),
+                    outcome="allowed",
+                    trace_id=request.trace_id,
+                )
+            return self._materialize_allowed(request, decision, member_decisions)
+        return self._publish_policy_blocked(request, decision)
+
+    def _publish_policy_blocked(
+        self,
+        request: SourcePartitionRequest,
+        decision: AuthorizationDecision,
+    ) -> PriceMaterializationOutcome:
         outcome = PriceMaterializationOutcome(
             status="policy_blocked",
             reason_code=_public_policy_reason(decision.reason_code),
             policy_reason_code=decision.reason_code,
-            source_basis_id=self._source_basis_id(decision),
+            source_basis_id=self._source_basis_id(decision, request),
             source_id=request.source_id,
             source_mode=request.mode,
             listing_ids=request.listing_ids,
@@ -458,12 +526,40 @@ class DataSupply:
         )
         return outcome
 
+    def _evaluate_collection_rights(
+        self,
+        *,
+        dataset_id: str,
+        distribution_id: str | None,
+        distribution_url: str | None,
+        evaluated_at: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> AuthorizationDecision:
+        return self._authorization_policy.evaluate(
+            self._security_context,
+            OperationIntent(
+                action="market_data.collect",
+                dataset_id=dataset_id,
+                purpose="price_research",
+                environment=self._security_context.environment,
+                resource_state="active",
+                evaluated_at=evaluated_at,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+                required_uses=PRICE_RESEARCH_REQUIRED_USES,
+                distribution_id=distribution_id,
+                distribution_url=distribution_url,
+            ),
+        )
+
     def _materialize_allowed(
         self,
         request: SourcePartitionRequest,
         decision: AuthorizationDecision,
+        member_decisions: Mapping[str, AuthorizationDecision],
     ) -> PriceMaterializationOutcome:
-        source_basis_id = self._source_basis_id(decision)
+        source_basis_id = self._source_basis_id(decision, request)
         adapter = self._adapters.get(request.source_id)
         if adapter is None:
             raise ValueError("qualified_source_adapter_unavailable")
@@ -559,6 +655,11 @@ class DataSupply:
             collection,
             raw_object.object_id,
         )
+        member_artifacts, member_lineage, member_object_ids = self._materialize_bundle_members(
+            request=request,
+            collection=collection,
+            member_decisions=member_decisions,
+        )
         quarantine_reason = _quarantine_reason(request, collection, decoded, historical_claim)
         if quarantine_reason is not None:
             quarantine_payload: dict[str, object] = {
@@ -598,6 +699,7 @@ class DataSupply:
             quarantine_artifacts: list[dict[str, Any]] = [
                 raw_artifact,
                 retrieval_receipt,
+                *member_artifacts,
                 {
                     "artifact_id": quarantine_id,
                     "artifact_kind": "quarantine_record",
@@ -634,8 +736,13 @@ class DataSupply:
             "raw_object_id": raw_object.object_id,
             "normalized_object_id": normalized_object.object_id,
             "coverage": _coverage_payload(collection.coverage),
+            "bundle_members": member_lineage,
             "identity_assertion_ids": list(decoded.identity_assertion_ids),
-            "parent_object_ids": [raw_object.object_id, *decoded.parent_object_ids],
+            "parent_object_ids": [
+                raw_object.object_id,
+                *member_object_ids,
+                *decoded.parent_object_ids,
+            ],
             "policy_decision_id": decision.decision_id,
             "historical_availability_claim_id": (request.historical_availability_claim_id),
             "integrity": {
@@ -657,6 +764,7 @@ class DataSupply:
         artifacts: list[dict[str, Any]] = [
             raw_artifact,
             retrieval_receipt,
+            *member_artifacts,
             {
                 "artifact_id": normalized_object.object_id,
                 "artifact_kind": "normalized_price_object",
@@ -711,15 +819,100 @@ class DataSupply:
         )
         return outcome
 
-    def _source_basis_id(self, decision: AuthorizationDecision) -> str:
+    def _materialize_bundle_members(
+        self,
+        *,
+        request: SourcePartitionRequest,
+        collection: CollectedSourcePartition,
+        member_decisions: Mapping[str, AuthorizationDecision],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, object]], list[str]]:
+        requested = {member.dataset_id: member for member in request.bundle_members}
+        artifacts: list[dict[str, Any]] = []
+        lineage: list[dict[str, object]] = []
+        object_ids: list[str] = []
+        for member in collection.bundle_members:
+            member_request = requested.get(member.dataset_id)
+            decision = member_decisions.get(member.dataset_id)
+            if member_request is None or decision is None:
+                raise ValueError("source_bundle_member_lineage_missing")
+            if (
+                member.coverage.requested_start != request.start_date
+                or member.coverage.requested_end != request.end_date
+            ):
+                raise ValueError("source_bundle_member_coverage_mismatch")
+            checksum = hashlib.sha256(member.raw_payload).hexdigest()
+            stored = self._object_repository.put_verified(
+                BytesIO(member.raw_payload),
+                expected_checksum=checksum,
+                metadata={
+                    "media_type": member.media_type,
+                    "object_kind": "raw_source_bundle_member",
+                    "dataset_id": member.dataset_id,
+                },
+            )
+            receipt_payload: dict[str, object] = {
+                "dataset_id": member.dataset_id,
+                "distribution_id": member.distribution_id,
+                "distribution_url": member.distribution_url,
+                "schema_version": member.schema_version,
+                "raw_object_id": stored.object_id,
+                "raw_sha256": stored.checksum,
+                "coverage": _coverage_payload(member.coverage),
+                "known_gaps": list(member.known_gaps),
+                "policy_decision_id": decision.decision_id,
+                "policy_evaluation_id": decision.evaluation_id,
+            }
+            receipt_id = _artifact_id("source_bundle_member_receipt", receipt_payload)
+            artifacts.extend(
+                (
+                    {
+                        "artifact_id": stored.object_id,
+                        "artifact_kind": "raw_source_bundle_member_object",
+                        "payload": {
+                            "object_id": stored.object_id,
+                            "dataset_id": member.dataset_id,
+                        },
+                    },
+                    {
+                        "artifact_id": receipt_id,
+                        "artifact_kind": "source_bundle_member_receipt",
+                        "payload": receipt_payload,
+                    },
+                )
+            )
+            lineage.append({**receipt_payload, "receipt_id": receipt_id})
+            object_ids.append(stored.object_id)
+        return artifacts, lineage, object_ids
+
+    def _source_basis_id(
+        self,
+        decision: AuthorizationDecision,
+        request: SourcePartitionRequest,
+    ) -> str:
         matching_policies = tuple(
             policy
             for policy in self._authorization_policy.source_policies
             if policy.version_id == decision.source_policy_version_id
         )
         if len(matching_policies) == 1 and matching_policies[0].source_basis_id is not None:
-            return matching_policies[0].source_basis_id
-        return "TWSE-OGDL-OPEN-DATA-01"
+            policy_basis_id = matching_policies[0].source_basis_id
+            if request.source_basis_id is not None and request.source_basis_id != policy_basis_id:
+                raise ValueError("source_basis_request_mismatch")
+            return policy_basis_id
+        dataset_basis_ids = {
+            policy.source_basis_id
+            for policy in self._authorization_policy.source_policies
+            if policy.dataset_id == request.source_id and policy.source_basis_id is not None
+        }
+        if request.source_basis_id is not None:
+            if dataset_basis_ids and dataset_basis_ids != {request.source_basis_id}:
+                raise ValueError("source_basis_request_mismatch")
+            return request.source_basis_id
+        if len(dataset_basis_ids) == 1:
+            return dataset_basis_ids.pop()
+        if request.source_id == "twse-current-qualified-price":
+            return "TWSE-OGDL-OPEN-DATA-01"
+        return "SOURCE-BASIS-UNVERIFIED"
 
     def _historical_claim(
         self,

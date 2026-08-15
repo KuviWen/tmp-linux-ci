@@ -205,15 +205,25 @@ def test_ticket_07_authorization_init_installs_zero_fee_and_credential_contracts
     )
     policies = {item.dataset_id: item for item in policy.source_policies}
     assert set(policies) == {
+        "alpaca-us-corporate-actions-v1",
         "alpaca-us-stock-bars",
+        "alpaca-us-trading-calendar-v2",
         "price-research-eligibility",
         "source-credential-metadata",
     }
     bars = policies["alpaca-us-stock-bars"]
-    assert bars.access_basis == "zero_fee_plan"
-    assert bars.source_basis_id == "ALPACA-BASIC-US-MARKET-DATA-01"
-    assert bars.provider_id == "alpaca-market-data-basic"
-    assert bars.plan_id == "basic-2026-08-15"
-    assert bars.fee_required is False
-    assert bars.terms_content_sha256 is not None
+    assert bars.access_basis == "engineering_contract"
+    assert bars.source_basis_id == "ENGINEERING-ALPACA-CONTRACT-01"
+    assert bars.provider_id is None
+    assert bars.plan_id is None
+    assert bars.fee_required is None
+    assert bars.terms_content_sha256 is None
+    assert all(
+        policies[dataset_id].access_basis == "engineering_contract"
+        for dataset_id in {
+            "alpaca-us-stock-bars",
+            "alpaca-us-corporate-actions-v1",
+            "alpaca-us-trading-calendar-v2",
+        }
+    )
     assert policies["source-credential-metadata"].data_protection_class == "restricted"

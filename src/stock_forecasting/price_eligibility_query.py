@@ -136,6 +136,7 @@ class PriceEligibilityQuery:
         checks = _aggregate_qualification_checks(sources)
         if status == "policy_blocked":
             checks["policy"] = "blocked"
+        downstream_state = "ready" if status == "qualified" else status
         return {
             "listing_id": listing_id,
             "market": market,
@@ -144,6 +145,12 @@ class PriceEligibilityQuery:
             "source_basis_id": str(source_basis["source_basis_id"]),
             "source_basis": source_basis,
             "formally_qualified": status == "qualified",
+            "downstream_readiness": {
+                "new_collection": downstream_state,
+                "feature_materialization": downstream_state,
+                "training": downstream_state,
+                "research_display": downstream_state,
+            },
             "checks": checks,
             "sources": sources,
         }

@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -40,9 +42,10 @@ class SecretProvider(Protocol):
 class CredentialValidationResult:
     readiness: str
     reason_code: str
+    evidence: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.readiness not in {"valid", "validation_failed"}:
+        if self.readiness not in {"valid", "validation_failed", "expired"}:
             raise ValueError("source_credential_validation_result_invalid")
         if not self.reason_code:
             raise ValueError("source_credential_validation_reason_required")
@@ -68,9 +71,16 @@ class SourceCredentialResolver(Protocol):
 
 
 class ManagedSourceCredentialResolver:
-    def __init__(self, state_store: StateStore, secret_provider: SecretProvider) -> None:
+    def __init__(
+        self,
+        state_store: StateStore,
+        secret_provider: SecretProvider,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._state_store = state_store
         self._secret_provider = secret_provider
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def resolve_valid(self, provider_id: str) -> dict[str, str]:
         current = self._state_store.get_source_credential(provider_id=provider_id)
@@ -78,6 +88,12 @@ class ManagedSourceCredentialResolver:
             raise CredentialNotReady("source_credential_missing")
         if current["readiness"] != "valid":
             raise CredentialNotReady(str(current["reason_code"]))
+        expires_at = current.get("expires_at")
+        if (
+            isinstance(expires_at, str)
+            and datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= self._clock()
+        ):
+            raise CredentialNotReady("source_credential_expired")
         try:
             lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
         except KeyError as error:
@@ -102,8 +118,7 @@ class InMemorySecretProvider:
         return SecretLease(secret_ref_id, credential_fields)
 
     def revoke(self, secret_ref_id: str) -> None:
-        if self._secrets.pop(secret_ref_id, None) is None:
-            raise KeyError("source_credential_secret_unavailable")
+        self._secrets.pop(secret_ref_id, None)
 
 
 class EncryptedFilesystemSecretProvider:
@@ -153,10 +168,8 @@ class EncryptedFilesystemSecretProvider:
         return SecretLease(secret_ref_id, decoded)
 
     def revoke(self, secret_ref_id: str) -> None:
-        try:
+        with suppress(FileNotFoundError):
             self._secret_path(secret_ref_id).unlink()
-        except FileNotFoundError as error:
-            raise KeyError("source_credential_secret_unavailable") from error
 
     def _secret_path(self, secret_ref_id: str) -> Path:
         digest = hashlib.sha256(secret_ref_id.encode("utf-8")).hexdigest()

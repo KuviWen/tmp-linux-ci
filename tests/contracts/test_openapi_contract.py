@@ -78,6 +78,7 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "source_basis_id",
         "source_basis",
         "formally_qualified",
+        "downstream_readiness",
         "listing_id",
         "market",
         "reason_code",
@@ -94,6 +95,13 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert eligibility["properties"]["market"] == {
         "type": "string",
         "enum": ["XTAI", "XNAS", "XNYS"],
+    }
+    downstream = contract["components"]["schemas"]["PriceDownstreamReadiness"]
+    assert set(downstream["required"]) == {
+        "new_collection",
+        "feature_materialization",
+        "training",
+        "research_display",
     }
     assert eligibility["properties"]["source_basis"] == {
         "oneOf": [
@@ -190,13 +198,21 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "version",
         "configured_at",
         "last_validated_at",
+        "expires_at",
+        "validation_evidence",
+        "secret_cleanup_pending",
         "revoked_at",
         "registration_url",
         "key_management_url",
     }
     assert "credential_fields" not in credential["properties"]
+    assert "expired" in credential["properties"]["readiness"]["enum"]
     write_request = contract["components"]["schemas"]["SourceCredentialWriteRequest"]
     assert write_request["properties"]["credential_fields"]["additionalProperties"] == {
         "type": "string",
         "writeOnly": True,
+    }
+    assert write_request["properties"]["expires_at"] == {
+        "type": ["string", "null"],
+        "format": "date-time",
     }

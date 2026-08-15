@@ -85,6 +85,14 @@ def test_us_manifest_preserves_each_zero_fee_source_bundle_member_and_gap() -> N
     }
     assert members["alpaca-us-stock-bars-v2"].schema_version == "us-unadjusted-eod-v1"
     assert members["alpaca-us-stock-bars-v2"].price_semantics == "unadjusted"
+    assert all(
+        members[dataset_id].materialization_role == "required_observation"
+        for dataset_id in {
+            "alpaca-us-stock-bars-v2",
+            "alpaca-us-corporate-actions-v1",
+            "alpaca-us-trading-calendar-v2",
+        }
+    )
     assert members["alpaca-us-corporate-actions-v1"].known_gaps == (
         "provider_creation_time_not_guaranteed",
     )
@@ -93,6 +101,10 @@ def test_us_manifest_preserves_each_zero_fee_source_bundle_member_and_gap() -> N
     )
     assert members["nasdaq-current-symbol-directory"].qualification_status == (
         "candidate_scope_limited"
+    )
+    assert (
+        members["nasdaq-current-symbol-directory"].materialization_role
+        == "supplemental_qualification_reference"
     )
     assert all(member.distribution_url.startswith("https://") for member in members.values())
     assert manifest.formal_qualification_artifact_id is None

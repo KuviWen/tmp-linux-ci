@@ -36,7 +36,12 @@ SourceUseRight = Literal[
     "internal_display",
     "backup_restore",
 ]
-SourceAccessBasis = Literal["principal_entitlement", "open_data_terms", "zero_fee_plan"]
+SourceAccessBasis = Literal[
+    "principal_entitlement",
+    "open_data_terms",
+    "zero_fee_plan",
+    "engineering_contract",
+]
 
 _LOCAL_KEY_ENVIRONMENTS = frozenset({"local", "development"})
 _CONTEXT_ISSUER = object()
@@ -434,6 +439,7 @@ class SourcePolicyVersion:
             "principal_entitlement",
             "open_data_terms",
             "zero_fee_plan",
+            "engineering_contract",
         }:
             raise ValueError("source_access_basis_invalid")
         terms_fields = (
@@ -500,6 +506,26 @@ class SourcePolicyVersion:
                 )
             ):
                 raise ValueError("zero_fee_plan_evidence_invalid")
+        elif self.access_basis == "engineering_contract":
+            if (
+                not isinstance(self.source_basis_id, str)
+                or not self.source_basis_id.startswith("ENGINEERING-")
+                or not self.distributions
+                or len(set(self.distributions)) != len(self.distributions)
+                or any(value is not None for value in terms_fields)
+                or any(
+                    value is not None
+                    for value in (
+                        self.provider_id,
+                        self.plan_id,
+                        self.principal_classification,
+                        self.credential_kind,
+                        self.account_required,
+                        self.fee_required,
+                    )
+                )
+            ):
+                raise ValueError("engineering_contract_evidence_invalid")
         elif (
             self.source_basis_id is not None
             or any(value is not None for value in terms_fields)
@@ -723,6 +749,19 @@ def source_policy_version_payload(policy: SourcePolicyVersion) -> dict[str, obje
                         policy.distributions,
                         key=lambda item: (item.dataset_id, item.distribution_url),
                     )
+                ],
+            }
+        )
+    elif policy.access_basis == "engineering_contract":
+        payload.update(
+            {
+                "access_basis": policy.access_basis,
+                "distributions": [
+                    {
+                        "dataset_id": distribution.dataset_id,
+                        "distribution_url": distribution.distribution_url,
+                    }
+                    for distribution in policy.distributions
                 ],
             }
         )
@@ -1107,7 +1146,8 @@ class AuthorizationPolicy:
         elif not intent.required_uses <= source_policy.allowed_uses:
             reason_code = "source_policy_use_denied"
         elif (
-            source_policy.access_basis in {"open_data_terms", "zero_fee_plan"}
+            source_policy.access_basis
+            in {"open_data_terms", "zero_fee_plan", "engineering_contract"}
             and intent.action == "market_data.collect"
             and not any(
                 distribution.dataset_id == intent.distribution_id
@@ -1445,10 +1485,10 @@ def build_us_zero_fee_engineering_authorization_policy(
     credential_actions: frozenset[AuthorizationAction] = frozenset(
         {"source_credential.read", "source_credential.manage"}
     )
-    policies = (
+    engineering_collect_policies = tuple(
         SourcePolicyVersion(
-            version_id="ticket-07-engineering/alpaca-bars-policy-v1",
-            dataset_id="alpaca-us-stock-bars",
+            version_id=f"ticket-07-engineering/{dataset_id}-policy-v1",
+            dataset_id=dataset_id,
             allowed_actions=bars_actions,
             purposes=frozenset({"price_research"}),
             environments=frozenset({context.environment}),
@@ -1457,27 +1497,35 @@ def build_us_zero_fee_engineering_authorization_policy(
             valid_from=context.issued_at,
             valid_to=context.expires_at,
             allowed_uses=required_uses,
-            access_basis="zero_fee_plan",
-            source_basis_id="ALPACA-BASIC-US-MARKET-DATA-01",
-            license_id="alpaca-customer-agreement-engineering-unverified",
-            terms_url=("https://files.alpaca.markets/disclosures/library/TermsAndConditions.pdf"),
-            terms_content_sha256=(
-                "2dc774d4aeeafbe4c7f0565e7842d932bc8bc10488af805fce43b8734e7b9859"
-            ),
-            attribution="Alpaca Market Data Basic",
+            access_basis="engineering_contract",
+            source_basis_id="ENGINEERING-ALPACA-CONTRACT-01",
             distributions=(
                 SourceDistribution(
-                    dataset_id="alpaca-us-stock-bars-v2",
-                    distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+                    dataset_id=distribution_id,
+                    distribution_url=distribution_url,
                 ),
             ),
-            provider_id="alpaca-market-data-basic",
-            plan_id="basic-2026-08-15",
-            principal_classification="individual_non_commercial",
-            credential_kind="api_key_pair",
-            account_required=True,
-            fee_required=False,
-        ),
+        )
+        for dataset_id, distribution_id, distribution_url in (
+            (
+                "alpaca-us-stock-bars",
+                "alpaca-us-stock-bars-v2",
+                "https://data.alpaca.markets/v2/stocks/bars",
+            ),
+            (
+                "alpaca-us-corporate-actions-v1",
+                "alpaca-us-corporate-actions-v1",
+                "https://data.alpaca.markets/v1/corporate-actions",
+            ),
+            (
+                "alpaca-us-trading-calendar-v2",
+                "alpaca-us-trading-calendar-v2",
+                "https://paper-api.alpaca.markets/v2/calendar",
+            ),
+        )
+    )
+    policies = (
+        *engineering_collect_policies,
         SourcePolicyVersion(
             version_id="ticket-07-engineering/price-read-policy-v1",
             dataset_id="price-research-eligibility",
@@ -1510,6 +1558,16 @@ def build_us_zero_fee_engineering_authorization_policy(
         ...,
     ] = (
         ("alpaca-us-stock-bars", bars_actions, frozenset({"price_research"})),
+        (
+            "alpaca-us-corporate-actions-v1",
+            bars_actions,
+            frozenset({"price_research"}),
+        ),
+        (
+            "alpaca-us-trading-calendar-v2",
+            bars_actions,
+            frozenset({"price_research"}),
+        ),
         ("price-research-eligibility", read_actions, frozenset({"price_research"})),
         (
             "source-credential-metadata",
@@ -1528,7 +1586,7 @@ def build_us_zero_fee_engineering_authorization_policy(
             environments=frozenset({context.environment}),
             valid_from=context.issued_at,
             valid_to=context.expires_at,
-            allowed_uses=(required_uses if dataset_id == "alpaca-us-stock-bars" else frozenset()),
+            allowed_uses=(required_uses if dataset_id.startswith("alpaca-us-") else frozenset()),
         )
         for dataset_id, allowed_actions, purposes in entitlement_contracts
     )

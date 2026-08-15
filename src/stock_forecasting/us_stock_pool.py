@@ -86,6 +86,10 @@ class ZeroFeeSourceBundleMember:
         "candidate_terms_not_archived",
         "candidate_scope_limited",
     ]
+    materialization_role: Literal[
+        "required_observation",
+        "supplemental_qualification_reference",
+    ]
     known_gaps: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -95,6 +99,8 @@ class ZeroFeeSourceBundleMember:
             or not self.distribution_url.startswith("https://")
             or not self.qualification_scope
             or not self.schema_version
+            or self.materialization_role
+            not in {"required_observation", "supplemental_qualification_reference"}
             or not self.known_gaps
         ):
             raise ValueError("us_source_bundle_member_invalid")
@@ -108,6 +114,7 @@ class ZeroFeeSourceBundleMember:
             "schema_version": self.schema_version,
             "price_semantics": self.price_semantics,
             "qualification_status": self.qualification_status,
+            "materialization_role": self.materialization_role,
             "known_gaps": list(self.known_gaps),
         }
 
@@ -250,6 +257,13 @@ def load_us_stock_pool_manifest() -> UnitedStatesStockPoolManifest:
                             "candidate_scope_limited",
                         ],
                         member["qualification_status"],
+                    ),
+                    materialization_role=cast(
+                        Literal[
+                            "required_observation",
+                            "supplemental_qualification_reference",
+                        ],
+                        member["materialization_role"],
                     ),
                     known_gaps=tuple(cast(list[str], member["known_gaps"])),
                 )

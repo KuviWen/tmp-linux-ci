@@ -38,6 +38,7 @@ from stock_forecasting.platform.schema import (
     research_records,
     security_audit_events,
     source_credential_versions,
+    source_secret_cleanup_queue,
     trace_artifact_refs,
     work_attempts,
 )
@@ -476,6 +477,10 @@ class StateStore:
         if row is None:
             return None
         result = dict(row)
+        if result.get("expires_at") is None:
+            result.pop("expires_at", None)
+        if result.get("validation_evidence") is None:
+            result.pop("validation_evidence", None)
         if result.get("revoked_at") is None:
             result.pop("revoked_at", None)
         return result
@@ -488,6 +493,7 @@ class StateStore:
         readiness: str,
         reason_code: str,
         configured_at: str,
+        expires_at: str | None,
         authorization: dict[str, object],
         trace_id: str,
     ) -> dict[str, object]:
@@ -515,11 +521,13 @@ class StateStore:
                     readiness=readiness,
                     reason_code=reason_code,
                     configured_at=configured_at,
+                    expires_at=expires_at,
                     last_validated_at=None,
+                    validation_evidence=None,
                     revoked_at=None,
                 )
             )
-        return {
+        result: dict[str, object] = {
             "provider_id": provider_id,
             "readiness": readiness,
             "reason_code": reason_code,
@@ -528,6 +536,9 @@ class StateStore:
             "configured_at": configured_at,
             "last_validated_at": None,
         }
+        if expires_at is not None:
+            result["expires_at"] = expires_at
+        return result
 
     def rotate_source_credential(
         self,
@@ -537,6 +548,7 @@ class StateStore:
         readiness: str,
         reason_code: str,
         configured_at: str,
+        expires_at: str | None,
         authorization: dict[str, object],
         trace_id: str,
     ) -> tuple[dict[str, object], str]:
@@ -568,20 +580,33 @@ class StateStore:
                     readiness=readiness,
                     reason_code=reason_code,
                     configured_at=configured_at,
+                    expires_at=expires_at,
                     last_validated_at=None,
+                    validation_evidence=None,
                     revoked_at=None,
                 )
             )
+            connection.execute(
+                source_secret_cleanup_queue.insert().values(
+                    secret_ref_id=current["secret_ref_id"],
+                    provider_id=provider_id,
+                    queued_at=configured_at,
+                    completed_at=None,
+                )
+            )
+        outcome: dict[str, object] = {
+            "provider_id": provider_id,
+            "readiness": readiness,
+            "reason_code": reason_code,
+            "secret_ref_id": secret_ref_id,
+            "version": version,
+            "configured_at": configured_at,
+            "last_validated_at": None,
+        }
+        if expires_at is not None:
+            outcome["expires_at"] = expires_at
         return (
-            {
-                "provider_id": provider_id,
-                "readiness": readiness,
-                "reason_code": reason_code,
-                "secret_ref_id": secret_ref_id,
-                "version": version,
-                "configured_at": configured_at,
-                "last_validated_at": None,
-            },
+            outcome,
             str(current["secret_ref_id"]),
         )
 
@@ -621,11 +646,21 @@ class StateStore:
                     readiness="revoked",
                     reason_code="source_credential_revoked",
                     configured_at=current["configured_at"],
+                    expires_at=current["expires_at"],
                     last_validated_at=current["last_validated_at"],
+                    validation_evidence=current["validation_evidence"],
                     revoked_at=revoked_at,
                 )
             )
-        return {
+            connection.execute(
+                source_secret_cleanup_queue.insert().values(
+                    secret_ref_id=current["secret_ref_id"],
+                    provider_id=provider_id,
+                    queued_at=revoked_at,
+                    completed_at=None,
+                )
+            )
+        result: dict[str, object] = {
             "provider_id": provider_id,
             "readiness": "revoked",
             "reason_code": "source_credential_revoked",
@@ -635,6 +670,9 @@ class StateStore:
             "last_validated_at": current["last_validated_at"],
             "revoked_at": revoked_at,
         }
+        if current["expires_at"] is not None:
+            result["expires_at"] = current["expires_at"]
+        return result
 
     def record_source_credential_validation(
         self,
@@ -643,6 +681,9 @@ class StateStore:
         readiness: str,
         reason_code: str,
         validated_at: str,
+        expected_version: int,
+        expected_secret_ref_id: str,
+        validation_evidence: dict[str, object],
         authorization: dict[str, object],
         trace_id: str,
     ) -> dict[str, object]:
@@ -659,6 +700,11 @@ class StateStore:
             )
             if current is None or current["readiness"] == "revoked":
                 raise ImmutableStateConflict("source_credential_not_configured")
+            if (
+                int(current["version"]) != expected_version
+                or current["secret_ref_id"] != expected_secret_ref_id
+            ):
+                raise ImmutableStateConflict("source_credential_validation_stale")
             version = int(current["version"]) + 1
             self._insert_authorization_decision(
                 connection,
@@ -674,11 +720,13 @@ class StateStore:
                     readiness=readiness,
                     reason_code=reason_code,
                     configured_at=current["configured_at"],
+                    expires_at=current["expires_at"],
                     last_validated_at=validated_at,
+                    validation_evidence=validation_evidence,
                     revoked_at=None,
                 )
             )
-        return {
+        result = {
             "provider_id": provider_id,
             "readiness": readiness,
             "reason_code": reason_code,
@@ -687,6 +735,41 @@ class StateStore:
             "configured_at": current["configured_at"],
             "last_validated_at": validated_at,
         }
+        if current["expires_at"] is not None:
+            result["expires_at"] = current["expires_at"]
+        if validation_evidence:
+            result["validation_evidence"] = validation_evidence
+        return result
+
+    def list_pending_source_secret_cleanup(self, *, provider_id: str) -> list[str]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(source_secret_cleanup_queue.c.secret_ref_id)
+                .where(
+                    source_secret_cleanup_queue.c.provider_id == provider_id,
+                    source_secret_cleanup_queue.c.completed_at.is_(None),
+                )
+                .order_by(source_secret_cleanup_queue.c.queued_at)
+            ).scalars()
+            return [str(secret_ref_id) for secret_ref_id in rows]
+
+    def complete_source_secret_cleanup(
+        self,
+        *,
+        secret_ref_id: str,
+        completed_at: str,
+    ) -> None:
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                source_secret_cleanup_queue.update()
+                .where(
+                    source_secret_cleanup_queue.c.secret_ref_id == secret_ref_id,
+                    source_secret_cleanup_queue.c.completed_at.is_(None),
+                )
+                .values(completed_at=completed_at)
+            )
+            if result.rowcount != 1:
+                raise ImmutableStateConflict("source_secret_cleanup_not_pending")
 
     def get_price_research_eligibility(self, *, listing_id: str) -> dict[str, Any]:
         with self.engine.connect() as connection:

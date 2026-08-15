@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
+import time
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -21,6 +24,7 @@ from stock_forecasting.authorization import (
     SecurityContext,
 )
 from stock_forecasting.contracts import PredictionPayload
+from stock_forecasting.platform.state_store import ImmutableStateConflict
 
 OPENAPI_SOURCE = Path(__file__).parents[3] / "openapi" / "openapi.yaml"
 
@@ -35,6 +39,7 @@ P1_PHASE_BOUNDARIES = {
 
 class SourceCredentialWriteRequest(BaseModel):
     credential_fields: dict[str, str]
+    expires_at: str | None = None
 
 
 def _etag(payload: object) -> str:
@@ -51,12 +56,13 @@ def _parse_instant(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def _page(title: str, body: str) -> str:
+def _page(title: str, body: str, *, head_extra: str = "") -> str:
     return f"""<!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {head_extra}
   <title>{escape(title)}</title>
   <style>
     :root {{ color-scheme: light; font-family: system-ui, sans-serif; }}
@@ -136,6 +142,8 @@ def create_web_app(application: Application) -> FastAPI:
         docs_url=None,
         redoc_url=None,
     )
+    browser_sessions: dict[str, tuple[SecurityContext, str, float]] = {}
+    browser_session_ttl_seconds = 300
 
     @app.get("/openapi/openapi.yaml", include_in_schema=False)
     def openapi_source() -> FileResponse:
@@ -202,19 +210,29 @@ def create_web_app(application: Application) -> FastAPI:
         request: Request,
         authorization: str | None = Header(default=None, alias="Authorization"),
     ) -> SecurityContext:
-        if authorization is None:
+        if authorization is not None:
+            try:
+                client_host = request.client.host if request.client is not None else ""
+                return application.authenticate_local_request(
+                    authorization,
+                    client_host=client_host,
+                )
+            except IdentityVerificationError as error:
+                raise HTTPException(
+                    status_code=401,
+                    detail="authentication_required",
+                ) from error
+        session_id = request.cookies.get("stock_forecasting_operations_session")
+        session = browser_sessions.get(session_id or "")
+        if session is None or session[2] <= time.monotonic():
+            if session_id is not None:
+                browser_sessions.pop(session_id, None)
             raise HTTPException(status_code=401, detail="authentication_required")
-        try:
-            client_host = request.client.host if request.client is not None else ""
-            return application.authenticate_local_request(
-                authorization,
-                client_host=client_host,
-            )
-        except IdentityVerificationError as error:
-            raise HTTPException(
-                status_code=401,
-                detail="authentication_required",
-            ) from error
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            csrf_token = request.headers.get("X-CSRF-Token")
+            if csrf_token is None or not hmac.compare_digest(csrf_token, session[1]):
+                raise HTTPException(status_code=403, detail="csrf_validation_failed")
+        return session[0]
 
     research_authentication = Depends(authenticate_research_request)
 
@@ -357,12 +375,13 @@ def create_web_app(application: Application) -> FastAPI:
             outcome = application.operations_control.set_source_credential(
                 provider_id=provider_id,
                 credential_fields=body.credential_fields,
+                expires_at=body.expires_at,
                 trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
                 security_context=security_context,
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="source_provider_not_found") from error
-        except ValueError as error:
+        except (ImmutableStateConflict, ValueError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         if isinstance(outcome, PolicyDeniedOutcome):
             return authorization_denied(request, outcome)
@@ -382,12 +401,13 @@ def create_web_app(application: Application) -> FastAPI:
             outcome = application.operations_control.rotate_source_credential(
                 provider_id=provider_id,
                 credential_fields=body.credential_fields,
+                expires_at=body.expires_at,
                 trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
                 security_context=security_context,
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="source_provider_not_found") from error
-        except ValueError as error:
+        except (ImmutableStateConflict, ValueError) as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         if isinstance(outcome, PolicyDeniedOutcome):
             return authorization_denied(request, outcome)
@@ -407,7 +427,7 @@ def create_web_app(application: Application) -> FastAPI:
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="source_provider_not_found") from error
-        except ValueError as error:
+        except (ImmutableStateConflict, ValueError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         if isinstance(outcome, PolicyDeniedOutcome):
             return authorization_denied(request, outcome)
@@ -430,7 +450,7 @@ def create_web_app(application: Application) -> FastAPI:
             )
         except KeyError as error:
             raise HTTPException(status_code=404, detail="source_provider_not_found") from error
-        except ValueError as error:
+        except (ImmutableStateConflict, ValueError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         if isinstance(outcome, PolicyDeniedOutcome):
             return authorization_denied(request, outcome)
@@ -444,13 +464,20 @@ def create_web_app(application: Application) -> FastAPI:
     def source_credentials_page(
         request: Request,
         security_context: SecurityContext = research_authentication,
-    ) -> str | Response:
+    ) -> Response:
         outcome = application.operations_control.list_source_credentials(
             trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
             security_context=security_context,
         )
         if isinstance(outcome, PolicyDeniedOutcome):
             return authorization_denied(request, outcome)
+        session_id = secrets.token_urlsafe(32)
+        csrf_token = secrets.token_urlsafe(32)
+        browser_sessions[session_id] = (
+            security_context,
+            csrf_token,
+            time.monotonic() + browser_session_ttl_seconds,
+        )
         provider_sections: list[str] = []
         for provider in outcome:
             provider_id = escape(str(provider["provider_id"]), quote=True)
@@ -474,6 +501,7 @@ def create_web_app(application: Application) -> FastAPI:
                 'autocomplete="new-password" required></label>'
                 '<label>API secret key <input type="password" name="api_secret_key" '
                 'autocomplete="new-password" required></label>'
+                '<label>到期時間（選填） <input type="datetime-local" name="expires_at"></label>'
                 '<p><button type="button" data-operation="set">儲存</button> '
                 '<button type="button" data-operation="rotate">輪替</button> '
                 '<button type="button" data-operation="validate">驗證</button> '
@@ -487,23 +515,30 @@ def create_web_app(application: Application) -> FastAPI:
             "請使用提供者自己的連結完成重新申請。</p></header>"
             + "".join(provider_sections)
             + """<script>
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 for (const button of document.querySelectorAll('[data-operation]')) {
   button.addEventListener('click', async () => {
     const form = button.closest('form');
     const operation = button.dataset.operation;
     const base = form.dataset.endpoint;
     const fields = Object.fromEntries(new FormData(form));
+    const expiresAt = fields.expires_at ? new Date(fields.expires_at).toISOString() : null;
+    delete fields.expires_at;
     const request = operation === 'set'
-      ? {url: base, method: 'PUT', body: {credential_fields: fields}}
+      ? {url: base, method: 'PUT', body: {credential_fields: fields, expires_at: expiresAt}}
       : operation === 'rotate'
-        ? {url: `${base}/rotations`, method: 'POST', body: {credential_fields: fields}}
+        ? {
+            url: `${base}/rotations`,
+            method: 'POST',
+            body: {credential_fields: fields, expires_at: expiresAt},
+          }
         : operation === 'validate'
           ? {url: `${base}/validations`, method: 'POST'}
           : {url: base, method: 'DELETE'};
     const response = await fetch(request.url, {
       method: request.method,
       credentials: 'same-origin',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
       body: request.body ? JSON.stringify(request.body) : undefined,
     });
     const result = await response.json();
@@ -515,7 +550,23 @@ for (const button of document.querySelectorAll('[data-operation]')) {
 }
 </script></main>"""
         )
-        return _page("來源憑證管理", body)
+        response = HTMLResponse(
+            _page(
+                "來源憑證管理",
+                body,
+                head_extra=(f'<meta name="csrf-token" content="{escape(csrf_token, quote=True)}">'),
+            )
+        )
+        response.set_cookie(
+            "stock_forecasting_operations_session",
+            session_id,
+            httponly=True,
+            max_age=browser_session_ttl_seconds,
+            path="/api/v1/operations/source-credentials",
+            samesite="strict",
+            secure=request.url.scheme == "https",
+        )
+        return response
 
     @app.get("/research", response_class=HTMLResponse, response_model=None)
     def research_matrix(
@@ -768,6 +819,10 @@ for (const button of document.querySelectorAll('[data-operation]')) {
             None,
         )
         source_basis = cast(dict[str, object], outcome["source_basis"])
+        downstream_readiness = cast(dict[str, object], outcome["downstream_readiness"])
+        downstream_text = "、".join(
+            f"{name}={escape(str(readiness))}" for name, readiness in downstream_readiness.items()
+        )
         if source_basis.get("basis_type") == "zero_fee_plan":
             provider_name = (
                 "Alpaca Market Data Basic"
@@ -792,6 +847,7 @@ for (const button of document.querySelectorAll('[data-operation]')) {
             '<section class="panel"><h2>資格依賴</h2><dl>'
             f"{basis_details}"
             f"<dt>原因</dt><dd>{escape(str(outcome['reason_code']))}</dd>"
+            f"<dt>下游一致阻擋</dt><dd>{downstream_text}</dd>"
             f"<dt>資料集版本</dt><dd>{escape(str(dataset_id)) if dataset_id else '尚未建立'}</dd>"
             "<dt>調整版本</dt>"
             f"<dd>{escape(str(adjustment_id)) if adjustment_id else '尚未建立'}</dd>"

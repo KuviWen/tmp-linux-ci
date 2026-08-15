@@ -10,6 +10,7 @@ import pytest
 
 from stock_forecasting.alpaca_market_data import (
     AlpacaCredentialValidator,
+    AlpacaLiveContractValidator,
     AlpacaSourceCollector,
     AlpacaSourceDecoder,
     ProviderHttpRequest,
@@ -20,6 +21,7 @@ from stock_forecasting.data_supply import (
     CollectedSourcePartition,
     CompanyActionRecord,
     MarketSessionRecord,
+    SourceBundleMemberRequest,
     SourceCollectionCoverage,
     SourceCredentialRequired,
     SourcePartitionRequest,
@@ -27,6 +29,21 @@ from stock_forecasting.data_supply import (
     SymbolIdentityRecord,
 )
 from stock_forecasting.source_credentials import CredentialNotReady
+
+
+def _bundle_member_requests() -> tuple[SourceBundleMemberRequest, ...]:
+    return (
+        SourceBundleMemberRequest(
+            dataset_id="alpaca-us-corporate-actions-v1",
+            distribution_id="alpaca-us-corporate-actions-v1",
+            distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+        ),
+        SourceBundleMemberRequest(
+            dataset_id="alpaca-us-trading-calendar-v2",
+            distribution_id="alpaca-us-trading-calendar-v2",
+            distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+        ),
+    )
 
 
 class LiteralProviderTransport:
@@ -185,6 +202,90 @@ def test_alpaca_credential_validator_preserves_actionable_failure_reasons(
     assert result.reason_code == expected_reason
 
 
+def test_alpaca_live_contract_probes_pool_data_pagination_actions_and_calendar() -> None:
+    regular_symbols = "AAPL,AMZN,BRK.B,GME,GOOG,GOOGL,META,NVDA,TSM"
+    transport = SequenceProviderTransport(
+        [
+            ProviderHttpResponse(
+                200,
+                json.dumps(
+                    {
+                        "bars": {
+                            symbol: [
+                                {
+                                    "t": "2024-01-03T05:00:00Z",
+                                    "o": 1,
+                                    "h": 2,
+                                    "l": 0.5,
+                                    "c": 1.5,
+                                    "v": 100,
+                                }
+                            ]
+                            for symbol in regular_symbols.split(",")
+                        },
+                        "next_page_token": None,
+                    }
+                ).encode(),
+            ),
+            ProviderHttpResponse(
+                200,
+                b'{"bars":{"SIVB":[{"t":"2023-03-08T05:00:00Z","o":267.83,"h":276.42,"l":250.01,"c":267.83,"v":11230900}]},"next_page_token":null}',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'{"bars":{"AAPL":[{"t":"2024-01-03T05:00:00Z","o":184.22,"h":185.88,"l":183.43,"c":184.25,"v":58414460}]},"next_page_token":"live-page-2"}',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'{"bars":{"AAPL":[{"t":"2024-01-04T05:00:00Z","o":182.15,"h":183.09,"l":180.88,"c":181.91,"v":71983600}]},"next_page_token":null}',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'{"cash_dividends":[{"id":"live-ca-aapl","symbol":"AAPL","cusip":"037833100","rate":"0.24","special":false,"foreign":false,"process_date":"2024-02-08","ex_date":"2024-02-09"}],"next_page_token":null}',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'[{"date":"2024-11-29","open":"09:30","close":"13:00"}]',
+            ),
+        ]
+    )
+
+    result = AlpacaLiveContractValidator(transport).validate(
+        {
+            "api_key_id": "PK-LIVE-CONTRACT",
+            "api_secret_key": "live-contract-secret",
+        }
+    )
+
+    assert result.readiness == "valid"
+    assert result.reason_code == "source_credential_valid"
+    assert result.evidence == {
+        "contract_id": "alpaca-ticket-07-live-v1",
+        "live_validation": "passed",
+        "ticker_count": 10,
+        "pagination_pages": 2,
+        "datasets": [
+            "alpaca-us-stock-bars-v2",
+            "alpaca-us-corporate-actions-v1",
+            "alpaca-us-trading-calendar-v2",
+        ],
+    }
+    assert [request.url for request in transport.requests] == [
+        "https://data.alpaca.markets/v2/stocks/bars",
+        "https://data.alpaca.markets/v2/stocks/bars",
+        "https://data.alpaca.markets/v2/stocks/AAPL/bars",
+        "https://data.alpaca.markets/v2/stocks/AAPL/bars",
+        "https://data.alpaca.markets/v1/corporate-actions",
+        "https://paper-api.alpaca.markets/v2/calendar",
+    ]
+    assert transport.requests[0].query["symbols"] == regular_symbols
+    assert transport.requests[1].query["symbols"] == "SIVB"
+    assert transport.requests[2].query["limit"] == "1"
+    assert transport.requests[3].query["page_token"] == "live-page-2"
+    assert all("PK-LIVE-CONTRACT" not in repr(request) for request in transport.requests)
+    assert all("live-contract-secret" not in repr(request) for request in transport.requests)
+
+
 @pytest.mark.parametrize(
     "reason_code",
     [
@@ -221,6 +322,7 @@ def test_alpaca_collector_never_contacts_provider_without_a_valid_credential(
         expected_checkpoint=None,
         distribution_id="alpaca-us-stock-bars-v2",
         distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+        bundle_members=_bundle_member_requests(),
     )
 
     with pytest.raises(SourceCredentialRequired, match=reason_code):
@@ -242,7 +344,7 @@ def test_alpaca_collector_builds_one_immutable_paginated_source_bundle() -> None
             ),
             ProviderHttpResponse(
                 200,
-                b'{"corporate_actions":[{"id":"ca-dividend-aapl","type":"cash_dividend","symbol":"AAPL","ex_date":"2024-01-03","cash":"0.24"},{"id":"ca-name-meta","type":"name_change","old_symbol":"FB","new_symbol":"META","effective_date":"2022-06-09"}],"next_page_token":null}',
+                b'{"cash_dividends":[{"id":"ca-dividend-aapl","symbol":"AAPL","cusip":"037833100","rate":"0.24","special":false,"foreign":false,"process_date":"2024-01-02","ex_date":"2024-01-03"}],"name_changes":[{"id":"ca-name-meta","old_symbol":"FB","old_cusip":"30303M102","new_symbol":"META","new_cusip":"30303M102","process_date":"2022-06-09"}],"next_page_token":null}',
             ),
             ProviderHttpResponse(
                 200,
@@ -277,6 +379,7 @@ def test_alpaca_collector_builds_one_immutable_paginated_source_bundle() -> None
         expected_checkpoint="sha256:prior-observation",
         distribution_id="alpaca-us-stock-bars-v2",
         distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+        bundle_members=_bundle_member_requests(),
     )
 
     collection = collector.collect(request)
@@ -321,11 +424,9 @@ def test_alpaca_collector_builds_one_immutable_paginated_source_bundle() -> None
     }
     assert transport.requests[1].query["page_token"] == "bars-page-2"
     assert transport.requests[2].query == {
-        "data_quality": "complete",
         "end": "2024-01-03",
         "limit": "1000",
         "region": "us",
-        "sort": "asc",
         "start": "2024-01-03",
         "symbols": "AAPL,FB,META",
     }
@@ -370,6 +471,7 @@ def test_alpaca_collector_preserves_provider_retry_after_and_policy_id() -> None
         expected_checkpoint="sha256:stable-before-rate-limit",
         distribution_id="alpaca-us-stock-bars-v2",
         distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+        bundle_members=_bundle_member_requests(),
     )
 
     with pytest.raises(SourceRateLimited) as raised:
@@ -392,7 +494,7 @@ def test_alpaca_collector_marks_a_missing_symbol_session_incomplete() -> None:
                 ProviderHttpResponse(200, b'{"bars":{},"next_page_token":null}'),
                 ProviderHttpResponse(
                     200,
-                    b'{"corporate_actions":[],"next_page_token":null}',
+                    b'{"next_page_token":null}',
                 ),
                 ProviderHttpResponse(
                     200,
@@ -414,6 +516,7 @@ def test_alpaca_collector_marks_a_missing_symbol_session_incomplete() -> None:
         expected_checkpoint=None,
         distribution_id="alpaca-us-stock-bars-v2",
         distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+        bundle_members=_bundle_member_requests(),
     )
 
     collection = collector.collect(request)
@@ -468,29 +571,38 @@ def test_alpaca_decoder_uses_permanent_listing_ids_and_internal_action_semantics
             ],
             "corporate_action_pages": [
                 {
-                    "corporate_actions": [
+                    "cash_dividends": [
                         {
                             "id": "ca-dividend-aapl",
-                            "type": "cash_dividend",
                             "symbol": "AAPL",
+                            "cusip": "037833100",
                             "ex_date": "2024-02-09",
-                            "cash": "0.24",
-                        },
+                            "process_date": "2024-02-08",
+                            "rate": "0.24",
+                            "special": False,
+                            "foreign": False,
+                        }
+                    ],
+                    "forward_splits": [
                         {
                             "id": "ca-split-aapl",
-                            "type": "forward_split",
                             "symbol": "AAPL",
-                            "effective_date": "2020-08-31",
+                            "cusip": "037833100",
+                            "process_date": "2020-08-31",
+                            "ex_date": "2020-08-31",
                             "old_rate": "1",
                             "new_rate": "4",
-                        },
+                        }
+                    ],
+                    "name_changes": [
                         {
                             "id": "ca-name-meta",
-                            "type": "name_change",
                             "old_symbol": "FB",
+                            "old_cusip": "30303M102",
                             "new_symbol": "META",
-                            "effective_date": "2022-06-09",
-                        },
+                            "new_cusip": "30303M102",
+                            "process_date": "2022-06-09",
+                        }
                     ],
                     "next_page_token": None,
                 }
@@ -584,6 +696,81 @@ def test_alpaca_decoder_uses_permanent_listing_ids_and_internal_action_semantics
     assert set(decoded.identity_assertion_ids) == {
         f"alpaca-symbol:{aapl_listing_id}:AAPL",
         f"alpaca-symbol:{meta_listing_id}:META",
+        "ca-dividend-aapl",
         "ca-name-meta",
+        "ca-split-aapl",
     }
     assert decoded.quality_issues == ()
+
+
+def test_alpaca_decoder_marks_changed_checkpoint_as_a_correction() -> None:
+    collection = CollectedSourcePartition(
+        request_id="request-ticket-07-correction",
+        source_id="alpaca-us-stock-bars",
+        acquired_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        sanitized_source_uri="https://data.alpaca.markets/v2/stocks/bars",
+        media_type="application/json",
+        raw_payload=json.dumps(
+            {
+                "provider_id": "alpaca-market-data-basic",
+                "schema_version": "alpaca-source-bundle-v1",
+                "bars_pages": [{"bars": {}, "next_page_token": None}],
+                "corporate_action_pages": [{"next_page_token": None}],
+                "calendar": [],
+            }
+        ).encode(),
+        checkpoint_before="sha256:prior-version",
+        checkpoint_after="sha256:corrected-version",
+        coverage=SourceCollectionCoverage(
+            requested_start=date(2024, 1, 3),
+            requested_end=date(2024, 1, 3),
+            observed_start=None,
+            observed_end=None,
+            complete=False,
+        ),
+        source_revision="sha256:corrected-version",
+    )
+
+    decoded = AlpacaSourceDecoder(
+        source_id="alpaca-us-stock-bars",
+        listing_symbols={"70000000-0000-4000-8000-000000000001": ("AAPL",)},
+    ).decode(collection)
+
+    assert decoded.revision_kind == "correction"
+
+
+def test_alpaca_decoder_flags_a_reference_graph_company_action_that_is_missing() -> None:
+    collection = CollectedSourcePartition(
+        request_id="request-ticket-07-missing-action",
+        source_id="alpaca-us-stock-bars",
+        acquired_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        sanitized_source_uri="https://data.alpaca.markets/v2/stocks/bars",
+        media_type="application/json",
+        raw_payload=json.dumps(
+            {
+                "provider_id": "alpaca-market-data-basic",
+                "schema_version": "alpaca-source-bundle-v1",
+                "bars_pages": [{"bars": {}, "next_page_token": None}],
+                "corporate_action_pages": [{"next_page_token": None}],
+                "calendar": [],
+            }
+        ).encode(),
+        checkpoint_before=None,
+        checkpoint_after="sha256:without-required-action",
+        coverage=SourceCollectionCoverage(
+            requested_start=date(2024, 1, 3),
+            requested_end=date(2024, 1, 3),
+            observed_start=None,
+            observed_end=None,
+            complete=False,
+        ),
+        source_revision="sha256:without-required-action",
+    )
+
+    decoded = AlpacaSourceDecoder(
+        source_id="alpaca-us-stock-bars",
+        listing_symbols={"70000000-0000-4000-8000-000000000001": ("AAPL",)},
+        expected_company_action_ids=frozenset({"ca-required-aapl"}),
+    ).decode(collection)
+
+    assert decoded.quality_issues == ("missing_company_action",)
