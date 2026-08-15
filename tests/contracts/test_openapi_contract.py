@@ -121,6 +121,7 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "provider_id",
         "qualification_status",
         "source_basis_id",
+        "supplemental_references",
         "terms_content_sha256",
         "terms_url",
     }
@@ -204,6 +205,8 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "revoked_at",
         "registration_url",
         "key_management_url",
+        "required_uses",
+        "source_basis",
     }
     assert "credential_fields" not in credential["properties"]
     assert "expired" in credential["properties"]["readiness"]["enum"]

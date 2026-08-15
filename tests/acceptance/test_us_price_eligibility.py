@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import NoReturn
+from typing import Literal, NoReturn
 
+import pytest
 from fastapi.testclient import TestClient
 
 from stock_forecasting.adapters.rest import create_web_app
@@ -27,6 +29,7 @@ from stock_forecasting.authorization import (
 )
 from stock_forecasting.data_supply import (
     DataSupply,
+    LoadedSourcePartition,
     SourceBundleMemberRequest,
     SourceCredentialRequired,
     SourcePartitionRequest,
@@ -47,16 +50,20 @@ def _bundle_member_requests() -> tuple[SourceBundleMemberRequest, ...]:
             dataset_id="alpaca-us-corporate-actions-v1",
             distribution_id="alpaca-us-corporate-actions-v1",
             distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+            schema_version="alpaca-corporate-actions-v1",
         ),
         SourceBundleMemberRequest(
             dataset_id="alpaca-us-trading-calendar-v2",
             distribution_id="alpaca-us-trading-calendar-v2",
             distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+            schema_version="alpaca-trading-calendar-v2",
         ),
     )
 
 
 class CredentialRequiredPriceAdapter:
+    source_access_mode = "engineering_double"
+
     def __init__(self, reason_code: str) -> None:
         self.reason_code = reason_code
         self.calls = 0
@@ -64,6 +71,10 @@ class CredentialRequiredPriceAdapter:
     def load(self, request: SourcePartitionRequest) -> NoReturn:
         self.calls += 1
         raise SourceCredentialRequired(self.reason_code)
+
+
+class LiveProviderCredentialRequiredAdapter(CredentialRequiredPriceAdapter):
+    source_access_mode = "live_provider"
 
 
 class EngineeringCredentialResolver:
@@ -85,6 +96,36 @@ class EngineeringProviderTransport:
         return self.responses.pop(0)
 
 
+class BundleQualityMutationAdapter:
+    source_access_mode = "engineering_double"
+
+    def __init__(
+        self,
+        delegate: AlpacaPriceSourceAdapter,
+        problem: Literal["schema", "coverage", "duplicate"],
+    ) -> None:
+        self._delegate = delegate
+        self._problem = problem
+
+    def load(self, request: SourcePartitionRequest) -> LoadedSourcePartition:
+        loaded = self._delegate.load(request)
+        members = loaded.collection.bundle_members
+        if self._problem == "duplicate":
+            members = (*members, members[-1])
+        else:
+            members = tuple(
+                (
+                    replace(member, schema_version="unexpected-schema-v9")
+                    if self._problem == "schema"
+                    else replace(member, coverage=replace(member.coverage, complete=False))
+                )
+                if member.dataset_id == "alpaca-us-trading-calendar-v2"
+                else member
+                for member in members
+            )
+        return replace(loaded, collection=replace(loaded.collection, bundle_members=members))
+
+
 def _qualified_zero_fee_policy(
     identity: LocalApiKeyIdentity,
     now: datetime,
@@ -101,7 +142,10 @@ def _qualified_zero_fee_policy(
     )
     collect_actions: frozenset[AuthorizationAction] = frozenset({"market_data.collect"})
     read_actions: frozenset[AuthorizationAction] = frozenset({"price_research_eligibility.read"})
-    grant_actions = collect_actions | read_actions
+    credential_actions: frozenset[AuthorizationAction] = frozenset(
+        {"source_credential.read", "source_credential.manage"}
+    )
+    grant_actions = collect_actions | read_actions | credential_actions
     engineering_source_policies = tuple(
         SourcePolicyVersion(
             version_id=f"policy-ticket-07-{dataset_id}-v1",
@@ -180,6 +224,15 @@ def _qualified_zero_fee_policy(
                 data_protection_class="licensed",
                 resource_states=frozenset({"active"}),
             ),
+            SourcePolicyVersion(
+                version_id="policy-ticket-07-credential-manage-v1",
+                dataset_id="source-credential-metadata",
+                allowed_actions=credential_actions,
+                purposes=frozenset({"source_administration"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+            ),
         ),
         source_entitlements=(
             *engineering_entitlements,
@@ -190,6 +243,17 @@ def _qualified_zero_fee_policy(
                 status="active",
                 allowed_actions=read_actions,
                 purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+            SourceEntitlement(
+                version_id="entitlement-ticket-07-credential-manage-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id="source-credential-metadata",
+                status="active",
+                allowed_actions=credential_actions,
+                purposes=frozenset({"source_administration"}),
                 environments=frozenset({"development"}),
                 valid_from=now - timedelta(days=1),
                 valid_to=now + timedelta(days=1),
@@ -205,7 +269,12 @@ def test_valid_source_policy_with_missing_credential_fails_closed_before_network
     identity = LocalApiKeyIdentity.issue(
         owner="ticket-07-qualified-individual",
         environment="development",
-        scopes={"market_data.collect", "price_research_eligibility.read"},
+        scopes={
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "source_credential.manage",
+            "source_credential.read",
+        },
         issued_at=now - timedelta(hours=1),
         expires_at=now + timedelta(hours=23),
         data_protection_classes={"licensed"},
@@ -241,6 +310,7 @@ def test_valid_source_policy_with_missing_credential_fails_closed_before_network
         distribution_url=ALPACA_BARS_DISTRIBUTION_URL,
         source_basis_id=ENGINEERING_SOURCE_BASIS_ID,
         bundle_members=_bundle_member_requests(),
+        expected_company_action_ids=frozenset({"ca-dividend-aapl"}),
     )
 
     outcome = data_supply.materialize(request)
@@ -313,7 +383,12 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
     identity = LocalApiKeyIdentity.issue(
         owner="ticket-07-engineering-contract",
         environment="development",
-        scopes={"market_data.collect", "price_research_eligibility.read"},
+        scopes={
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "source_credential.manage",
+            "source_credential.read",
+        },
         issued_at=now - timedelta(hours=1),
         expires_at=now + timedelta(hours=23),
         data_protection_classes={"licensed"},
@@ -332,6 +407,30 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
                 200,
                 b'[{"date":"2024-01-03","open":"09:30","close":"16:00"}]',
             ),
+            ProviderHttpResponse(
+                200,
+                b'{"bars":{"AAPL":[{"t":"2024-01-03T05:00:00Z","o":184.22,"h":185.88,"l":183.43,"c":184.30,"v":58414460}]},"next_page_token":null}',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'{"cash_dividends":[{"id":"ca-dividend-aapl","symbol":"AAPL","cusip":"037833100","rate":"0.24","special":false,"foreign":false,"process_date":"2024-02-08","ex_date":"2024-02-09"}],"next_page_token":null}',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'[{"date":"2024-01-03","open":"09:30","close":"16:00"}]',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'{"bars":{"AAPL":[{"t":"2024-01-03T05:00:00Z","o":184.22,"h":185.88,"l":183.43,"c":184.30,"v":58414460}]},"next_page_token":null}',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'{"cash_dividends":[],"next_page_token":null}',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'[{"date":"2024-01-03","open":"09:30","close":"16:00"}]',
+            ),
         ]
     )
     listing_symbols = {listing_id: ("AAPL",)}
@@ -340,6 +439,7 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
         mode="current",
         adapter_version="alpaca-market-data-basic-v1",
         rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+        source_access_mode="engineering_double",
         collector=AlpacaSourceCollector(
             source_id=ALPACA_SOURCE_ID,
             provider_id="alpaca-market-data-basic",
@@ -354,15 +454,21 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
             listing_symbols=listing_symbols,
         ),
     )
-    state_store = StateStore(
-        f"sqlite+pysqlite:///{tmp_path / 'ticket-07-us-published.db'}",
-        create_schema=True,
+    policy = _qualified_zero_fee_policy(identity, now)
+    application = build_test_application(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'ticket-07-us-published.db'}",
+        object_root=tmp_path / "objects",
+        observed_at=now,
+        authorization_time=now,
+        local_identity=identity,
+        authorization_policy_override=policy,
     )
+    state_store = application.state_store
     data_supply = DataSupply(
-        authorization_policy=_qualified_zero_fee_policy(identity, now),
+        authorization_policy=policy,
         security_context=identity.context,
         adapters={ALPACA_SOURCE_ID: adapter},
-        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        object_repository=application.object_repository,
         state_store=state_store,
         clock=lambda: now,
     )
@@ -379,6 +485,7 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
         distribution_url=ALPACA_BARS_DISTRIBUTION_URL,
         source_basis_id=ENGINEERING_SOURCE_BASIS_ID,
         bundle_members=_bundle_member_requests(),
+        expected_company_action_ids=frozenset({"ca-dividend-aapl"}),
     )
 
     outcome = data_supply.materialize(request)
@@ -416,6 +523,168 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
     }
     assert all(receipt["payload"]["policy_decision_id"] for receipt in member_receipts)
     assert all(receipt["payload"]["raw_object_id"] for receipt in member_receipts)
+
+    correction = data_supply.materialize(
+        replace(
+            request,
+            request_id="request-ticket-07-engineering-correction",
+            trace_id="trace-p2-trace-us-01-engineering-correction",
+            expected_checkpoint=outcome.checkpoint,
+            revision_kind="correction",
+        )
+    )
+
+    assert correction.status == "quarantined"
+    assert correction.reason_code == "correction_requires_review"
+    assert correction.dataset_version_id is None
+    assert len(transport.requests) == 6
+
+    missing_action = data_supply.materialize(
+        replace(
+            request,
+            request_id="request-ticket-07-missing-reference-action",
+            trace_id="trace-p2-trace-us-01-missing-reference-action",
+            expected_checkpoint=correction.checkpoint,
+            expected_company_action_ids=frozenset({"ca-dividend-aapl"}),
+            revision_kind="correction",
+        )
+    )
+
+    assert missing_action.status == "quarantined"
+    assert missing_action.reason_code == "missing_company_action"
+    assert missing_action.dataset_version_id is None
+    assert len(transport.requests) == 9
+
+    configured = application.operations_control.set_source_credential(
+        provider_id="alpaca-market-data-basic",
+        credential_fields={
+            "api_key_id": "PK-ENGINEERING-READINESS",
+            "api_secret_key": "engineering-readiness-secret",
+        },
+        trace_id="trace-ticket-07-readiness-set",
+        security_context=identity.context,
+    )
+    assert isinstance(configured, dict)
+    revoked = application.operations_control.revoke_source_credential(
+        provider_id="alpaca-market-data-basic",
+        trace_id="trace-ticket-07-readiness-revoke",
+        security_context=identity.context,
+    )
+    assert isinstance(revoked, dict)
+    eligibility = application.price_eligibility_query.get_listing(
+        listing_id=listing_id,
+        trace_id="trace-ticket-07-readiness-query",
+        security_context=identity.context,
+    )
+
+    assert isinstance(eligibility, dict)
+    assert eligibility["status"] == "credential_required"
+    assert eligibility["reason_code"] == "source_credential_revoked"
+    assert eligibility["downstream_readiness"] == {
+        "new_collection": "credential_required",
+        "feature_materialization": "credential_required",
+        "training": "credential_required",
+        "research_display": "credential_required",
+    }
+
+
+@pytest.mark.parametrize(
+    ("problem", "expected_reason"),
+    [
+        ("schema", "bundle_member_schema_incompatible"),
+        ("coverage", "bundle_member_incomplete_coverage"),
+        ("duplicate", "bundle_member_incomplete_coverage"),
+    ],
+)
+def test_bundle_member_quality_issue_is_quarantined_before_dataset_publication(
+    tmp_path: Path,
+    problem: Literal["schema", "coverage", "duplicate"],
+    expected_reason: str,
+) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    listing_id = "70000000-0000-4000-8000-000000000001"
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-bundle-quality",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    transport = EngineeringProviderTransport(
+        [
+            ProviderHttpResponse(
+                200,
+                b'{"bars":{"AAPL":[{"t":"2024-01-03T05:00:00Z","o":184.22,"h":185.88,"l":183.43,"c":184.25,"v":58414460}]},"next_page_token":null}',
+            ),
+            ProviderHttpResponse(200, b'{"cash_dividends":[],"next_page_token":null}'),
+            ProviderHttpResponse(
+                200,
+                b'[{"date":"2024-01-03","open":"09:30","close":"16:00"}]',
+            ),
+        ]
+    )
+    listing_symbols = {listing_id: ("AAPL",)}
+    delegate = AlpacaPriceSourceAdapter(
+        source_id=ALPACA_SOURCE_ID,
+        mode="current",
+        adapter_version="alpaca-market-data-basic-v1",
+        rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+        source_access_mode="engineering_double",
+        collector=AlpacaSourceCollector(
+            source_id=ALPACA_SOURCE_ID,
+            provider_id="alpaca-market-data-basic",
+            listing_symbols=listing_symbols,
+            credential_resolver=EngineeringCredentialResolver(),
+            transport=transport,
+            clock=lambda: now,
+            rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+        ),
+        decoder=AlpacaSourceDecoder(
+            source_id=ALPACA_SOURCE_ID,
+            listing_symbols=listing_symbols,
+        ),
+    )
+    state_store = StateStore(
+        f"sqlite+pysqlite:///{tmp_path / 'ticket-07-bundle-quality.db'}",
+        create_schema=True,
+    )
+    request = SourcePartitionRequest(
+        request_id="request-ticket-07-bundle-quality",
+        trace_id="trace-ticket-07-bundle-quality",
+        source_id=ALPACA_SOURCE_ID,
+        mode="current",
+        listing_ids=(listing_id,),
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        expected_checkpoint=None,
+        distribution_id=ALPACA_BARS_DISTRIBUTION_ID,
+        distribution_url=ALPACA_BARS_DISTRIBUTION_URL,
+        source_basis_id=ENGINEERING_SOURCE_BASIS_ID,
+        bundle_members=_bundle_member_requests(),
+    )
+
+    outcome = DataSupply(
+        authorization_policy=_qualified_zero_fee_policy(identity, now),
+        security_context=identity.context,
+        adapters={ALPACA_SOURCE_ID: BundleQualityMutationAdapter(delegate, problem)},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=state_store,
+        clock=lambda: now,
+    ).materialize(request)
+
+    assert outcome.status == "quarantined"
+    assert outcome.reason_code == expected_reason
+    assert outcome.raw_object_id is not None
+    assert outcome.dataset_version_id is None
+    trace = state_store.get_trace_evidence(request.trace_id)
+    artifacts = [
+        state_store.get_canonical_artifact(artifact_id) for artifact_id in trace["artifact_ids"]
+    ]
+    assert any(
+        artifact["artifact_kind"] == "source_bundle_member_receipt" for artifact in artifacts
+    )
+    assert not any(artifact["artifact_kind"] == "dataset_version" for artifact in artifacts)
 
 
 def test_bundle_member_policy_is_checked_before_any_provider_contact(tmp_path: Path) -> None:
@@ -470,6 +739,49 @@ def test_bundle_member_policy_is_checked_before_any_provider_contact(tmp_path: P
     assert outcome.status == "policy_blocked"
     assert adapter.calls == 0
     assert outcome.source_basis_id == ENGINEERING_SOURCE_BASIS_ID
+
+
+def test_engineering_contract_cannot_authorize_a_live_provider_adapter(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-live-provider-boundary",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    adapter = LiveProviderCredentialRequiredAdapter("source_credential_missing")
+    outcome = DataSupply(
+        authorization_policy=_qualified_zero_fee_policy(identity, now),
+        security_context=identity.context,
+        adapters={ALPACA_SOURCE_ID: adapter},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=StateStore(
+            f"sqlite+pysqlite:///{tmp_path / 'ticket-07-live-provider-boundary.db'}",
+            create_schema=True,
+        ),
+        clock=lambda: now,
+    ).materialize(
+        SourcePartitionRequest(
+            request_id="request-ticket-07-live-provider-boundary",
+            trace_id="trace-ticket-07-live-provider-boundary",
+            source_id=ALPACA_SOURCE_ID,
+            mode="current",
+            listing_ids=("70000000-0000-4000-8000-000000000001",),
+            start_date=date(2024, 1, 3),
+            end_date=date(2024, 1, 3),
+            expected_checkpoint=None,
+            distribution_id=ALPACA_BARS_DISTRIBUTION_ID,
+            distribution_url=ALPACA_BARS_DISTRIBUTION_URL,
+            source_basis_id=ENGINEERING_SOURCE_BASIS_ID,
+            bundle_members=_bundle_member_requests(),
+        )
+    )
+
+    assert outcome.status == "policy_blocked"
+    assert outcome.policy_reason_code == "engineering_contract_live_provider_denied"
+    assert adapter.calls == 0
 
 
 def test_candidate_source_basis_has_no_collect_policy_and_keeps_us_identity(

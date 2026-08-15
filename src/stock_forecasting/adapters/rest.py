@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -185,6 +186,26 @@ def create_web_app(application: Application) -> FastAPI:
         return JSONResponse(
             payload,
             status_code=error.status_code,
+            media_type="application/problem+json",
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def redacted_request_validation(
+        request: Request,
+        _error: RequestValidationError,
+    ) -> JSONResponse:
+        trace_id = request.headers.get("X-Trace-Id", f"trace-{uuid4()}")
+        return JSONResponse(
+            {
+                "type": "https://example.invalid/problems/request-validation-failed",
+                "title": "請求格式無效",
+                "status": 422,
+                "detail": "The request body does not match the required contract.",
+                "instance": request.url.path,
+                "trace_id": trace_id,
+                "code": "request_validation_failed",
+            },
+            status_code=422,
             media_type="application/problem+json",
         )
 

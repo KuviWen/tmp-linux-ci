@@ -32,7 +32,14 @@
         "price_semantics": "unadjusted",
         "qualification_status": "candidate_terms_not_archived",
         "materialization_role": "required_observation",
-        "known_gaps": ["realized_depth_requires_live_probe"]
+        "known_gaps": ["realized_depth_requires_live_probe"],
+        "allowed_uses": [],
+        "rights_status": "unverified",
+        "attribution_requirement": "unresolved",
+        "retention_limit": "unresolved",
+        "deletion_requirement": "unresolved",
+        "effective_from": null,
+        "effective_to": null
       },
       {
         "provider_id": "alpaca-market-data-basic",
@@ -43,7 +50,14 @@
         "price_semantics": null,
         "qualification_status": "candidate_terms_not_archived",
         "materialization_role": "required_observation",
-        "known_gaps": ["provider_creation_time_not_guaranteed"]
+        "known_gaps": ["provider_creation_time_not_guaranteed"],
+        "allowed_uses": [],
+        "rights_status": "unverified",
+        "attribution_requirement": "unresolved",
+        "retention_limit": "unresolved",
+        "deletion_requirement": "unresolved",
+        "effective_from": null,
+        "effective_to": null
       },
       {
         "provider_id": "alpaca-market-data-basic",
@@ -54,8 +68,17 @@
         "price_semantics": null,
         "qualification_status": "candidate_terms_not_archived",
         "materialization_role": "required_observation",
-        "known_gaps": ["calendar_history_subject_to_provider_coverage"]
-      },
+        "known_gaps": ["calendar_history_subject_to_provider_coverage"],
+        "allowed_uses": [],
+        "rights_status": "unverified",
+        "attribution_requirement": "unresolved",
+        "retention_limit": "unresolved",
+        "deletion_requirement": "unresolved",
+        "effective_from": null,
+        "effective_to": null
+      }
+    ],
+    "supplemental_references": [
       {
         "provider_id": "nasdaq-trader-public-reference",
         "dataset_id": "nasdaq-current-symbol-directory",
@@ -65,7 +88,14 @@
         "price_semantics": null,
         "qualification_status": "candidate_scope_limited",
         "materialization_role": "supplemental_qualification_reference",
-        "known_gaps": ["current_snapshot_not_complete_symbol_history"]
+        "known_gaps": ["current_snapshot_not_complete_symbol_history"],
+        "allowed_uses": [],
+        "rights_status": "unverified",
+        "attribution_requirement": "unresolved",
+        "retention_limit": "unresolved",
+        "deletion_requirement": "unresolved",
+        "effective_from": null,
+        "effective_to": null
       }
     ]
   },

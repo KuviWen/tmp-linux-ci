@@ -81,7 +81,6 @@ def test_us_manifest_preserves_each_zero_fee_source_bundle_member_and_gap() -> N
         "alpaca-us-stock-bars-v2",
         "alpaca-us-corporate-actions-v1",
         "alpaca-us-trading-calendar-v2",
-        "nasdaq-current-symbol-directory",
     }
     assert members["alpaca-us-stock-bars-v2"].schema_version == "us-unadjusted-eod-v1"
     assert members["alpaca-us-stock-bars-v2"].price_semantics == "unadjusted"
@@ -96,17 +95,46 @@ def test_us_manifest_preserves_each_zero_fee_source_bundle_member_and_gap() -> N
     assert members["alpaca-us-corporate-actions-v1"].known_gaps == (
         "provider_creation_time_not_guaranteed",
     )
-    assert members["nasdaq-current-symbol-directory"].provider_id == (
+    supplemental = {
+        member.dataset_id: member for member in manifest.source_basis.supplemental_references
+    }
+    assert set(supplemental) == {"nasdaq-current-symbol-directory"}
+    assert supplemental["nasdaq-current-symbol-directory"].provider_id == (
         "nasdaq-trader-public-reference"
     )
-    assert members["nasdaq-current-symbol-directory"].qualification_status == (
+    assert supplemental["nasdaq-current-symbol-directory"].qualification_status == (
         "candidate_scope_limited"
     )
     assert (
-        members["nasdaq-current-symbol-directory"].materialization_role
+        supplemental["nasdaq-current-symbol-directory"].materialization_role
         == "supplemental_qualification_reference"
     )
     assert all(member.distribution_url.startswith("https://") for member in members.values())
+    assert all(
+        member.rights_status == "unverified"
+        for member in (*members.values(), *supplemental.values())
+    )
+    assert all(
+        member.allowed_uses == frozenset() for member in (*members.values(), *supplemental.values())
+    )
+    assert all(
+        member.attribution_requirement == "unresolved"
+        for member in (*members.values(), *supplemental.values())
+    )
+    assert all(
+        member.retention_limit == "unresolved"
+        for member in (*members.values(), *supplemental.values())
+    )
+    assert all(
+        member.deletion_requirement == "unresolved"
+        for member in (*members.values(), *supplemental.values())
+    )
+    assert all(
+        member.effective_from is None for member in (*members.values(), *supplemental.values())
+    )
+    assert all(
+        member.effective_to is None for member in (*members.values(), *supplemental.values())
+    )
     assert manifest.formal_qualification_artifact_id is None
     assert manifest.historical_availability_claim_id is None
     assert manifest.formally_qualified is False

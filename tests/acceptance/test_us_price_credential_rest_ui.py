@@ -186,13 +186,14 @@ def test_alpaca_credential_readiness_is_visible_without_a_secret(tmp_path: Path)
         "registration_url": "https://app.alpaca.markets/signup",
         "key_management_url": "https://app.alpaca.markets/paper/dashboard/overview",
     }
-    assert provider["source_basis_id"] == "ALPACA-BASIC-US-MARKET-DATA-01"
-    assert provider["plan_id"] == "basic-2026-08-15"
-    assert provider["principal_classification"] == "individual_non_commercial"
-    assert provider["terms_content_sha256"] == (
+    source_basis = provider["source_basis"]
+    assert source_basis["source_basis_id"] == "ALPACA-BASIC-US-MARKET-DATA-01"
+    assert source_basis["plan_id"] == "basic-2026-08-15"
+    assert source_basis["principal_classification"] == "individual_non_commercial"
+    assert source_basis["terms_content_sha256"] == (
         "2dc774d4aeeafbe4c7f0565e7842d932bc8bc10488af805fce43b8734e7b9859"
     )
-    assert provider["qualification_status"] == "candidate_terms_not_archived"
+    assert source_basis["qualification_status"] == "candidate_terms_not_archived"
     assert provider["required_uses"] == [
         "backup_restore",
         "ingest",
@@ -201,12 +202,16 @@ def test_alpaca_credential_readiness_is_visible_without_a_secret(tmp_path: Path)
         "retain_observed_history",
         "transform",
     ]
-    assert [member["dataset_id"] for member in provider["members"]] == [
+    assert [member["dataset_id"] for member in source_basis["members"]] == [
         "alpaca-us-stock-bars-v2",
         "alpaca-us-corporate-actions-v1",
         "alpaca-us-trading-calendar-v2",
+    ]
+    assert [member["dataset_id"] for member in source_basis["supplemental_references"]] == [
         "nasdaq-current-symbol-directory",
     ]
+    assert all(member["allowed_uses"] == [] for member in source_basis["members"])
+    assert all(member["rights_status"] == "unverified" for member in source_basis["members"])
 
 
 def test_operations_page_exposes_write_only_credential_controls_and_provider_links(
@@ -305,6 +310,21 @@ def test_alpaca_credential_can_be_set_without_ever_being_returned(tmp_path: Path
         "registration_url": "https://app.alpaca.markets/signup",
         "key_management_url": "https://app.alpaca.markets/paper/dashboard/overview",
     }
+
+
+def test_malformed_credential_body_never_echoes_rejected_secret(tmp_path: Path) -> None:
+    _, client, headers = _credential_application(tmp_path)
+    plaintext = "MALFORMED-PLAINTEXT-SECRET"
+
+    response = client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={"credential_fields": [plaintext]},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "request_validation_failed"
+    assert plaintext not in response.text
 
 
 def test_alpaca_credential_rotation_replaces_the_old_secret_lease(tmp_path: Path) -> None:
@@ -626,6 +646,9 @@ def test_expired_credential_is_fail_closed_without_contacting_provider(tmp_path:
         },
     )
     assert configured.status_code == 200
+    listed = client.get("/api/v1/operations/source-credentials", headers=headers).json()["items"][0]
+    assert listed["readiness"] == "expired"
+    assert listed["reason_code"] == "source_credential_expired"
 
     validated = client.post(
         "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
@@ -758,6 +781,66 @@ def test_secret_write_is_compensated_when_metadata_commit_fails(
     assert secret_provider.refs == set()
 
 
+def test_failed_write_compensation_is_added_to_the_durable_cleanup_queue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_provider = RecordingSecretProvider()
+    secret_provider.fail_revoke = True
+    application, _, _ = _credential_application(tmp_path, secret_provider=secret_provider)
+
+    def fail_publish(**_: Any) -> dict[str, object]:
+        raise RuntimeError("injected_metadata_commit_failure")
+
+    monkeypatch.setattr(application.state_store, "publish_source_credential", fail_publish)
+
+    with pytest.raises(RuntimeError, match="injected_metadata_commit_failure"):
+        application.operations_control.set_source_credential(
+            provider_id="alpaca-market-data-basic",
+            credential_fields={
+                "api_key_id": "PK-COMPENSATE-PENDING",
+                "api_secret_key": "compensate-pending-secret",
+            },
+            trace_id="trace-p2-credential-compensate-pending",
+            security_context=application.security_context,
+        )
+
+    assert application.state_store.list_pending_source_secret_cleanup(
+        provider_id="alpaca-market-data-basic"
+    ) == list(secret_provider.refs)
+
+
+def test_validation_projects_a_missing_secret_as_not_ready(tmp_path: Path) -> None:
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+    )
+    configured = client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-MISSING-LEASE",
+                "api_secret_key": "missing-lease-secret",
+            }
+        },
+    ).json()
+    application.secret_provider.revoke(configured["secret_ref_id"])
+
+    validated = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
+        headers=headers,
+    )
+
+    assert validated.status_code == 200
+    assert validated.json()["readiness"] == "validation_failed"
+    assert validated.json()["reason_code"] == "source_credential_secret_unavailable"
+    assert validator.calls == []
+
+
 def test_failed_secret_cleanup_is_durable_and_retried_from_operations(
     tmp_path: Path,
 ) -> None:
@@ -797,5 +880,20 @@ def test_failed_secret_cleanup_is_durable_and_retried_from_operations(
     listed = client.get("/api/v1/operations/source-credentials", headers=headers)
 
     assert listed.status_code == 200
+    assert first["secret_ref_id"] in secret_provider.refs
+    assert listed.json()["items"][0]["secret_cleanup_pending"] is True
+
+    third = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/rotations",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-CLEANUP-THIRD",
+                "api_secret_key": "cleanup-third-secret",
+            }
+        },
+    )
+
+    assert third.status_code == 200
     assert first["secret_ref_id"] not in secret_provider.refs
-    assert "secret_cleanup_pending" not in listed.json()["items"][0]
+    assert "secret_cleanup_pending" not in third.json()

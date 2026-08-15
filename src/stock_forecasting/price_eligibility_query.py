@@ -21,6 +21,7 @@ from stock_forecasting.data_supply import (
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
+from stock_forecasting.source_credentials import project_source_credential_readiness
 from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
 
@@ -78,6 +79,15 @@ class PriceEligibilityQuery:
             market: str = us_listing.market
             source_basis = us_manifest.source_basis.as_payload()
             formal_evidence_available = us_manifest.formally_qualified
+            credential = project_source_credential_readiness(
+                self._state_store.get_source_credential(
+                    provider_id=us_manifest.source_basis.provider_id
+                ),
+                evaluated_at=evaluated_at,
+            )
+            credential_reason = (
+                None if credential["readiness"] == "valid" else str(credential["reason_code"])
+            )
         else:
             manifest = load_taiwan_stock_pool_manifest(self._object_repository)
             market = "XTAI"
@@ -92,6 +102,7 @@ class PriceEligibilityQuery:
                 )
             except ValueError:
                 formal_evidence_available = False
+            credential_reason = None
         current_source_rights_denied = any(
             isinstance((current := source.get("current_policy_decision")), dict)
             and current.get("outcome") == "denied"
@@ -107,6 +118,9 @@ class PriceEligibilityQuery:
                 if any(source["reason_code"] == "source_rights_not_effective" for source in sources)
                 else "source_basis_unverified"
             )
+        elif credential_reason is not None:
+            status = "credential_required"
+            reason_code = credential_reason
         elif "credential_required" in statuses:
             status = "credential_required"
             reason_code = next(

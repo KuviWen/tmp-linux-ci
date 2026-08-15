@@ -37,11 +37,13 @@ def _bundle_member_requests() -> tuple[SourceBundleMemberRequest, ...]:
             dataset_id="alpaca-us-corporate-actions-v1",
             distribution_id="alpaca-us-corporate-actions-v1",
             distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+            schema_version="alpaca-corporate-actions-v1",
         ),
         SourceBundleMemberRequest(
             dataset_id="alpaca-us-trading-calendar-v2",
             distribution_id="alpaca-us-trading-calendar-v2",
             distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+            schema_version="alpaca-trading-calendar-v2",
         ),
     )
 
@@ -273,17 +275,54 @@ def test_alpaca_live_contract_probes_pool_data_pagination_actions_and_calendar()
     assert [request.url for request in transport.requests] == [
         "https://data.alpaca.markets/v2/stocks/bars",
         "https://data.alpaca.markets/v2/stocks/bars",
-        "https://data.alpaca.markets/v2/stocks/AAPL/bars",
-        "https://data.alpaca.markets/v2/stocks/AAPL/bars",
+        "https://data.alpaca.markets/v2/stocks/bars",
+        "https://data.alpaca.markets/v2/stocks/bars",
         "https://data.alpaca.markets/v1/corporate-actions",
         "https://paper-api.alpaca.markets/v2/calendar",
     ]
     assert transport.requests[0].query["symbols"] == regular_symbols
     assert transport.requests[1].query["symbols"] == "SIVB"
     assert transport.requests[2].query["limit"] == "1"
+    assert transport.requests[2].query["symbols"] == "AAPL"
     assert transport.requests[3].query["page_token"] == "live-page-2"
     assert all("PK-LIVE-CONTRACT" not in repr(request) for request in transport.requests)
     assert all("live-contract-secret" not in repr(request) for request in transport.requests)
+
+
+def test_alpaca_collector_rejects_a_repeated_pagination_token() -> None:
+    repeated_page = ProviderHttpResponse(
+        200,
+        b'{"bars":{"AAPL":[{"t":"2024-01-03T05:00:00Z","o":184.22,"h":185.88,"l":183.43,"c":184.25,"v":58414460}]},"next_page_token":"repeated"}',
+    )
+    transport = SequenceProviderTransport([repeated_page, repeated_page])
+    collector = AlpacaSourceCollector(
+        source_id="alpaca-us-stock-bars",
+        provider_id="alpaca-market-data-basic",
+        listing_symbols={"70000000-0000-4000-8000-000000000001": ("AAPL",)},
+        credential_resolver=LiteralCredentialResolver(),
+        transport=transport,
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+    )
+
+    with pytest.raises(ValueError, match="source_provider_pagination_invalid"):
+        collector.collect(
+            SourcePartitionRequest(
+                request_id="request-ticket-07-repeated-token",
+                trace_id="trace-ticket-07-repeated-token",
+                source_id="alpaca-us-stock-bars",
+                mode="historical",
+                listing_ids=("70000000-0000-4000-8000-000000000001",),
+                start_date=date(2024, 1, 3),
+                end_date=date(2024, 1, 3),
+                expected_checkpoint=None,
+                distribution_id="alpaca-us-stock-bars-v2",
+                distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+                bundle_members=_bundle_member_requests(),
+            )
+        )
+
+    assert len(transport.requests) == 2
 
 
 @pytest.mark.parametrize(
@@ -729,6 +768,7 @@ def test_alpaca_decoder_marks_changed_checkpoint_as_a_correction() -> None:
             complete=False,
         ),
         source_revision="sha256:corrected-version",
+        revision_kind="correction",
     )
 
     decoded = AlpacaSourceDecoder(
@@ -737,6 +777,45 @@ def test_alpaca_decoder_marks_changed_checkpoint_as_a_correction() -> None:
     ).decode(collection)
 
     assert decoded.revision_kind == "correction"
+    assert decoded.quality_issues == ("correction_requires_review",)
+
+
+def test_alpaca_decoder_does_not_treat_a_new_partition_checkpoint_as_a_correction() -> None:
+    collection = CollectedSourcePartition(
+        request_id="request-ticket-07-next-partition",
+        source_id="alpaca-us-stock-bars",
+        acquired_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        sanitized_source_uri="https://data.alpaca.markets/v2/stocks/bars",
+        media_type="application/json",
+        raw_payload=json.dumps(
+            {
+                "provider_id": "alpaca-market-data-basic",
+                "schema_version": "alpaca-source-bundle-v1",
+                "bars_pages": [{"bars": {}, "next_page_token": None}],
+                "corporate_action_pages": [{"next_page_token": None}],
+                "calendar": [],
+            }
+        ).encode(),
+        checkpoint_before="sha256:prior-partition",
+        checkpoint_after="sha256:next-partition",
+        coverage=SourceCollectionCoverage(
+            requested_start=date(2024, 1, 4),
+            requested_end=date(2024, 1, 4),
+            observed_start=None,
+            observed_end=None,
+            complete=False,
+        ),
+        source_revision="sha256:next-partition",
+        revision_kind="original",
+    )
+
+    decoded = AlpacaSourceDecoder(
+        source_id="alpaca-us-stock-bars",
+        listing_symbols={"70000000-0000-4000-8000-000000000001": ("AAPL",)},
+    ).decode(collection)
+
+    assert decoded.revision_kind == "original"
+    assert "correction_requires_review" not in decoded.quality_issues
 
 
 def test_alpaca_decoder_flags_a_reference_graph_company_action_that_is_missing() -> None:
@@ -765,12 +844,12 @@ def test_alpaca_decoder_flags_a_reference_graph_company_action_that_is_missing()
             complete=False,
         ),
         source_revision="sha256:without-required-action",
+        expected_company_action_ids=frozenset({"ca-required-aapl"}),
     )
 
     decoded = AlpacaSourceDecoder(
         source_id="alpaca-us-stock-bars",
         listing_symbols={"70000000-0000-4000-8000-000000000001": ("AAPL",)},
-        expected_company_action_ids=frozenset({"ca-required-aapl"}),
     ).decode(collection)
 
     assert decoded.quality_issues == ("missing_company_action",)

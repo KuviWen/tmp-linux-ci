@@ -15,16 +15,20 @@ from stock_forecasting.authorization import (
 )
 from stock_forecasting.data_supply import PRICE_RESEARCH_REQUIRED_USES
 from stock_forecasting.platform.state_store import StateStore
-from stock_forecasting.source_credentials import SecretProvider, SourceCredentialValidator
+from stock_forecasting.source_credentials import (
+    SecretProvider,
+    SourceCredentialValidator,
+    project_source_credential_readiness,
+)
 from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
 _ALPACA_SOURCE_BASIS = load_us_stock_pool_manifest().source_basis.as_payload()
 _SOURCE_CREDENTIAL_PROVIDERS: tuple[dict[str, object], ...] = (
     {
-        **_ALPACA_SOURCE_BASIS,
         "provider_id": "alpaca-market-data-basic",
         "display_name": "Alpaca Market Data Basic",
         "credential_kind": "api_key_pair",
+        "source_basis": _ALPACA_SOURCE_BASIS,
         "required_uses": sorted(PRICE_RESEARCH_REQUIRED_USES),
         "required_fields": ["api_key_id", "api_secret_key"],
         "registration_url": "https://app.alpaca.markets/signup",
@@ -70,24 +74,17 @@ class OperationsControl:
         results: list[dict[str, object]] = []
         for provider in _SOURCE_CREDENTIAL_PROVIDERS:
             provider_id = str(provider["provider_id"])
-            cleanup_pending = self._drain_secret_cleanup(provider_id=provider_id)
             readiness = self._state_store.get_source_credential(provider_id=provider_id)
             result = {
                 **provider,
                 **(
-                    readiness
-                    if readiness is not None
-                    else {
-                        "readiness": "missing",
-                        "reason_code": "source_credential_missing",
-                        "secret_ref_id": None,
-                        "version": None,
-                        "configured_at": None,
-                        "last_validated_at": None,
-                    }
+                    project_source_credential_readiness(
+                        readiness,
+                        evaluated_at=self._clock(),
+                    )
                 ),
             }
-            if cleanup_pending:
+            if self._state_store.list_pending_source_secret_cleanup(provider_id=provider_id):
                 result["secret_cleanup_pending"] = True
             results.append(result)
         return results
@@ -115,6 +112,7 @@ class OperationsControl:
             )
             return PolicyDeniedOutcome.from_decision(decision)
         provider = self._provider(provider_id)
+        self._drain_secret_cleanup(provider_id=provider_id)
         self._validate_fields(provider, credential_fields)
         canonical_expires_at = self._canonical_expiry(expires_at)
         evaluated_at = self._clock()
@@ -123,7 +121,7 @@ class OperationsControl:
             credential_fields=credential_fields,
         )
         try:
-            return self._state_store.publish_source_credential(
+            outcome = self._state_store.publish_source_credential(
                 provider_id=provider_id,
                 secret_ref_id=secret_ref.secret_ref_id,
                 readiness="configured",
@@ -134,8 +132,18 @@ class OperationsControl:
                 trace_id=trace_id,
             )
         except Exception:
-            self._secret_provider.revoke(secret_ref.secret_ref_id)
+            try:
+                self._secret_provider.revoke(secret_ref.secret_ref_id)
+            except Exception:
+                self._state_store.queue_source_secret_cleanup(
+                    secret_ref_id=secret_ref.secret_ref_id,
+                    provider_id=provider_id,
+                    queued_at=self._instant(evaluated_at),
+                )
             raise
+        if self._state_store.list_pending_source_secret_cleanup(provider_id=provider_id):
+            outcome["secret_cleanup_pending"] = True
+        return outcome
 
     def rotate_source_credential(
         self,
@@ -160,6 +168,7 @@ class OperationsControl:
             )
             return PolicyDeniedOutcome.from_decision(decision)
         provider = self._provider(provider_id)
+        self._drain_secret_cleanup(provider_id=provider_id)
         self._validate_fields(provider, credential_fields)
         canonical_expires_at = self._canonical_expiry(expires_at)
         evaluated_at = self._clock()
@@ -179,7 +188,14 @@ class OperationsControl:
                 trace_id=trace_id,
             )
         except Exception:
-            self._secret_provider.revoke(secret_ref.secret_ref_id)
+            try:
+                self._secret_provider.revoke(secret_ref.secret_ref_id)
+            except Exception:
+                self._state_store.queue_source_secret_cleanup(
+                    secret_ref_id=secret_ref.secret_ref_id,
+                    provider_id=provider_id,
+                    queued_at=self._instant(evaluated_at),
+                )
             raise
         if self._drain_secret_cleanup(provider_id=provider_id):
             outcome["secret_cleanup_pending"] = True
@@ -206,6 +222,7 @@ class OperationsControl:
             )
             return PolicyDeniedOutcome.from_decision(decision)
         self._provider(provider_id)
+        self._drain_secret_cleanup(provider_id=provider_id)
         evaluated_at = self._clock()
         current = self._state_store.get_source_credential(provider_id=provider_id)
         if current is None or current["readiness"] == "revoked":
@@ -241,6 +258,7 @@ class OperationsControl:
             )
             return PolicyDeniedOutcome.from_decision(decision)
         self._provider(provider_id)
+        self._drain_secret_cleanup(provider_id=provider_id)
         current = self._state_store.get_source_credential(provider_id=provider_id)
         if current is None or current["readiness"] == "revoked":
             raise ValueError("source_credential_not_configured")
@@ -261,11 +279,21 @@ class OperationsControl:
                 "reason_code": "source_credential_expired",
             }
         else:
-            lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
-            validation = validator.validate(lease.credential_fields())
-            validation_readiness = validation.readiness
-            validation_reason = validation.reason_code
-            validation_evidence = dict(validation.evidence)
+            try:
+                lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
+            except KeyError:
+                validation_readiness = "validation_failed"
+                validation_reason = "source_credential_secret_unavailable"
+                validation_evidence = {
+                    "contract_id": "alpaca-ticket-07-live-v1",
+                    "live_validation": "not_run",
+                    "reason_code": validation_reason,
+                }
+            else:
+                validation = validator.validate(lease.credential_fields())
+                validation_readiness = validation.readiness
+                validation_reason = validation.reason_code
+                validation_evidence = dict(validation.evidence)
         expected_version = current["version"]
         if not isinstance(expected_version, int):
             raise ValueError("source_credential_version_invalid")

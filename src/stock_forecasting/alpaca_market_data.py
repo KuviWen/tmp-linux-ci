@@ -26,6 +26,7 @@ from stock_forecasting.data_supply import (
     SourcePartitionRequest,
     SourceQualityIssue,
     SourceRateLimited,
+    SourceRevisionKind,
     SymbolIdentityRecord,
 )
 from stock_forecasting.source_credentials import (
@@ -214,7 +215,6 @@ class AlpacaLiveContractValidator:
 
     _REGULAR_SYMBOLS = ("AAPL", "AMZN", "BRK.B", "GME", "GOOG", "GOOGL", "META", "NVDA", "TSM")
     _BARS_URL = "https://data.alpaca.markets/v2/stocks/bars"
-    _SINGLE_BARS_URL = "https://data.alpaca.markets/v2/stocks/AAPL/bars"
     _ACTIONS_URL = "https://data.alpaca.markets/v1/corporate-actions"
     _CALENDAR_URL = "https://paper-api.alpaca.markets/v2/calendar"
 
@@ -278,11 +278,12 @@ class AlpacaLiveContractValidator:
                 "feed": "sip",
                 "limit": "1",
                 "start": "2024-01-03T00:00:00Z",
+                "symbols": "AAPL",
                 "timeframe": "1Day",
             }
             if page_token is not None:
                 query["page_token"] = page_token
-            page = self._request_json(self._SINGLE_BARS_URL, query, headers)
+            page = self._request_json(self._BARS_URL, query, headers)
             if isinstance(page, CredentialValidationResult):
                 return page
             if not self._valid_single_symbol_page(page):
@@ -413,6 +414,7 @@ class AlpacaLiveContractValidator:
 
 
 class AlpacaSourceCollector:
+    _MAX_PAGES = 1000
     _REQUIRED_BUNDLE_MEMBERS = {
         "alpaca-us-corporate-actions-v1": (
             "alpaca-us-corporate-actions-v1",
@@ -571,6 +573,8 @@ class AlpacaSourceCollector:
                 complete=complete,
             ),
             source_revision=checkpoint,
+            expected_company_action_ids=request.expected_company_action_ids,
+            revision_kind=request.revision_kind,
             bundle_members=(
                 CollectedSourceBundleMember(
                     dataset_id="alpaca-us-corporate-actions-v1",
@@ -635,7 +639,12 @@ class AlpacaSourceCollector:
             token = payload.get("next_page_token")
             if token is None:
                 return pages
-            if not isinstance(token, str) or not token or token in seen_tokens:
+            if (
+                not isinstance(token, str)
+                or not token
+                or token in seen_tokens
+                or len(pages) >= self._MAX_PAGES
+            ):
                 raise ValueError("source_provider_pagination_invalid")
             seen_tokens.add(token)
             next_page_token = token
@@ -690,7 +699,6 @@ class AlpacaSourceDecoder:
         *,
         source_id: str,
         listing_symbols: Mapping[str, tuple[str, ...]],
-        expected_company_action_ids: frozenset[str] = frozenset(),
     ) -> None:
         self._source_id = source_id
         self._listing_symbols = dict(listing_symbols)
@@ -703,7 +711,6 @@ class AlpacaSourceDecoder:
                     raise ValueError("source_identity_mapping_ambiguous")
                 symbol_to_listing[symbol] = listing_id
         self._symbol_to_listing = symbol_to_listing
-        self._expected_company_action_ids = expected_company_action_ids
 
     def decode(self, collection: CollectedSourcePartition) -> DecodedSourcePartition:
         if collection.source_id != self._source_id:
@@ -723,6 +730,7 @@ class AlpacaSourceDecoder:
         company_actions, symbol_identities, action_assertions = self._decode_actions(
             bundle,
             quality_issues,
+            collection.expected_company_action_ids,
         )
         market_sessions = self._decode_market_sessions(bundle)
         observed_listings = {price.listing_id for price in prices}
@@ -747,6 +755,9 @@ class AlpacaSourceDecoder:
             for price in prices
             if price.listing_id == listing_id and symbol == self._listing_symbols[listing_id][-1]
         }
+        revision_kind: SourceRevisionKind = collection.revision_kind
+        if revision_kind == "correction":
+            quality_issues.add("correction_requires_review")
         return DecodedSourcePartition(
             source_id=collection.source_id,
             schema_version="us-unadjusted-eod-v1",
@@ -759,12 +770,7 @@ class AlpacaSourceDecoder:
             parent_object_ids=(),
             symbol_identities=tuple(symbol_identities),
             market_sessions=tuple(market_sessions),
-            revision_kind=(
-                "correction"
-                if collection.checkpoint_before is not None
-                and collection.checkpoint_before != collection.checkpoint_after
-                else "original"
-            ),
+            revision_kind=revision_kind,
             quality_issues=tuple(sorted(quality_issues)),
         )
 
@@ -812,6 +818,7 @@ class AlpacaSourceDecoder:
         self,
         bundle: Mapping[str, object],
         quality_issues: set[SourceQualityIssue],
+        expected_company_action_ids: frozenset[str],
     ) -> tuple[list[CompanyActionRecord], list[SymbolIdentityRecord], set[str]]:
         company_actions: list[CompanyActionRecord] = []
         symbol_identities: list[SymbolIdentityRecord] = []
@@ -893,7 +900,7 @@ class AlpacaSourceDecoder:
                     )
                 else:
                     quality_issues.add("missing_company_action")
-        if not self._expected_company_action_ids <= assertion_ids:
+        if not expected_company_action_ids <= assertion_ids:
             quality_issues.add("missing_company_action")
         return company_actions, symbol_identities, assertion_ids
 

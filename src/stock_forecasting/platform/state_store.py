@@ -753,6 +753,29 @@ class StateStore:
             ).scalars()
             return [str(secret_ref_id) for secret_ref_id in rows]
 
+    def queue_source_secret_cleanup(
+        self,
+        *,
+        secret_ref_id: str,
+        provider_id: str,
+        queued_at: str,
+    ) -> None:
+        with self.engine.begin() as connection:
+            existing = connection.execute(
+                select(source_secret_cleanup_queue.c.secret_ref_id).where(
+                    source_secret_cleanup_queue.c.secret_ref_id == secret_ref_id
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                connection.execute(
+                    source_secret_cleanup_queue.insert().values(
+                        secret_ref_id=secret_ref_id,
+                        provider_id=provider_id,
+                        queued_at=queued_at,
+                        completed_at=None,
+                    )
+                )
+
     def complete_source_secret_cleanup(
         self,
         *,

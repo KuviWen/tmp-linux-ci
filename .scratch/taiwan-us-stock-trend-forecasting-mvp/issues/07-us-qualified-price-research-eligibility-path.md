@@ -26,7 +26,8 @@ Status: ready-for-agent
 ## Implementation notes
 
 - 公共 seam：共同 `DataSupply.materialize`、研究資格 REST／UI、Operations credential REST／UI，以及隔離的 Ticket 07 Compose acceptance；來源秘密只由可替換 `SecretProvider` 解密並以短生命週期 lease 提供給 validator／collector。
-- Alpaca Basic 工程契約涵蓋 raw SIP daily bars、官方 grouped corporate-actions schema、完整分頁、calendar、checkpoint、rate／coverage／revision、永久 listing identity 與內部 AdjustmentVersion；bars、actions 與 calendar 各有獨立 policy、raw object、coverage、schema、gap 與 lineage receipt，provider double 明確只屬 engineering contract。
-- Operations 的 set／rotate／revoke／validate 在授權後執行，支援 expiry、stale-validation fencing、補償式 secret write 與持久 cleanup retry；研究資格 REST／UI 明列新擷取、特徵、訓練及研究展示的同一 fail-closed readiness。
-- 驗證：`python -m pytest --basetemp=.pytest-tmp/full-final-review`（225 passed）、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、`docker compose -f compose.yaml config --quiet`、Docker image build，以及隔離 Compose `ticket-07-acceptance`（8/8 checks passed）。
+- Alpaca Basic 工程契約涵蓋 raw SIP daily bars、官方 grouped corporate-actions schema、完整分頁、calendar、checkpoint、rate／coverage／revision、永久 listing identity 與內部 AdjustmentVersion；bars、actions 與 calendar 各有獨立 policy、raw object、coverage、schema、gap 與 lineage receipt，member coverage／schema／重複項、correction 及 reference-graph 缺件都會先隔離，provider double 明確只屬 engineering contract。
+- Candidate source basis 對每個必要 dataset 明列尚未確認的 allowed uses、歸因、保留／刪除與有效期；Nasdaq current directory 僅是 supplemental reference，不冒充 provider bundle 成員或正式 symbol history。
+- Operations 的 set／rotate／revoke／validate 在授權後執行，支援 expiry、stale-validation fencing、補償式 secret write 與持久 cleanup retry；credential 的當前撤銷／到期狀態會即時投影到研究資格 REST／UI 的新擷取、特徵、訓練及研究展示。
+- 驗證：`python -m pytest --basetemp=.pytest-tmp/full-final-round2`（234 passed）、`python -m mypy src tests`、`python -m ruff check .`、`python -m ruff format --check .`、`docker compose -f compose.yaml config --quiet`、Docker image build，以及 fresh 隔離 Compose `ticket-07-acceptance`（8/8 checks passed）。
 - 本機未提供真實來源憑證，因此 `formal_qualification=false`、`live_validation=not_run`；opt-in credential validate contract 會對 10 檔 manifest ticker、raw SIP daily bars、強制分頁、官方公司行動 schema 與半日曆執行真實 API probe，只保存去識別化 evidence。長期歷史深度與正式 backfill qualification 由 Ticket 08 承接。

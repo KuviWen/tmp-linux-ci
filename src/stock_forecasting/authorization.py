@@ -42,6 +42,7 @@ SourceAccessBasis = Literal[
     "zero_fee_plan",
     "engineering_contract",
 ]
+SourceAccessMode = Literal["live_provider", "engineering_double"]
 
 _LOCAL_KEY_ENVIRONMENTS = frozenset({"local", "development"})
 _CONTEXT_ISSUER = object()
@@ -572,6 +573,7 @@ class OperationIntent:
     required_uses: frozenset[SourceUseRight] = frozenset()
     distribution_id: str | None = None
     distribution_url: str | None = None
+    source_access_mode: SourceAccessMode = "live_provider"
 
     def __post_init__(self) -> None:
         if (self.distribution_id is None) != (self.distribution_url is None):
@@ -596,6 +598,7 @@ class AuthorizationDecision:
     required_uses: frozenset[SourceUseRight]
     distribution_id: str | None
     distribution_url: str | None
+    source_access_mode: SourceAccessMode
     grant_version_id: str | None
     source_policy_version_id: str | None
     source_entitlement_version_id: str | None
@@ -820,6 +823,8 @@ def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, ob
     }
     if decision.required_uses:
         payload["required_uses"] = sorted(decision.required_uses)
+    if decision.action == "market_data.collect":
+        payload["source_access_mode"] = decision.source_access_mode
     if decision.distribution_id is not None or decision.distribution_url is not None:
         payload["distribution_id"] = decision.distribution_id
         payload["distribution_url"] = decision.distribution_url
@@ -962,6 +967,7 @@ class AuthorizationPolicy:
         principal_id = prior_authorization.get("principal_id")
         distribution_id = prior_authorization.get("distribution_id")
         distribution_url = prior_authorization.get("distribution_url")
+        source_access_mode = prior_authorization.get("source_access_mode")
         if (
             prior_authorization.get("outcome") != "allowed"
             or prior_authorization.get("reason_code") != "authorized"
@@ -981,6 +987,7 @@ class AuthorizationPolicy:
             or (distribution_id is not None and not isinstance(distribution_id, str))
             or (distribution_url is not None and not isinstance(distribution_url, str))
             or (distribution_id is None) != (distribution_url is None)
+            or source_access_mode not in {"live_provider", "engineering_double"}
         ):
             raise SourceRightsEvidenceError("source_rights_prior_evidence_mismatch")
         try:
@@ -1009,6 +1016,7 @@ class AuthorizationPolicy:
             required_uses=required_uses,
             distribution_id=distribution_id,
             distribution_url=distribution_url,
+            source_access_mode=cast(SourceAccessMode, source_access_mode),
         )
         rights = self._resolve_rights(
             principal_id=principal_id,
@@ -1146,6 +1154,12 @@ class AuthorizationPolicy:
         elif not intent.required_uses <= source_policy.allowed_uses:
             reason_code = "source_policy_use_denied"
         elif (
+            source_policy.access_basis == "engineering_contract"
+            and intent.action == "market_data.collect"
+            and intent.source_access_mode != "engineering_double"
+        ):
+            reason_code = "engineering_contract_live_provider_denied"
+        elif (
             source_policy.access_basis
             in {"open_data_terms", "zero_fee_plan", "engineering_contract"}
             and intent.action == "market_data.collect"
@@ -1227,6 +1241,7 @@ class AuthorizationPolicy:
         if intent.distribution_id is not None or intent.distribution_url is not None:
             decision_identity_parts.append(f"distribution:{intent.distribution_id}")
             decision_identity_parts.append(f"distribution-url:{intent.distribution_url}")
+        decision_identity_parts.append(f"source-access-mode:{intent.source_access_mode}")
         decision_identity = "/".join(decision_identity_parts)
         valid_until = intent.evaluated_at
         if allowed and grant is not None and source_policy is not None:
@@ -1249,6 +1264,7 @@ class AuthorizationPolicy:
             required_uses=intent.required_uses,
             distribution_id=intent.distribution_id,
             distribution_url=intent.distribution_url,
+            source_access_mode=intent.source_access_mode,
             grant_version_id=grant.version_id if grant is not None else None,
             source_policy_version_id=(
                 source_policy.version_id if source_policy is not None else None

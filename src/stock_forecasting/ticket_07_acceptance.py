@@ -78,6 +78,7 @@ def run_ticket_07_acceptance(
         mode="historical",
         adapter_version="alpaca-market-data-basic-v1",
         rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+        source_access_mode="engineering_double",
         collector=AlpacaSourceCollector(
             source_id="alpaca-us-stock-bars",
             provider_id="alpaca-market-data-basic",
@@ -121,11 +122,13 @@ def run_ticket_07_acceptance(
                     dataset_id="alpaca-us-corporate-actions-v1",
                     distribution_id="alpaca-us-corporate-actions-v1",
                     distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+                    schema_version="alpaca-corporate-actions-v1",
                 ),
                 SourceBundleMemberRequest(
                     dataset_id="alpaca-us-trading-calendar-v2",
                     distribution_id="alpaca-us-trading-calendar-v2",
                     distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+                    schema_version="alpaca-trading-calendar-v2",
                 ),
             ),
         )
@@ -173,7 +176,9 @@ def run_ticket_07_acceptance(
         "credential_rest": credential_status == 200
         and credential.get("readiness") == "missing"
         and credential.get("secret_ref_id") is None
-        and credential.get("source_basis_id") == manifest.source_basis.source_basis_id,
+        and isinstance(credential.get("source_basis"), dict)
+        and credential["source_basis"].get("source_basis_id")
+        == manifest.source_basis.source_basis_id,
         "research_ui": research_ui_status == 200
         and "美股行情研究資格" in research_ui_text
         and "憑證待設定" in research_ui_text,

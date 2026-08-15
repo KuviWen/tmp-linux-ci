@@ -16,6 +16,7 @@ from stock_forecasting.authorization import (
     AuthorizationPolicy,
     OperationIntent,
     SecurityContext,
+    SourceAccessMode,
     SourceUseRight,
     authorization_audit_payload,
 )
@@ -58,7 +59,11 @@ SelectionSourceArchiveStatus = Literal["not_archived", "verified"]
 ManifestEvidenceStatus = Literal["qualification_candidate", "qualified"]
 TaiwanPriceSourceMode = Literal["current", "historical"]
 SourceRevisionKind = Literal["original", "late_arrival", "correction", "withdrawal"]
-SourceQualityIssue = Literal["identity_ambiguous", "missing_company_action"]
+SourceQualityIssue = Literal[
+    "identity_ambiguous",
+    "missing_company_action",
+    "correction_requires_review",
+]
 HistoricalEvidenceLevel = Literal["platform_observed", "archive_attested", "published_current_only"]
 _APPROVED_PRICE_SCHEMA_VERSIONS = frozenset({"taiwan-unadjusted-eod-v1", "us-unadjusted-eod-v1"})
 
@@ -68,12 +73,14 @@ class SourceBundleMemberRequest:
     dataset_id: str
     distribution_id: str
     distribution_url: str
+    schema_version: str
 
     def __post_init__(self) -> None:
         if (
             not self.dataset_id.strip()
             or not self.distribution_id.strip()
             or not self.distribution_url.startswith("https://")
+            or not self.schema_version.strip()
         ):
             raise ValueError("source_bundle_member_request_invalid")
 
@@ -94,6 +101,8 @@ class SourcePartitionRequest:
     distribution_url: str | None = None
     source_basis_id: str | None = None
     bundle_members: tuple[SourceBundleMemberRequest, ...] = ()
+    expected_company_action_ids: frozenset[str] = frozenset()
+    revision_kind: SourceRevisionKind = "original"
 
     def __post_init__(self) -> None:
         if (self.distribution_id is None) != (self.distribution_url is None):
@@ -203,6 +212,8 @@ class CollectedSourcePartition:
     coverage: SourceCollectionCoverage
     source_revision: str
     bundle_members: tuple[CollectedSourceBundleMember, ...] = ()
+    expected_company_action_ids: frozenset[str] = frozenset()
+    revision_kind: SourceRevisionKind = "original"
 
 
 @dataclass(frozen=True)
@@ -313,11 +324,13 @@ class CollectorDecoderPriceSourceAdapter:
         rate_limit_policy_id: str,
         collector: SourceCollector,
         decoder: SourceDecoder,
+        source_access_mode: SourceAccessMode = "live_provider",
     ) -> None:
         self.source_id = source_id
         self.mode = mode
         self.adapter_version = adapter_version
         self.rate_limit_policy_id = rate_limit_policy_id
+        self.source_access_mode = source_access_mode
         self._collector = collector
         self._decoder = decoder
 
@@ -460,6 +473,11 @@ class DataSupply:
         if request.policy_decision_id is not None:
             raise ValueError("source_policy_decision_must_be_internal")
         evaluated_at = self._clock()
+        adapter = self._adapters.get(request.source_id)
+        source_access_mode = cast(
+            SourceAccessMode,
+            getattr(adapter, "source_access_mode", "live_provider"),
+        )
         decision = self._evaluate_collection_rights(
             dataset_id=request.source_id,
             distribution_id=request.distribution_id,
@@ -467,6 +485,7 @@ class DataSupply:
             evaluated_at=evaluated_at,
             trace_id=request.trace_id,
             correlation_id=request.request_id,
+            source_access_mode=source_access_mode,
         )
         if decision.allowed:
             member_decisions: dict[str, AuthorizationDecision] = {}
@@ -478,6 +497,7 @@ class DataSupply:
                     evaluated_at=evaluated_at,
                     trace_id=request.trace_id,
                     correlation_id=f"{request.request_id}:{member.dataset_id}",
+                    source_access_mode=source_access_mode,
                 )
                 if not member_decision.allowed:
                     self._state_store.record_authorization_decision(
@@ -535,6 +555,7 @@ class DataSupply:
         evaluated_at: datetime,
         trace_id: str,
         correlation_id: str,
+        source_access_mode: SourceAccessMode,
     ) -> AuthorizationDecision:
         return self._authorization_policy.evaluate(
             self._security_context,
@@ -550,6 +571,7 @@ class DataSupply:
                 required_uses=PRICE_RESEARCH_REQUIRED_USES,
                 distribution_id=distribution_id,
                 distribution_url=distribution_url,
+                source_access_mode=source_access_mode,
             ),
         )
 
@@ -660,7 +682,9 @@ class DataSupply:
             collection=collection,
             member_decisions=member_decisions,
         )
-        quarantine_reason = _quarantine_reason(request, collection, decoded, historical_claim)
+        quarantine_reason = _bundle_member_quarantine_reason(request, collection) or (
+            _quarantine_reason(request, collection, decoded, historical_claim)
+        )
         if quarantine_reason is not None:
             quarantine_payload: dict[str, object] = {
                 "reason_code": quarantine_reason,
@@ -835,11 +859,6 @@ class DataSupply:
             decision = member_decisions.get(member.dataset_id)
             if member_request is None or decision is None:
                 raise ValueError("source_bundle_member_lineage_missing")
-            if (
-                member.coverage.requested_start != request.start_date
-                or member.coverage.requested_end != request.end_date
-            ):
-                raise ValueError("source_bundle_member_coverage_mismatch")
             checksum = hashlib.sha256(member.raw_payload).hexdigest()
             stored = self._object_repository.put_verified(
                 BytesIO(member.raw_payload),
@@ -1226,6 +1245,8 @@ def _quarantine_reason(
         return "identity_ambiguous"
     if "missing_company_action" in decoded.quality_issues:
         return "missing_company_action"
+    if "correction_requires_review" in decoded.quality_issues:
+        return "correction_requires_review"
     observed_listing_ids = {
         item.listing_id
         for items in (decoded.prices, decoded.company_actions, decoded.listing_lifecycle)
@@ -1236,6 +1257,32 @@ def _quarantine_reason(
         return "identity_ambiguous"
     if observed_listing_ids != requested_listing_ids:
         return "incomplete_coverage"
+    return None
+
+
+def _bundle_member_quarantine_reason(
+    request: SourcePartitionRequest,
+    collection: CollectedSourcePartition,
+) -> str | None:
+    requested = {member.dataset_id: member for member in request.bundle_members}
+    collected = {member.dataset_id: member for member in collection.bundle_members}
+    if requested.keys() != collected.keys() or len(collected) != len(collection.bundle_members):
+        return "bundle_member_incomplete_coverage"
+    for dataset_id, member_request in requested.items():
+        member = collected[dataset_id]
+        if member.schema_version != member_request.schema_version:
+            return "bundle_member_schema_incompatible"
+        coverage = member.coverage
+        if (
+            coverage.requested_start != request.start_date
+            or coverage.requested_end != request.end_date
+            or not coverage.complete
+            or coverage.observed_start is None
+            or coverage.observed_end is None
+            or coverage.observed_start > request.start_date
+            or coverage.observed_end < request.end_date
+        ):
+            return "bundle_member_incomplete_coverage"
     return None
 
 

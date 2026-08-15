@@ -70,6 +70,32 @@ class SourceCredentialResolver(Protocol):
     def resolve_valid(self, provider_id: str) -> dict[str, str]: ...
 
 
+def project_source_credential_readiness(
+    current: Mapping[str, object] | None,
+    *,
+    evaluated_at: datetime,
+) -> dict[str, object]:
+    if current is None:
+        return {
+            "readiness": "missing",
+            "reason_code": "source_credential_missing",
+            "secret_ref_id": None,
+            "version": None,
+            "configured_at": None,
+            "last_validated_at": None,
+        }
+    projected = dict(current)
+    expires_at = projected.get("expires_at")
+    if (
+        projected.get("readiness") != "revoked"
+        and isinstance(expires_at, str)
+        and datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= evaluated_at
+    ):
+        projected["readiness"] = "expired"
+        projected["reason_code"] = "source_credential_expired"
+    return projected
+
+
 class ManagedSourceCredentialResolver:
     def __init__(
         self,

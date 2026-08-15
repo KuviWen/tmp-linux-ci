@@ -447,6 +447,13 @@ components:
         - qualification_status
         - materialization_role
         - known_gaps
+        - allowed_uses
+        - rights_status
+        - attribution_requirement
+        - retention_limit
+        - deletion_requirement
+        - effective_from
+        - effective_to
       properties:
         provider_id: {type: string, minLength: 1}
         dataset_id: {type: string, minLength: 1}
@@ -466,6 +473,17 @@ components:
           type: array
           minItems: 1
           items: {type: string, minLength: 1}
+        allowed_uses:
+          type: array
+          items:
+            type: string
+            enum: [ingest, retain_observed_history, transform, model, internal_display, backup_restore]
+        rights_status: {type: string, const: unverified}
+        attribution_requirement: {type: string, const: unresolved}
+        retention_limit: {type: string, const: unresolved}
+        deletion_requirement: {type: string, const: unresolved}
+        effective_from: {type: [string, 'null'], format: date}
+        effective_to: {type: [string, 'null'], format: date}
     ZeroFeeAuthenticatedSourceBasis:
       type: object
       additionalProperties: false
@@ -482,6 +500,7 @@ components:
         - terms_content_sha256
         - qualification_status
         - members
+        - supplemental_references
       properties:
         source_basis_id: {type: string, minLength: 1}
         basis_type: {type: string, const: zero_fee_plan}
@@ -501,6 +520,9 @@ components:
         members:
           type: array
           minItems: 1
+          items: {$ref: '#/components/schemas/ZeroFeeSourceBundleMember'}
+        supplemental_references:
+          type: array
           items: {$ref: '#/components/schemas/ZeroFeeSourceBundleMember'}
     PriceResearchEligibility:
       type: object
@@ -739,6 +761,8 @@ components:
         - version
         - configured_at
         - last_validated_at
+        - required_uses
+        - source_basis
       properties:
         provider_id: {type: string}
         display_name: {type: string}
@@ -746,6 +770,12 @@ components:
         required_fields:
           type: array
           items: {type: string}
+        required_uses:
+          type: array
+          items:
+            type: string
+            enum: [ingest, retain_observed_history, transform, model, internal_display, backup_restore]
+        source_basis: {$ref: '#/components/schemas/ZeroFeeAuthenticatedSourceBasis'}
         readiness:
           type: string
           enum: [missing, configured, valid, validation_failed, expired, revoked]
