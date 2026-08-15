@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 from html import escape
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -293,6 +294,40 @@ def create_web_app(application: Application) -> FastAPI:
             return authorization_denied(request, query_outcome)
         return query_outcome
 
+    @app.get(
+        "/api/v1/research/listings/{listing_id}/price-eligibility",
+        response_model=None,
+    )
+    def get_listing_price_eligibility(
+        request: Request,
+        listing_id: str,
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object] | Response:
+        try:
+            outcome = application.price_eligibility_query.get_listing(
+                listing_id=listing_id,
+                trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+                security_context=security_context,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="listing_not_found") from error
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        return outcome
+
+    @app.get("/api/v1/operations/sources", response_model=None)
+    def list_price_sources(
+        request: Request,
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object] | Response:
+        outcome = application.price_eligibility_query.list_sources(
+            trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+            security_context=security_context,
+        )
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        return {"items": outcome}
+
     @app.get("/research", response_class=HTMLResponse, response_model=None)
     def research_matrix(
         request: Request,
@@ -456,5 +491,74 @@ def create_web_app(application: Application) -> FastAPI:
             f'<section class="panel"><h2>版本追溯</h2>{lineage_html}</section></main>'
         )
         return _page("標的研究頁", body)
+
+    @app.get(
+        "/research/listings/{listing_id}/price-eligibility",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    def listing_price_eligibility_page(
+        request: Request,
+        listing_id: str,
+        security_context: SecurityContext = research_authentication,
+    ) -> str | Response:
+        try:
+            outcome = application.price_eligibility_query.get_listing(
+                listing_id=listing_id,
+                trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+                security_context=security_context,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="listing_not_found") from error
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        blocked = outcome["status"] == "policy_blocked"
+        state_text = "政策阻擋" if blocked else "已具研究資格"
+        provider_text = "未接觸來源" if blocked else "來源資料已保存"
+        sources = cast(list[dict[str, object]], outcome["sources"])
+        source_rows = "".join(
+            "<tr>"
+            f"<td>{escape(str(source['source_mode']))}</td>"
+            f"<td>{escape(str(source['source_id']))}</td>"
+            f"<td>{escape(str(source['status']))}</td>"
+            f"<td>{escape(str(source['reason_code']))}</td>"
+            "</tr>"
+            for source in sources
+        )
+        dataset_id = next(
+            (
+                source["dataset_version_id"]
+                for source in sources
+                if source["dataset_version_id"] is not None
+            ),
+            None,
+        )
+        adjustment_id = next(
+            (
+                source["adjustment_version_id"]
+                for source in sources
+                if source["adjustment_version_id"] is not None
+            ),
+            None,
+        )
+        body = (
+            "<main><header><h1>台股行情研究資格</h1>"
+            f'<p class="badge">{state_text}</p>'
+            f"<p>{provider_text}</p></header>"
+            '<section class="panel"><h2>資格依賴</h2><dl>'
+            f"<dt>外部依賴</dt><dd>{escape(str(outcome['dependency_id']))}</dd>"
+            f"<dt>原因</dt><dd>{escape(str(outcome['reason_code']))}</dd>"
+            f"<dt>資料集版本</dt><dd>{escape(str(dataset_id)) if dataset_id else '尚未建立'}</dd>"
+            "<dt>調整版本</dt>"
+            f"<dd>{escape(str(adjustment_id)) if adjustment_id else '尚未建立'}</dd>"
+            "</dl>"
+            f"<p>資料集版本：{escape(str(dataset_id)) if dataset_id else '尚未建立'}</p>"
+            f"<p>調整版本：{escape(str(adjustment_id)) if adjustment_id else '尚未建立'}</p>"
+            "</section>"
+            '<section class="panel"><h2>來源狀態</h2><table><thead><tr>'
+            "<th>模式</th><th>來源</th><th>狀態</th><th>原因</th>"
+            f"</tr></thead><tbody>{source_rows}</tbody></table></section></main>"
+        )
+        return _page("台股行情研究資格", body)
 
     return app

@@ -85,6 +85,22 @@ trace_artifact_refs = Table(
     UniqueConstraint("trace_id", "artifact_id", name="uq_trace_artifact_ref"),
 )
 
+price_research_eligibility = Table(
+    "serving_price_research_eligibility",
+    metadata,
+    Column("sequence", Integer, primary_key=True, autoincrement=True),
+    Column("eligibility_id", String(36), nullable=False),
+    Column("listing_id", String(36), nullable=False),
+    Column("source_id", String(128), nullable=False),
+    Column("source_mode", String(32), nullable=False),
+    Column("evaluated_at", String(32), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("reason_code", String(128), nullable=False),
+    Column("trace_id", String(128), nullable=False),
+    Column("payload", JSON, nullable=False),
+    UniqueConstraint("eligibility_id", "listing_id", name="uq_price_research_eligibility"),
+)
+
 fixture_prediction_results = Table(
     "serving_fixture_prediction_results",
     metadata,

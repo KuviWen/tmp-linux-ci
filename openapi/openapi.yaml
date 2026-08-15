@@ -58,6 +58,48 @@ paths:
           $ref: '#/components/responses/ProblemResponse'
         '503':
           $ref: '#/components/responses/ProblemResponse'
+  /api/v1/research/listings/{listing_id}/price-eligibility:
+    get:
+      operationId: getListingPriceResearchEligibility
+      security:
+        - LocalApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ListingId'
+      responses:
+        '200':
+          description: Taiwan price-source research eligibility and immutable lineage.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceResearchEligibility'
+        '401':
+          $ref: '#/components/responses/ProblemResponse'
+        '403':
+          $ref: '#/components/responses/ProblemResponse'
+        '404':
+          $ref: '#/components/responses/ProblemResponse'
+  /api/v1/operations/sources:
+    get:
+      operationId: listPriceSourceEligibility
+      security:
+        - LocalApiKey: []
+      responses:
+        '200':
+          description: Current operational projection of Taiwan price-source eligibility.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/PriceSourceEligibility'}
+        '401':
+          $ref: '#/components/responses/ProblemResponse'
+        '403':
+          $ref: '#/components/responses/ProblemResponse'
   /api/v1/operations/health:
     get:
       operationId: listCanonicalHealth
@@ -242,6 +284,108 @@ components:
         core_projection_version: {type: integer, minimum: 0}
         evidence_projection_version: {type: integer, minimum: 0}
         stale: {type: boolean}
+    PriceResearchEligibility:
+      type: object
+      additionalProperties: false
+      required:
+        - listing_id
+        - market
+        - status
+        - reason_code
+        - dependency_id
+        - formally_qualified
+        - checks
+        - sources
+      properties:
+        listing_id: {type: string, format: uuid}
+        market: {type: string, const: XTAI}
+        status:
+          type: string
+          enum: [qualified, policy_blocked, quarantined]
+        reason_code: {type: string}
+        dependency_id: {type: string, const: DEP-MKT-TW-01}
+        formally_qualified: {type: boolean}
+        checks:
+          $ref: '#/components/schemas/PriceQualificationChecks'
+        sources:
+          type: array
+          minItems: 2
+          items: {$ref: '#/components/schemas/PriceSourceEligibility'}
+    PriceQualificationChecks:
+      type: object
+      additionalProperties: false
+      required: [policy, coverage, schema, integrity, depth]
+      properties:
+        policy: {type: string, enum: [passed, blocked]}
+        coverage: {type: string, enum: [passed, blocked, not_evaluated]}
+        schema: {type: string, enum: [passed, blocked, not_evaluated]}
+        integrity: {type: string, enum: [passed, blocked, not_evaluated]}
+        depth: {type: string, enum: [passed, blocked, not_evaluated]}
+    PriceSourceEligibility:
+      type: object
+      additionalProperties: false
+      required:
+        - status
+        - reason_code
+        - policy_reason_code
+        - dependency_id
+        - source_id
+        - source_mode
+        - listing_ids
+        - trace_id
+        - policy_decision_id
+        - evaluated_at
+        - raw_object_id
+        - normalized_object_id
+        - source_revision
+        - checkpoint
+        - coverage
+        - dataset_version_id
+        - adjustment_version_id
+      properties:
+        status: {type: string, enum: [published, policy_blocked, quarantined]}
+        reason_code: {type: string}
+        policy_reason_code: {type: string}
+        dependency_id: {type: string, const: DEP-MKT-TW-01}
+        source_id: {type: string}
+        source_mode: {type: string, enum: [current, historical]}
+        listing_ids:
+          type: array
+          items: {type: string, format: uuid}
+        trace_id: {type: string}
+        policy_decision_id: {type: string, format: uuid}
+        evaluated_at: {type: string, format: date-time}
+        raw_object_id:
+          type: [string, 'null']
+        normalized_object_id:
+          type: [string, 'null']
+        source_revision:
+          type: [string, 'null']
+        checkpoint:
+          type: [string, 'null']
+        coverage:
+          oneOf:
+            - $ref: '#/components/schemas/SourceCollectionCoverage'
+            - {type: 'null'}
+        dataset_version_id:
+          type: [string, 'null']
+        adjustment_version_id:
+          type: [string, 'null']
+    SourceCollectionCoverage:
+      type: object
+      additionalProperties: false
+      required:
+        - requested_start
+        - requested_end
+        - observed_start
+        - observed_end
+        - complete
+      properties:
+        requested_start: {type: string, format: date}
+        requested_end: {type: string, format: date}
+        observed_start: {type: [string, 'null'], format: date}
+        observed_end: {type: [string, 'null'], format: date}
+        complete: {type: boolean}
     Lineage:
       type: object
       required:

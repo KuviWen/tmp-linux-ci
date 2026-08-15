@@ -26,6 +26,7 @@ from stock_forecasting.outbox import (
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
+from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
 from stock_forecasting.research_query import ResearchQuery
 from stock_forecasting.security_audit import SecurityAudit
 from stock_forecasting.workflows.fixture_eod import (
@@ -70,6 +71,11 @@ class Application:
         self.research_query = ResearchQuery(
             self.state_store,
             security_context=self.security_context,
+            authorization_policy=self.authorization_policy,
+            authorization_time=fixed_security_time,
+        )
+        self.price_eligibility_query = PriceEligibilityQuery(
+            self.state_store,
             authorization_policy=self.authorization_policy,
             authorization_time=fixed_security_time,
         )
@@ -140,6 +146,7 @@ def build_test_application(
     policy_markets: frozenset[str] | None = None,
     authorization_time: datetime | None = None,
     authorization_policy_set_id: str | None = None,
+    authorization_policy_override: AuthorizationPolicy | None = None,
 ) -> Application:
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
     resolved_database_url = database_url or "sqlite+pysqlite:///:memory:"
@@ -151,12 +158,15 @@ def build_test_application(
         issued_at=identity_time - timedelta(minutes=1),
         expires_at=identity_time + timedelta(hours=24),
     )
-    authorization_policy_bootstrap = build_fixture_authorization_policy(
-        resolved_identity.context,
-        entitlement_states=entitlement_states,
-        entitlement_purposes=entitlement_purposes,
-        grant_actions=grant_actions,
-        policy_markets=policy_markets,
+    authorization_policy_bootstrap = (
+        authorization_policy_override
+        or build_fixture_authorization_policy(
+            resolved_identity.context,
+            entitlement_states=entitlement_states,
+            entitlement_purposes=entitlement_purposes,
+            grant_actions=grant_actions,
+            policy_markets=policy_markets,
+        )
     )
     return Application(
         observed_at=observed_at,

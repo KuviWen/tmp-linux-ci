@@ -33,6 +33,7 @@ from stock_forecasting.platform.schema import (
     fixture_prediction_results,
     health_assessments,
     metadata,
+    price_research_eligibility,
     production_prediction_records,
     research_records,
     security_audit_events,
@@ -428,6 +429,132 @@ class StateStore:
                 outcome=outcome,
                 trace_id=trace_id,
             )
+
+    def get_price_research_eligibility(self, *, listing_id: str) -> dict[str, Any]:
+        with self.engine.connect() as connection:
+            payload = connection.execute(
+                select(price_research_eligibility.c.payload)
+                .where(price_research_eligibility.c.listing_id == listing_id)
+                .order_by(price_research_eligibility.c.sequence.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+        if payload is None:
+            raise KeyError(listing_id)
+        return deepcopy(cast(dict[str, Any], payload))
+
+    def list_price_research_eligibility(
+        self,
+        *,
+        listing_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        statement = select(
+            price_research_eligibility.c.listing_id,
+            price_research_eligibility.c.source_id,
+            price_research_eligibility.c.source_mode,
+            price_research_eligibility.c.payload,
+        ).order_by(price_research_eligibility.c.sequence.desc())
+        if listing_id is not None:
+            statement = statement.where(price_research_eligibility.c.listing_id == listing_id)
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement).mappings()
+            latest: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for row in rows:
+                key = (row["listing_id"], row["source_id"], row["source_mode"])
+                if key not in latest:
+                    latest[key] = deepcopy(cast(dict[str, Any], row["payload"]))
+        return sorted(
+            latest.values(),
+            key=lambda item: (
+                str(item["source_mode"]) != "current",
+                str(item["source_id"]),
+            ),
+        )
+
+    def publish_price_research_evaluation(
+        self,
+        *,
+        trace_id: str,
+        execution_purpose: str,
+        artifacts: list[dict[str, Any]],
+        authorization: dict[str, str | None],
+        authorization_outcome: str,
+        eligibility_records: list[dict[str, object]],
+    ) -> None:
+        with self.engine.begin() as connection:
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization,
+                outcome=authorization_outcome,
+                trace_id=trace_id,
+            )
+            for artifact in artifacts:
+                existing = (
+                    connection.execute(
+                        select(
+                            canonical_artifacts.c.artifact_kind,
+                            canonical_artifacts.c.execution_purpose,
+                            canonical_artifacts.c.payload,
+                        ).where(canonical_artifacts.c.artifact_id == artifact["artifact_id"])
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if existing is None:
+                    connection.execute(
+                        canonical_artifacts.insert().values(
+                            artifact_id=artifact["artifact_id"],
+                            artifact_kind=artifact["artifact_kind"],
+                            execution_purpose=execution_purpose,
+                            payload=artifact["payload"],
+                        )
+                    )
+                elif (
+                    existing["artifact_kind"] != artifact["artifact_kind"]
+                    or existing["execution_purpose"] != execution_purpose
+                    or existing["payload"] != artifact["payload"]
+                ):
+                    raise ImmutableStateConflict("immutable_artifact_conflict")
+                reference_exists = connection.execute(
+                    select(trace_artifact_refs.c.sequence).where(
+                        trace_artifact_refs.c.trace_id == trace_id,
+                        trace_artifact_refs.c.artifact_id == artifact["artifact_id"],
+                    )
+                ).scalar_one_or_none()
+                if reference_exists is None:
+                    connection.execute(
+                        trace_artifact_refs.insert().values(
+                            trace_id=trace_id,
+                            artifact_id=artifact["artifact_id"],
+                        )
+                    )
+            for record in eligibility_records:
+                existing_payload = connection.execute(
+                    select(price_research_eligibility.c.payload).where(
+                        price_research_eligibility.c.eligibility_id == record["eligibility_id"],
+                        price_research_eligibility.c.listing_id == record["listing_id"],
+                    )
+                ).scalar_one_or_none()
+                if existing_payload is None:
+                    connection.execute(price_research_eligibility.insert().values(**record))
+                elif existing_payload != record["payload"]:
+                    raise ImmutableStateConflict("immutable_price_eligibility_conflict")
+
+    def get_canonical_artifact(self, artifact_id: str) -> dict[str, Any]:
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(
+                        canonical_artifacts.c.artifact_kind,
+                        canonical_artifacts.c.execution_purpose,
+                        canonical_artifacts.c.payload,
+                    ).where(canonical_artifacts.c.artifact_id == artifact_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            raise KeyError(artifact_id)
+        return deepcopy(dict(row))
 
     def _insert_authorization_decision(
         self,

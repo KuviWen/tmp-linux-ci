@@ -15,6 +15,7 @@ from stock_forecasting.authorization import (
     SecurityContext,
     SourceEntitlement,
     SourcePolicyVersion,
+    SourceUseRight,
     action_grant_version_payload,
     build_fixture_authorization_policy,
     source_entitlement_version_payload,
@@ -29,6 +30,7 @@ FIXTURE_REVOKED_POLICY_SET = "fixture-revoked-v1"
 FIXTURE_PURPOSE_REMOVED_POLICY_SET = "fixture-purpose-removed-v1"
 FIXTURE_GRANT_MISSING_POLICY_SET = "fixture-grant-missing-v1"
 FIXTURE_POLICY_UNKNOWN_SET = "fixture-policy-unknown-v1"
+TICKET_06_POLICY_BLOCKED_SET = "ticket-06-taiwan-policy-blocked-v1"
 
 
 def _parse_instant(value: object) -> datetime:
@@ -117,6 +119,15 @@ def _policy_from_payload(payload: dict[str, Any]) -> AuthorizationPolicy:
                     ),
                     valid_from=_parse_instant(item["valid_from"]),
                     valid_to=_parse_instant(item["valid_to"]),
+                    allowed_uses=frozenset(
+                        cast(
+                            list[SourceUseRight],
+                            _string_list(
+                                item.get("allowed_uses", []),
+                                reason="source_policy_allowed_uses_invalid",
+                            ),
+                        )
+                    ),
                 )
                 for item in policies_payload
             ),
@@ -151,6 +162,15 @@ def _policy_from_payload(payload: dict[str, Any]) -> AuthorizationPolicy:
                     ),
                     valid_from=_parse_instant(item["valid_from"]),
                     valid_to=_parse_instant(item["valid_to"]),
+                    allowed_uses=frozenset(
+                        cast(
+                            list[SourceUseRight],
+                            _string_list(
+                                item.get("allowed_uses", []),
+                                reason="source_entitlement_allowed_uses_invalid",
+                            ),
+                        )
+                    ),
                 )
                 for item in entitlements_payload
             ),

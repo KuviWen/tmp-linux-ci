@@ -33,7 +33,7 @@ stock-forecasting = "stock_forecasting.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-stock_forecasting = ["fixtures/*.csv"]
+stock_forecasting = ["fixtures/*.csv", "manifests/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

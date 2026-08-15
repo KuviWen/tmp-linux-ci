@@ -421,9 +421,140 @@ services:
       image-provenance:
         condition: service_completed_successfully
 
+  ticket-06-local-key-init:
+    <<: *application
+    profiles: ["ticket-06-acceptance"]
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects
+      - dagster-home:/var/lib/dagster
+      - ticket-06-local-key:/run/stock-forecasting
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - local-key
+      - init
+      - --path
+      - /run/stock-forecasting/local-api-key.json
+      - --owner
+      - ticket-06-researcher
+      - --environment
+      - development
+      - --scope
+      - market_data.collect
+      - --scope
+      - price_research_eligibility.read
+
+  ticket-06-authorization-init:
+    <<: *application
+    profiles: ["ticket-06-acceptance"]
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects
+      - dagster-home:/var/lib/dagster
+      - ticket-06-local-key:/run/stock-forecasting
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - authorization
+      - init-ticket-06
+      - --database-url
+      - postgresql+psycopg://postgres@postgres:5432/stock_forecasting
+      - --key-file
+      - /run/stock-forecasting/local-api-key.json
+    depends_on:
+      database-grants:
+        condition: service_completed_successfully
+      ticket-06-local-key-init:
+        condition: service_completed_successfully
+
+  ticket-06-api:
+    <<: *application
+    profiles: ["ticket-06-acceptance"]
+    build:
+      context: .
+      args:
+        SOURCE_DATE_EPOCH: "0"
+    environment:
+      <<: *application-environment
+      LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
+      AUTHORIZATION_POLICY_SET_ID: ticket-06-taiwan-policy-blocked-v1
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects
+      - dagster-home:/var/lib/dagster
+      - ticket-06-local-key:/run/stock-forecasting
+    command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "127.0.0.1", "--port", "8000"]
+    depends_on:
+      ticket-06-authorization-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  ticket-06-api-ingress:
+    image: nginx:1.29.1-alpine
+    profiles: ["ticket-06-acceptance"]
+    network_mode: service:ticket-06-api
+    volumes:
+      - ./docker/nginx/api-loopback.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      ticket-06-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/livez"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  ticket-06-acceptance:
+    <<: *application
+    profiles: ["ticket-06-acceptance"]
+    environment:
+      <<: *application-environment
+      LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
+      AUTHORIZATION_POLICY_SET_ID: ticket-06-taiwan-policy-blocked-v1
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects
+      - dagster-home:/var/lib/dagster
+      - ticket-06-local-key:/run/stock-forecasting
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - acceptance
+      - ticket-06
+      - --database-url
+      - postgresql+psycopg://stock@postgres:5432/stock_forecasting
+      - --object-root
+      - /var/lib/stock-forecasting/objects
+      - --information-cutoff
+      - *fixture-information-cutoff
+      - --observed-at
+      - *fixture-collection-observed-at
+      - --base-url
+      - http://ticket-06-api:8080
+      - --key-file
+      - /run/stock-forecasting/local-api-key.json
+    depends_on:
+      ticket-06-api:
+        condition: service_healthy
+      ticket-06-api-ingress:
+        condition: service_healthy
+      database-grants:
+        condition: service_completed_successfully
+      ticket-06-authorization-init:
+        condition: service_completed_successfully
+
 volumes:
   postgres-data:
   fixture-objects:
   dagster-home:
   local-api-key:
   image-provenance:
+  ticket-06-local-key:

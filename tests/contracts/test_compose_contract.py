@@ -29,6 +29,11 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "evidence-init",
         "image-provenance",
         "acceptance",
+        "ticket-06-local-key-init",
+        "ticket-06-authorization-init",
+        "ticket-06-api",
+        "ticket-06-api-ingress",
+        "ticket-06-acceptance",
     }
     assert services["postgres"]["image"] == "postgres:17-alpine"
     assert services["postgres"]["environment"] == {
@@ -305,6 +310,38 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
     serialized = (REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8").lower()
     assert "password" not in serialized
     assert ":latest" not in serialized
+
+
+def test_compose_declares_ticket_06_policy_blocked_deployed_acceptance() -> None:
+    compose = yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    profile = ["ticket-06-acceptance"]
+
+    assert services["ticket-06-local-key-init"]["profiles"] == profile
+    key_command = services["ticket-06-local-key-init"]["command"]
+    assert key_command.count("--scope") == 2
+    assert "market_data.collect" in key_command
+    assert "price_research_eligibility.read" in key_command
+    assert services["ticket-06-authorization-init"]["profiles"] == profile
+    assert "init-ticket-06" in services["ticket-06-authorization-init"]["command"]
+    assert services["ticket-06-api"]["profiles"] == profile
+    assert services["ticket-06-api"]["environment"]["AUTHORIZATION_POLICY_SET_ID"] == (
+        "ticket-06-taiwan-policy-blocked-v1"
+    )
+    assert services["ticket-06-api-ingress"]["network_mode"] == "service:ticket-06-api"
+    acceptance = services["ticket-06-acceptance"]
+    assert acceptance["profiles"] == profile
+    assert acceptance["command"][:5] == [
+        "python",
+        "-m",
+        "stock_forecasting.cli",
+        "acceptance",
+        "ticket-06",
+    ]
+    assert "--base-url" in acceptance["command"]
+    assert "--key-file" in acceptance["command"]
+    assert acceptance["depends_on"]["ticket-06-api"]["condition"] == "service_healthy"
+    assert acceptance["depends_on"]["ticket-06-api-ingress"]["condition"] == ("service_healthy")
 
 
 def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:

@@ -17,14 +17,19 @@ from stock_forecasting.acceptance import (
     run_ticket_05,
 )
 from stock_forecasting.acceptance_bundle import is_sha256_reference
-from stock_forecasting.authorization import LocalApiKeyIdentity
+from stock_forecasting.authorization import (
+    LocalApiKeyIdentity,
+    build_taiwan_price_blocked_authorization_policy,
+)
 from stock_forecasting.authorization_repository import (
     FIXTURE_REVOKED_POLICY_SET,
+    TICKET_06_POLICY_BLOCKED_SET,
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
 )
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.runtime import RuntimeSettings
+from stock_forecasting.ticket_06_acceptance import run_ticket_06_acceptance
 
 
 def _instant(value: str) -> datetime:
@@ -123,7 +128,14 @@ def _parser() -> argparse.ArgumentParser:
     acceptance = commands.add_parser("acceptance")
     acceptance.add_argument(
         "ticket",
-        choices=["ticket-01", "ticket-02", "ticket-03", "ticket-04", "ticket-05"],
+        choices=[
+            "ticket-01",
+            "ticket-02",
+            "ticket-03",
+            "ticket-04",
+            "ticket-05",
+            "ticket-06",
+        ],
     )
     acceptance.add_argument("--database-url", required=True)
     acceptance.add_argument("--object-root", type=Path, required=True)
@@ -132,6 +144,7 @@ def _parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--base-url")
     acceptance.add_argument("--dagster-url")
     acceptance.add_argument("--denied-base-url")
+    acceptance.add_argument("--key-file", type=Path)
     acceptance.add_argument("--project-root", type=Path, default=Path.cwd())
     acceptance.add_argument("--git-dir", type=Path, default=Path.cwd() / ".git")
     acceptance.add_argument("--previous-bundle-reference")
@@ -169,7 +182,12 @@ def _parser() -> argparse.ArgumentParser:
     local_key_init.add_argument(
         "--scope",
         action="append",
-        choices=["fixture_pipeline.execute", "research_prediction.read"],
+        choices=[
+            "fixture_pipeline.execute",
+            "research_prediction.read",
+            "market_data.collect",
+            "price_research_eligibility.read",
+        ],
         required=True,
     )
     local_key_init.add_argument("--issued-at", type=_instant)
@@ -182,6 +200,9 @@ def _parser() -> argparse.ArgumentParser:
     authorization_init.add_argument("--database-url", required=True)
     authorization_init.add_argument("--key-file", type=Path, required=True)
     authorization_init.add_argument("--platform-admin-key-file", type=Path, required=True)
+    ticket_06_authorization = authorization_commands.add_parser("init-ticket-06")
+    ticket_06_authorization.add_argument("--database-url", required=True)
+    ticket_06_authorization.add_argument("--key-file", type=Path, required=True)
     return parser
 
 
@@ -194,9 +215,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         "ticket-03",
         "ticket-04",
         "ticket-05",
+        "ticket-06",
     }:
-        if (arguments.base_url is None) != (arguments.dagster_url is None):
+        if arguments.ticket != "ticket-06" and (
+            (arguments.base_url is None) != (arguments.dagster_url is None)
+        ):
             parser.error("--base-url and --dagster-url must be provided together")
+        if arguments.ticket == "ticket-06":
+            if arguments.base_url is None or arguments.key_file is None:
+                parser.error("ticket-06 requires --base-url and --key-file")
+            report = run_ticket_06_acceptance(
+                database_url=arguments.database_url,
+                object_root=arguments.object_root,
+                base_url=arguments.base_url,
+                key_file=arguments.key_file,
+            )
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+            return 0 if report["status"] == "passed" else 1
         runners: dict[str, Callable[..., dict[str, object]]] = {
             "ticket-01": run_ticket_01,
             "ticket-02": run_ticket_02,
@@ -342,6 +377,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    if arguments.command == "authorization" and arguments.authorization_command == (
+        "init-ticket-06"
+    ):
+        identity = LocalApiKeyIdentity.load(arguments.key_file)
+        repository = AuthorizationPolicyRepository(
+            StateStore(arguments.database_url, create_schema=False)
+        )
+        repository.install(
+            TICKET_06_POLICY_BLOCKED_SET,
+            build_taiwan_price_blocked_authorization_policy(identity.context),
+        )
+        print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
         return 0
     return 2
 

@@ -15,6 +15,7 @@ from stock_forecasting.authorization import (
     OperationIntent,
     SourceEntitlement,
     SourcePolicyVersion,
+    SourceUseRight,
 )
 from stock_forecasting.cli import main
 
@@ -593,3 +594,196 @@ def test_non_overlapping_entitlement_history_selects_the_version_effective_at_ev
     assert decision.allowed is True
     assert decision.source_entitlement_version_id == "entitlement-current"
     assert decision.valid_until == now + timedelta(hours=12)
+
+
+@pytest.mark.parametrize(
+    ("policy_uses", "entitlement_uses", "expected_reason"),
+    [
+        (
+            frozenset({"ingest"}),
+            frozenset(
+                {
+                    "ingest",
+                    "retain_7_years",
+                    "transform",
+                    "model",
+                    "internal_display",
+                    "backup_restore",
+                }
+            ),
+            "source_policy_use_denied",
+        ),
+        (
+            frozenset(
+                {
+                    "ingest",
+                    "retain_7_years",
+                    "transform",
+                    "model",
+                    "internal_display",
+                    "backup_restore",
+                }
+            ),
+            frozenset({"ingest"}),
+            "source_entitlement_use_denied",
+        ),
+    ],
+)
+def test_price_source_rights_fail_closed_when_a_required_use_is_missing(
+    policy_uses: frozenset[SourceUseRight],
+    entitlement_uses: frozenset[SourceUseRight],
+    expected_reason: str,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    required_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_7_years",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-price-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"market_data.collect"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=(
+            SourcePolicyVersion(
+                version_id="policy-tw-price-v1",
+                dataset_id="tw-qualified-price-current",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                allowed_uses=policy_uses,
+            ),
+        ),
+        source_entitlements=(
+            SourceEntitlement(
+                version_id="entitlement-tw-price-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id="tw-qualified-price-current",
+                status="active",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+                allowed_uses=entitlement_uses,
+            ),
+        ),
+    )
+
+    decision = policy.evaluate(
+        identity.context,
+        OperationIntent(
+            action="market_data.collect",
+            dataset_id="tw-qualified-price-current",
+            purpose="price_research",
+            environment="development",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-p2-trace-tw-01",
+            correlation_id="request-ticket-06",
+            required_uses=required_uses,
+        ),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == expected_reason
+
+
+def test_price_source_rights_allow_collection_only_when_all_required_uses_are_effective() -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    required_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_7_years",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-price-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"market_data.collect"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=(
+            SourcePolicyVersion(
+                version_id="policy-tw-price-v1",
+                dataset_id="tw-qualified-price-current",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                allowed_uses=required_uses,
+            ),
+        ),
+        source_entitlements=(
+            SourceEntitlement(
+                version_id="entitlement-tw-price-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id="tw-qualified-price-current",
+                status="active",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+                allowed_uses=required_uses,
+            ),
+        ),
+    )
+
+    decision = policy.evaluate(
+        identity.context,
+        OperationIntent(
+            action="market_data.collect",
+            dataset_id="tw-qualified-price-current",
+            purpose="price_research",
+            environment="development",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-p2-trace-tw-01",
+            correlation_id="request-ticket-06",
+            required_uses=required_uses,
+        ),
+    )
+
+    assert decision.allowed is True
+    assert decision.reason_code == "authorized"

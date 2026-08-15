@@ -12,7 +12,9 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert set(contract["paths"]) == {
         "/api/v1/research/predictions",
         "/api/v1/research/listings/{listing_id}",
+        "/api/v1/research/listings/{listing_id}/price-eligibility",
         "/api/v1/operations/health",
+        "/api/v1/operations/sources",
     }
     prediction = contract["components"]["schemas"]["PredictionResult"]
     assert prediction["oneOf"] == [
@@ -65,3 +67,28 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "trace_id",
         "code",
     }
+    eligibility = contract["components"]["schemas"]["PriceResearchEligibility"]
+    assert eligibility["additionalProperties"] is False
+    assert set(eligibility["required"]) == {
+        "checks",
+        "dependency_id",
+        "formally_qualified",
+        "listing_id",
+        "market",
+        "reason_code",
+        "sources",
+        "status",
+    }
+    assert eligibility["properties"]["status"]["enum"] == [
+        "qualified",
+        "policy_blocked",
+        "quarantined",
+    ]
+    source = contract["components"]["schemas"]["PriceSourceEligibility"]
+    assert source["properties"]["source_mode"]["enum"] == ["current", "historical"]
+    assert source["properties"]["dataset_version_id"]["type"] == ["string", "null"]
+    assert source["properties"]["adjustment_version_id"]["type"] == ["string", "null"]
+    assert source["properties"]["raw_object_id"]["type"] == ["string", "null"]
+    assert source["properties"]["source_revision"]["type"] == ["string", "null"]
+    assert source["properties"]["checkpoint"]["type"] == ["string", "null"]
+    assert source["properties"]["evaluated_at"] == {"type": "string", "format": "date-time"}

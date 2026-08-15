@@ -1,0 +1,608 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from typing import NoReturn
+
+import pytest
+
+from stock_forecasting.authorization import (
+    ActionGrant,
+    AuthorizationPolicy,
+    LocalApiKeyIdentity,
+    SourceEntitlement,
+    SourcePolicyVersion,
+    SourceUseRight,
+)
+from stock_forecasting.data_supply import (
+    CanonicalPriceRow,
+    CollectedSourcePartition,
+    CompanyActionRecord,
+    DataSupply,
+    DecodedSourcePartition,
+    ListingLifecycleRecord,
+    LoadedSourcePartition,
+    SourceCollectionCoverage,
+    SourcePartitionRequest,
+)
+from stock_forecasting.platform.object_repository import FilesystemObjectRepository
+from stock_forecasting.platform.state_store import StateStore
+
+
+class ForbiddenPriceAdapter:
+    calls = 0
+
+    def load(self, request: SourcePartitionRequest) -> NoReturn:
+        self.calls += 1
+        raise AssertionError("a policy-blocked source must not be contacted")
+
+
+class LiteralPriceAdapter:
+    def __init__(self, loaded: LoadedSourcePartition) -> None:
+        self.loaded = loaded
+        self.requests: list[SourcePartitionRequest] = []
+
+    def load(self, request: SourcePartitionRequest) -> LoadedSourcePartition:
+        self.requests.append(request)
+        return self.loaded
+
+
+def _qualified_price_policy(
+    identity: LocalApiKeyIdentity,
+    now: datetime,
+) -> AuthorizationPolicy:
+    allowed_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_7_years",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
+    )
+    return AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-price-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"market_data.collect"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=(
+            SourcePolicyVersion(
+                version_id="policy-tw-price-v1",
+                dataset_id="twse-current-qualified-price",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                allowed_uses=allowed_uses,
+            ),
+        ),
+        source_entitlements=(
+            SourceEntitlement(
+                version_id="entitlement-tw-price-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id="twse-current-qualified-price",
+                status="active",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+                allowed_uses=allowed_uses,
+            ),
+        ),
+    )
+
+
+def _loaded_partition(
+    *,
+    now: datetime,
+    listing_id: str,
+    request_id: str,
+    source_revision: str,
+    raw_payload: bytes,
+    complete: bool = True,
+    revision_kind: str = "original",
+    quality_issues: tuple[str, ...] = (),
+    requested_start: date = date(2019, 8, 14),
+) -> LoadedSourcePartition:
+    coverage = SourceCollectionCoverage(
+        requested_start=requested_start,
+        requested_end=date(2026, 8, 14),
+        observed_start=date(2019, 8, 14),
+        observed_end=date(2026, 8, 14) if complete else date(2026, 8, 13),
+        complete=complete,
+    )
+    collection = CollectedSourcePartition(
+        request_id=request_id,
+        source_id="twse-current-qualified-price",
+        acquired_at=now,
+        sanitized_source_uri="provider://qualified-price/bounded-partition",
+        media_type="application/json",
+        raw_payload=raw_payload,
+        checkpoint_before=None,
+        checkpoint_after="page:1",
+        coverage=coverage,
+        source_revision=source_revision,
+    )
+    decoded = DecodedSourcePartition(
+        source_id=collection.source_id,
+        schema_version="taiwan-unadjusted-eod-v1",
+        source_revision=source_revision,
+        prices=(
+            CanonicalPriceRow(
+                listing_id=listing_id,
+                session_date=date(2026, 8, 14),
+                open=Decimal("1008.00"),
+                high=Decimal("1012.00"),
+                low=Decimal("1007.00"),
+                close=Decimal("1010.00"),
+                volume=1100000,
+            ),
+        ),
+        company_actions=(),
+        listing_lifecycle=(
+            ListingLifecycleRecord(
+                listing_id=listing_id,
+                effective_date=date(2019, 8, 14),
+                status="active",
+                source_event_id="lifecycle-001",
+            ),
+        ),
+        adjusted_close_cross_checks=(Decimal("1010.00"),),
+        identity_assertion_ids=("identity-assertion-001",),
+        parent_object_ids=("identity-object-001",),
+        revision_kind=revision_kind,  # type: ignore[arg-type]
+        quality_issues=quality_issues,  # type: ignore[arg-type]
+    )
+    return LoadedSourcePartition(collection, decoded)
+
+
+def test_unverified_taiwan_market_dependency_blocks_before_provider_access(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-price-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"market_data.collect"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=(),
+        source_entitlements=(),
+    )
+    state_store = StateStore(
+        f"sqlite+pysqlite:///{tmp_path / 'ticket-06.db'}",
+        create_schema=True,
+    )
+    adapter = ForbiddenPriceAdapter()
+    data_supply = DataSupply(
+        authorization_policy=policy,
+        security_context=identity.context,
+        adapters={"twse-current-qualified-price": adapter},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=state_store,
+        clock=lambda: now,
+    )
+    request = SourcePartitionRequest(
+        request_id="request-ticket-06-blocked",
+        trace_id="trace-p2-trace-tw-01-blocked",
+        source_id="twse-current-qualified-price",
+        mode="current",
+        listing_ids=("10000000-0000-4000-8000-000000000001",),
+        start_date=date(2026, 8, 14),
+        end_date=date(2026, 8, 14),
+        expected_checkpoint=None,
+    )
+
+    outcome = data_supply.materialize(request)
+
+    assert outcome.as_payload() == {
+        "status": "policy_blocked",
+        "reason_code": "dependency_evidence_unverified",
+        "policy_reason_code": "source_policy_unknown",
+        "dependency_id": "DEP-MKT-TW-01",
+        "source_id": "twse-current-qualified-price",
+        "source_mode": "current",
+        "listing_ids": ["10000000-0000-4000-8000-000000000001"],
+        "trace_id": "trace-p2-trace-tw-01-blocked",
+        "policy_decision_id": outcome.policy_decision_id,
+        "evaluated_at": "2026-08-15T01:00:00Z",
+        "raw_object_id": None,
+        "normalized_object_id": None,
+        "source_revision": None,
+        "checkpoint": None,
+        "coverage": None,
+        "dataset_version_id": None,
+        "adjustment_version_id": None,
+    }
+    assert adapter.calls == 0
+    assert state_store.list_audit_events(trace_id=request.trace_id) == [
+        {
+            "action": "market_data.collect",
+            "outcome": "denied",
+            "reason_code": "source_policy_unknown",
+            "trace_id": request.trace_id,
+            "authentication_method": "local_api_key",
+            "correlation_id": request.request_id,
+            "credential_id": identity.context.credential_id,
+            "data_protection_class": None,
+            "dataset_id": request.source_id,
+            "decision_id": outcome.policy_decision_id,
+            "environment": "development",
+            "evaluated_at": "2026-08-15T01:00:00Z",
+            "evaluation_id": state_store.list_audit_events(trace_id=request.trace_id)[0][
+                "evaluation_id"
+            ],
+            "grant_version_id": "grant-price-v1",
+            "principal_id": identity.context.principal_id,
+            "purpose": "price_research",
+            "source_entitlement_version_id": None,
+            "source_policy_version_id": None,
+            "valid_until": "2026-08-15T01:00:00Z",
+        }
+    ]
+    assert (
+        state_store.get_price_research_eligibility(listing_id=request.listing_ids[0])
+        == outcome.as_payload()
+    )
+
+
+def test_qualified_source_materializes_immutable_unadjusted_and_internal_adjustment_versions(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    coverage = SourceCollectionCoverage(
+        requested_start=date(2019, 8, 14),
+        requested_end=date(2026, 8, 14),
+        observed_start=date(2019, 8, 14),
+        observed_end=date(2026, 8, 14),
+        complete=True,
+    )
+    collection = CollectedSourcePartition(
+        request_id="request-ticket-06-qualified",
+        source_id="twse-current-qualified-price",
+        acquired_at=now,
+        sanitized_source_uri="provider://qualified-price/bounded-partition",
+        media_type="application/json",
+        raw_payload=b'{"unadjusted":true,"providerAdjustedClose":[995,1010]}',
+        checkpoint_before=None,
+        checkpoint_after="page:1",
+        coverage=coverage,
+        source_revision="source-revision-2026-08-15",
+    )
+    decoded = DecodedSourcePartition(
+        source_id=collection.source_id,
+        schema_version="taiwan-unadjusted-eod-v1",
+        source_revision=collection.source_revision,
+        prices=(
+            CanonicalPriceRow(
+                listing_id=listing_id,
+                session_date=date(2026, 8, 13),
+                open=Decimal("998.00"),
+                high=Decimal("1002.00"),
+                low=Decimal("997.00"),
+                close=Decimal("1000.00"),
+                volume=1000000,
+            ),
+            CanonicalPriceRow(
+                listing_id=listing_id,
+                session_date=date(2026, 8, 14),
+                open=Decimal("1008.00"),
+                high=Decimal("1012.00"),
+                low=Decimal("1007.00"),
+                close=Decimal("1010.00"),
+                volume=1100000,
+            ),
+        ),
+        company_actions=(
+            CompanyActionRecord(
+                listing_id=listing_id,
+                effective_date=date(2026, 8, 14),
+                kind="cash_dividend",
+                value=Decimal("5.00"),
+                currency="TWD",
+                source_action_id="action-001",
+            ),
+        ),
+        listing_lifecycle=(
+            ListingLifecycleRecord(
+                listing_id=listing_id,
+                effective_date=date(2019, 8, 14),
+                status="active",
+                source_event_id="lifecycle-001",
+            ),
+        ),
+        adjusted_close_cross_checks=(Decimal("995.00"), Decimal("1010.00")),
+        identity_assertion_ids=("identity-assertion-001",),
+        parent_object_ids=("identity-object-001",),
+    )
+    adapter = LiteralPriceAdapter(LoadedSourcePartition(collection, decoded))
+    state_store = StateStore(
+        f"sqlite+pysqlite:///{tmp_path / 'ticket-06-qualified.db'}",
+        create_schema=True,
+    )
+    data_supply = DataSupply(
+        authorization_policy=_qualified_price_policy(identity, now),
+        security_context=identity.context,
+        adapters={collection.source_id: adapter},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=state_store,
+        clock=lambda: now,
+    )
+    request = SourcePartitionRequest(
+        request_id=collection.request_id,
+        trace_id="trace-p2-trace-tw-01-qualified",
+        source_id=collection.source_id,
+        mode="current",
+        listing_ids=(listing_id,),
+        start_date=coverage.requested_start,
+        end_date=coverage.requested_end,
+        expected_checkpoint=None,
+    )
+
+    first = data_supply.materialize(request)
+    replay = data_supply.materialize(request)
+
+    assert first.status == "published"
+    assert first.reason_code == "qualified_price_materialized"
+    assert first.dataset_version_id is not None
+    assert first.adjustment_version_id is not None
+    assert first.raw_object_id is not None
+    assert first.normalized_object_id is not None
+    assert first.source_revision == "source-revision-2026-08-15"
+    assert first.checkpoint == "page:1"
+    assert replay.dataset_version_id == first.dataset_version_id
+    assert replay.adjustment_version_id == first.adjustment_version_id
+    assert len(adapter.requests) == 2
+    assert all(call.policy_decision_id == first.policy_decision_id for call in adapter.requests)
+    dataset = state_store.get_canonical_artifact(first.dataset_version_id)
+    assert dataset["artifact_kind"] == "dataset_version"
+    assert dataset["payload"]["price_semantics"] == "unadjusted"
+    assert dataset["payload"]["schema_version"] == "taiwan-unadjusted-eod-v1"
+    assert dataset["payload"]["source_revision"] == "source-revision-2026-08-15"
+    assert dataset["payload"]["policy_decision_id"] == first.policy_decision_id
+    adjustment = state_store.get_canonical_artifact(first.adjustment_version_id)
+    assert adjustment["artifact_kind"] == "adjustment_version"
+    assert adjustment["payload"]["method"] == "internal_total_return_adjustment_v1"
+    assert adjustment["payload"]["adjusted_closes"] == [
+        {
+            "adjusted_close": "995.00",
+            "listing_id": listing_id,
+            "session_date": "2026-08-13",
+        },
+        {
+            "adjusted_close": "1010.00",
+            "listing_id": listing_id,
+            "session_date": "2026-08-14",
+        },
+    ]
+    assert adjustment["payload"]["provider_cross_check"] == "matched"
+    trace = state_store.get_trace_evidence(request.trace_id)
+    assert trace["execution_purpose"] == "price_research"
+    assert trace["artifact_kinds"] == [
+        "raw_source_object",
+        "normalized_price_object",
+        "dataset_version",
+        "adjustment_version",
+    ]
+
+
+@pytest.mark.parametrize(
+    (
+        "complete",
+        "revision_kind",
+        "quality_issues",
+        "mode",
+        "requested_start",
+        "expected_reason",
+    ),
+    [
+        (False, "original", (), "current", date(2019, 8, 14), "incomplete_coverage"),
+        (
+            True,
+            "original",
+            ("identity_ambiguous",),
+            "current",
+            date(2019, 8, 14),
+            "identity_ambiguous",
+        ),
+        (
+            True,
+            "original",
+            ("missing_company_action",),
+            "current",
+            date(2019, 8, 14),
+            "missing_company_action",
+        ),
+        (True, "withdrawal", (), "current", date(2019, 8, 14), "source_withdrawn"),
+        (
+            True,
+            "original",
+            (),
+            "historical",
+            date(2025, 8, 14),
+            "insufficient_history_depth",
+        ),
+    ],
+)
+def test_invalid_source_partitions_are_quarantined_with_raw_evidence(
+    tmp_path: Path,
+    complete: bool,
+    revision_kind: str,
+    quality_issues: tuple[str, ...],
+    mode: str,
+    requested_start: date,
+    expected_reason: str,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    loaded = _loaded_partition(
+        now=now,
+        listing_id=listing_id,
+        request_id=f"request-{expected_reason}",
+        source_revision=f"revision-{expected_reason}",
+        raw_payload=f'{{"case":"{expected_reason}"}}'.encode(),
+        complete=complete,
+        revision_kind=revision_kind,
+        quality_issues=quality_issues,
+        requested_start=requested_start,
+    )
+    adapter = LiteralPriceAdapter(loaded)
+    state_store = StateStore(
+        f"sqlite+pysqlite:///{tmp_path / 'quarantine.db'}",
+        create_schema=True,
+    )
+    data_supply = DataSupply(
+        authorization_policy=_qualified_price_policy(identity, now),
+        security_context=identity.context,
+        adapters={loaded.collection.source_id: adapter},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=state_store,
+        clock=lambda: now,
+    )
+    request = SourcePartitionRequest(
+        request_id=loaded.collection.request_id,
+        trace_id=f"trace-{expected_reason}",
+        source_id=loaded.collection.source_id,
+        mode=mode,  # type: ignore[arg-type]
+        listing_ids=(listing_id,),
+        start_date=loaded.collection.coverage.requested_start,
+        end_date=loaded.collection.coverage.requested_end,
+        expected_checkpoint=None,
+    )
+
+    outcome = data_supply.materialize(request)
+
+    assert outcome.status == "quarantined"
+    assert outcome.reason_code == expected_reason
+    assert outcome.dataset_version_id is None
+    assert outcome.adjustment_version_id is None
+    assert outcome.raw_object_id is not None
+    assert outcome.source_revision == loaded.collection.source_revision
+    assert state_store.get_price_research_eligibility(listing_id=listing_id) == (
+        outcome.as_payload()
+    )
+    assert state_store.get_trace_evidence(request.trace_id)["artifact_kinds"] == [
+        "raw_source_object",
+        "quarantine_record",
+    ]
+
+
+@pytest.mark.parametrize("revision_kind", ["late_arrival", "correction"])
+def test_late_and_corrected_partitions_publish_new_versions_without_overwrite(
+    tmp_path: Path,
+    revision_kind: str,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    original = _loaded_partition(
+        now=now,
+        listing_id=listing_id,
+        request_id=f"request-{revision_kind}-original",
+        source_revision="revision-original",
+        raw_payload=b'{"close":"1010.00","revision":"original"}',
+    )
+    adapter = LiteralPriceAdapter(original)
+    state_store = StateStore(
+        f"sqlite+pysqlite:///{tmp_path / 'revisions.db'}",
+        create_schema=True,
+    )
+    data_supply = DataSupply(
+        authorization_policy=_qualified_price_policy(identity, now),
+        security_context=identity.context,
+        adapters={original.collection.source_id: adapter},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=state_store,
+        clock=lambda: now,
+    )
+    first_request = SourcePartitionRequest(
+        request_id=original.collection.request_id,
+        trace_id=f"trace-{revision_kind}-original",
+        source_id=original.collection.source_id,
+        mode="current",
+        listing_ids=(listing_id,),
+        start_date=original.collection.coverage.requested_start,
+        end_date=original.collection.coverage.requested_end,
+        expected_checkpoint=None,
+    )
+    first = data_supply.materialize(first_request)
+    revised = _loaded_partition(
+        now=now + timedelta(minutes=5),
+        listing_id=listing_id,
+        request_id=f"request-{revision_kind}-revised",
+        source_revision=f"revision-{revision_kind}",
+        raw_payload=f'{{"close":"1011.00","revision":"{revision_kind}"}}'.encode(),
+        revision_kind=revision_kind,
+    )
+    adapter.loaded = revised
+
+    second = data_supply.materialize(
+        replace(
+            first_request,
+            request_id=revised.collection.request_id,
+            trace_id=f"trace-{revision_kind}-revised",
+        )
+    )
+
+    assert first.status == "published"
+    assert second.status == "published"
+    assert first.dataset_version_id is not None
+    assert second.dataset_version_id is not None
+    assert second.dataset_version_id != first.dataset_version_id
+    assert second.adjustment_version_id != first.adjustment_version_id
+    assert (
+        state_store.get_canonical_artifact(first.dataset_version_id)["payload"]["source_revision"]
+        == "revision-original"
+    )
+    assert (
+        state_store.get_canonical_artifact(second.dataset_version_id)["payload"]["source_revision"]
+        == f"revision-{revision_kind}"
+    )

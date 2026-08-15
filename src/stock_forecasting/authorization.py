@@ -16,9 +16,22 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 RuntimeEnvironment = Literal["local", "development", "test", "staging", "production"]
 EntitlementStatus = Literal["draft", "under_review", "active", "suspended", "expired", "revoked"]
 DataProtectionClass = Literal["public_source", "internal", "licensed", "restricted", "secret"]
-AuthorizationAction = Literal["fixture_pipeline.execute", "research_prediction.read"]
-AuthorizationPurpose = Literal["fixture_research"]
+AuthorizationAction = Literal[
+    "fixture_pipeline.execute",
+    "research_prediction.read",
+    "market_data.collect",
+    "price_research_eligibility.read",
+]
+AuthorizationPurpose = Literal["fixture_research", "price_research"]
 AuthorizationResourceState = Literal["active"]
+SourceUseRight = Literal[
+    "ingest",
+    "retain_7_years",
+    "transform",
+    "model",
+    "internal_display",
+    "backup_restore",
+]
 
 _LOCAL_KEY_ENVIRONMENTS = frozenset({"local", "development"})
 _CONTEXT_ISSUER = object()
@@ -274,7 +287,13 @@ class LocalApiKeyIdentity:
                 or not isinstance(scopes, list)
                 or not scopes
                 or not all(
-                    scope in {"fixture_pipeline.execute", "research_prediction.read"}
+                    scope
+                    in {
+                        "fixture_pipeline.execute",
+                        "research_prediction.read",
+                        "market_data.collect",
+                        "price_research_eligibility.read",
+                    }
                     for scope in scopes
                 )
                 or not isinstance(data_protection_classes, list)
@@ -344,6 +363,7 @@ class SourcePolicyVersion:
     resource_states: frozenset[AuthorizationResourceState]
     valid_from: datetime = _MIN_INSTANT
     valid_to: datetime = _MAX_INSTANT
+    allowed_uses: frozenset[SourceUseRight] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -357,6 +377,7 @@ class SourceEntitlement:
     environments: frozenset[RuntimeEnvironment]
     valid_from: datetime
     valid_to: datetime
+    allowed_uses: frozenset[SourceUseRight] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -369,6 +390,7 @@ class OperationIntent:
     evaluated_at: datetime
     trace_id: str
     correlation_id: str
+    required_uses: frozenset[SourceUseRight] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -425,7 +447,7 @@ def action_grant_version_payload(grant: ActionGrant) -> dict[str, object]:
 
 
 def source_policy_version_payload(policy: SourcePolicyVersion) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "version_id": policy.version_id,
         "dataset_id": policy.dataset_id,
         "allowed_actions": sorted(policy.allowed_actions),
@@ -436,12 +458,15 @@ def source_policy_version_payload(policy: SourcePolicyVersion) -> dict[str, obje
         "valid_from": _instant(policy.valid_from),
         "valid_to": _instant(policy.valid_to),
     }
+    if policy.allowed_uses:
+        payload["allowed_uses"] = sorted(policy.allowed_uses)
+    return payload
 
 
 def source_entitlement_version_payload(
     entitlement: SourceEntitlement,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "version_id": entitlement.version_id,
         "principal_id": entitlement.principal_id,
         "dataset_id": entitlement.dataset_id,
@@ -452,6 +477,9 @@ def source_entitlement_version_payload(
         "valid_from": _instant(entitlement.valid_from),
         "valid_to": _instant(entitlement.valid_to),
     }
+    if entitlement.allowed_uses:
+        payload["allowed_uses"] = sorted(entitlement.allowed_uses)
+    return payload
 
 
 def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, str | None]:
@@ -584,6 +612,8 @@ class AuthorizationPolicy:
             reason_code = "source_policy_environment_denied"
         elif intent.resource_state not in source_policy.resource_states:
             reason_code = "source_policy_resource_state_denied"
+        elif not intent.required_uses <= source_policy.allowed_uses:
+            reason_code = "source_policy_use_denied"
         elif source_policy.data_protection_class not in context.data_protection_classes:
             reason_code = "data_protection_class_denied"
         elif len(entitlement_candidates) > 1:
@@ -600,6 +630,8 @@ class AuthorizationPolicy:
             reason_code = "source_entitlement_purpose_denied"
         elif intent.environment not in entitlement.environments:
             reason_code = "source_entitlement_environment_denied"
+        elif not intent.required_uses <= entitlement.allowed_uses:
+            reason_code = "source_entitlement_use_denied"
         allowed = reason_code == "authorized"
         decision_identity = "/".join(
             (
@@ -774,4 +806,74 @@ def build_fixture_authorization_policy(
         action_grants=(grant,),
         source_policies=tuple(source_policies),
         source_entitlements=tuple(source_entitlements),
+    )
+
+
+def build_taiwan_price_blocked_authorization_policy(
+    context: SecurityContext,
+) -> AuthorizationPolicy:
+    actions: frozenset[AuthorizationAction] = frozenset(
+        {"market_data.collect", "price_research_eligibility.read"}
+    )
+    grant_payload: dict[str, object] = {
+        "principal_id": context.principal_id,
+        "actions": sorted(actions),
+        "environment": context.environment,
+        "valid_from": _instant(context.issued_at),
+        "valid_to": _instant(context.expires_at),
+    }
+    grant = ActionGrant(
+        version_id=_contract_version_id("ticket-06/action-grant", grant_payload),
+        principal_id=context.principal_id,
+        actions=actions,
+        environment=context.environment,
+        valid_from=context.issued_at,
+        valid_to=context.expires_at,
+    )
+    policy_payload: dict[str, object] = {
+        "dataset_id": "price-research-eligibility",
+        "allowed_actions": ["price_research_eligibility.read"],
+        "purposes": ["price_research"],
+        "environments": [context.environment],
+        "data_protection_class": "internal",
+        "resource_states": ["active"],
+        "valid_from": _instant(context.issued_at),
+        "valid_to": _instant(context.expires_at),
+    }
+    source_policy = SourcePolicyVersion(
+        version_id=_contract_version_id("ticket-06/source-policy", policy_payload),
+        dataset_id="price-research-eligibility",
+        allowed_actions=frozenset({"price_research_eligibility.read"}),
+        purposes=frozenset({"price_research"}),
+        environments=frozenset({context.environment}),
+        data_protection_class="internal",
+        resource_states=frozenset({"active"}),
+        valid_from=context.issued_at,
+        valid_to=context.expires_at,
+    )
+    entitlement_payload: dict[str, object] = {
+        "principal_id": context.principal_id,
+        "dataset_id": "price-research-eligibility",
+        "status": "active",
+        "allowed_actions": ["price_research_eligibility.read"],
+        "purposes": ["price_research"],
+        "environments": [context.environment],
+        "valid_from": _instant(context.issued_at),
+        "valid_to": _instant(context.expires_at),
+    }
+    entitlement = SourceEntitlement(
+        version_id=_contract_version_id("ticket-06/source-entitlement", entitlement_payload),
+        principal_id=context.principal_id,
+        dataset_id="price-research-eligibility",
+        status="active",
+        allowed_actions=frozenset({"price_research_eligibility.read"}),
+        purposes=frozenset({"price_research"}),
+        environments=frozenset({context.environment}),
+        valid_from=context.issued_at,
+        valid_to=context.expires_at,
+    )
+    return AuthorizationPolicy(
+        action_grants=(grant,),
+        source_policies=(source_policy,),
+        source_entitlements=(entitlement,),
     )

@@ -1,0 +1,51 @@
+{
+  "manifest_id": "p2-stock-pool-10-plus-10-v1",
+  "market_targets": {
+    "XTAI": 10,
+    "US": 10
+  },
+  "market_calendar_cases": ["half_day_session"],
+  "evidence_status": "qualification_candidate",
+  "taiwan_listings": [
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000001",
+      "coverage_cases": ["ordinary_share", "ticker_change"]
+    },
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000002",
+      "coverage_cases": ["ordinary_share", "company_action"]
+    },
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000003",
+      "coverage_cases": ["ordinary_share", "suspension"]
+    },
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000004",
+      "coverage_cases": ["ordinary_share", "historical_delisting"]
+    },
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000005",
+      "coverage_cases": ["ordinary_share"]
+    },
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000006",
+      "coverage_cases": ["ordinary_share"]
+    },
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000007",
+      "coverage_cases": ["ordinary_share"]
+    },
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000008",
+      "coverage_cases": ["ordinary_share"]
+    },
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000009",
+      "coverage_cases": ["ordinary_share"]
+    },
+    {
+      "listing_id": "10000000-0000-4000-8000-000000000010",
+      "coverage_cases": ["ordinary_share"]
+    }
+  ]
+}

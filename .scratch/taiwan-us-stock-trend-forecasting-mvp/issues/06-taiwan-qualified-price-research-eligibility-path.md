@@ -11,9 +11,17 @@
 Status: ready-for-agent
 
 - [ ] 版本化 10＋10 manifest 中的台股涵蓋普通股、ticker 變更、公司行動、暫停／半日市及訓練歷史中的下市案例。
-- [ ] TWSE 當期與契約歷史 adapter 通過共同 Collector／Decoder、checkpoint、rate、policy、coverage、revision、identity 及 reference-graph contracts，供應商原生型別不外洩。
-- [ ] 原始未調整價格、公司行動及掛牌生命週期建立不可變資料集與內部 AdjustmentVersion，供應商 adjusted close 只能交叉驗證。
+- [x] TWSE 當期與契約歷史 adapter 通過共同 Collector／Decoder、checkpoint、rate、policy、coverage、revision、identity 及 reference-graph contracts，供應商原生型別不外洩。
+- [x] 原始未調整價格、公司行動及掛牌生命週期建立不可變資料集與內部 AdjustmentVersion，供應商 adjusted close 只能交叉驗證。
 - [ ] 來源權利完整時，資料集資格、涵蓋、schema、integrity、政策及歷史深度能由營運查詢與研究支援狀態追溯到原始證據。
-- [ ] `DEP-MKT-TW-01` 未核實、到期或用途／保存不足時，adapter 維持 disabled／policy-blocked，REST／UI 顯示穩定原因且不暗用爬蟲、測試 key、人工下載或其他免費來源。
-- [ ] Late、correction、withdrawal、身分歧義、缺公司行動與不完整涵蓋分別產生新版本、隔離或阻斷證據，不覆寫已發布資料。
-- [ ] 台股資料路徑可由外部展示一個合格或受阻掛牌從來源政策、資料集與調整版本到研究／營運狀態的完整譜系。
+- [x] `DEP-MKT-TW-01` 未核實、到期或用途／保存不足時，adapter 維持 disabled／policy-blocked，REST／UI 顯示穩定原因且不暗用爬蟲、測試 key、人工下載或其他免費來源。
+- [x] Late、correction、withdrawal、身分歧義、缺公司行動與不完整涵蓋分別產生新版本、隔離或阻斷證據，不覆寫已發布資料。
+- [x] 台股資料路徑可由外部展示一個合格或受阻掛牌從來源政策、資料集與調整版本到研究／營運狀態的完整譜系。
+
+## Implementation notes
+
+- Public seams: `DataSupply.materialize(SourcePartitionRequest)`, `GET /api/v1/research/listings/{listing_id}/price-eligibility`, `GET /api/v1/operations/sources`, the listing eligibility UI, and the `ticket-06-acceptance` Compose profile.
+- The source boundary is the shared `SourceCollector`／`SourceDecoder` adapter. Authorization checks all six required source uses before the adapter can be contacted; canonical objects, authorization audit, eligibility, dataset, and adjustment evidence publish transactionally.
+- The manifest is deliberately `qualification_candidate`, so the first criterion remains unchecked until real listing-selection evidence is supplied. The qualified lineage branch is covered by synthetic provider-contract evidence only; without verified `DEP-MKT-TW-01` rights it is not formal evidence, so the fourth criterion also remains unchecked.
+- Verified: `python -m pytest -m "not postgresql" -q` (149 passed), ticket-focused pytest (33 passed), `python -m mypy src tests`, `python -m ruff check .`, `python -m ruff format --check .`, and an isolated wheel build.
+- Environment-limited: the PostgreSQL-marked test could not connect to a local server, and the Compose acceptance command could not start because Docker is not installed. Neither result is reported as passed.

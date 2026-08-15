@@ -10,6 +10,7 @@ from stock_forecasting.authorization import (
 from stock_forecasting.authorization_repository import (
     FIXTURE_ACTIVE_POLICY_SET,
     FIXTURE_REVOKED_POLICY_SET,
+    TICKET_06_POLICY_BLOCKED_SET,
     AuthorizationPolicyRepository,
 )
 from stock_forecasting.cli import main
@@ -119,3 +120,43 @@ def test_authorization_init_cli_installs_main_and_admin_policy_sets_without_secr
         .status
         == "revoked"
     )
+
+
+def test_ticket_06_authorization_init_installs_metadata_read_but_no_price_source_rights(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-researcher",
+        environment="development",
+        scopes={"market_data.collect", "price_research_eligibility.read"},
+        issued_at=now,
+        expires_at=now.replace(day=16),
+    )
+    key_file = tmp_path / "ticket-06-local-api-key.json"
+    identity.save(key_file)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'ticket-06-authorization.db'}"
+    StateStore(database_url, create_schema=True)
+
+    exit_code = main(
+        [
+            "authorization",
+            "init-ticket-06",
+            "--database-url",
+            database_url,
+            "--key-file",
+            str(key_file),
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == '{"policy_set_count": 1, "status": "initialized"}\n'
+    policy = AuthorizationPolicyRepository(StateStore(database_url, create_schema=False)).get(
+        TICKET_06_POLICY_BLOCKED_SET,
+        principal_id=identity.context.principal_id,
+    )
+    assert [item.dataset_id for item in policy.source_policies] == ["price-research-eligibility"]
+    assert [item.dataset_id for item in policy.source_entitlements] == [
+        "price-research-eligibility"
+    ]
