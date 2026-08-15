@@ -192,6 +192,55 @@ def _complete_reference_graph_for_listings(
     )
 
 
+def _collected_partition_for_reference_graph(
+    reference_graph: AlpacaReferenceGraph,
+    *,
+    listing_ids: tuple[str, ...],
+    start_date: date,
+    end_date: date,
+    bars: dict[str, list[dict[str, object]]],
+    corporate_actions: dict[str, object] | None = None,
+) -> CollectedSourcePartition:
+    raw_payload = json.dumps(
+        {
+            "provider_id": "alpaca-market-data-basic",
+            "schema_version": "alpaca-source-bundle-v1",
+            "bars_pages": [{"bars": bars, "next_page_token": None}],
+            "corporate_action_pages": [{"next_page_token": None, **(corporate_actions or {})}],
+            "calendar": [],
+            "reference_graph": reference_graph.partition_payload(
+                listing_ids=listing_ids,
+                start_date=start_date,
+                end_date=end_date,
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return CollectedSourcePartition(
+        request_id="request-ticket-07-dated-symbol-resolution",
+        source_id="alpaca-us-stock-bars",
+        acquired_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        sanitized_source_uri="https://data.alpaca.markets/v2/stocks/bars",
+        media_type="application/json",
+        raw_payload=raw_payload,
+        checkpoint_before=None,
+        checkpoint_after="sha256:dated-symbol-resolution",
+        coverage=SourceCollectionCoverage(
+            requested_start=start_date,
+            requested_end=end_date,
+            observed_start=start_date,
+            observed_end=end_date,
+            complete=True,
+        ),
+        source_revision="sha256:dated-symbol-resolution",
+        requested_listing_ids=listing_ids,
+        reference_graph_version_id=reference_graph.version_id,
+        reference_graph_lifecycle_verified=True,
+        company_action_completeness_verified=True,
+    )
+
+
 def test_complete_reference_graph_requires_an_evidenced_active_event() -> None:
     listing_id = "70000000-0000-4000-8000-000000000011"
     listing = AlpacaReferenceListing(
@@ -335,9 +384,9 @@ def test_urllib_provider_transport_encodes_query_and_keeps_auth_in_headers() -> 
         (
             403,
             b'{"message":"forbidden"}',
-            "validation_failed",
-            "source_credential_authentication_failed",
-            None,
+            "valid",
+            "source_credential_valid",
+            "source_contract_forbidden",
         ),
         (
             429,
@@ -535,6 +584,56 @@ def test_live_contract_keeps_an_authenticated_credential_valid_when_source_probe
     )
 
 
+def test_live_contract_classifies_forbidden_data_as_source_contract_not_bad_credentials() -> None:
+    result = AlpacaLiveContractValidator(
+        LiteralProviderTransport(
+            ProviderHttpResponse(403, b'{"message":"subscription does not permit SIP"}')
+        )
+    ).validate({"api_key_id": "PK-AUTHENTICATED", "api_secret_key": "authenticated-secret"})
+
+    assert result.readiness == "valid"
+    assert result.reason_code == "source_credential_valid"
+    assert result.evidence.authentication_status == "passed"
+    assert result.source_contract_assessment is not None
+    assert result.source_contract_assessment.live_validation == "failed"
+    assert (
+        result.source_contract_assessment.source_contract_reason_code == "source_contract_forbidden"
+    )
+
+
+def test_alpaca_collector_surfaces_forbidden_data_as_unavailable_not_credential_required() -> None:
+    collector = AlpacaSourceCollector(
+        source_id="alpaca-us-stock-bars",
+        provider_id="alpaca-market-data-basic",
+        reference_graph=_complete_reference_graph(
+            listing_id="70000000-0000-4000-8000-000000000001"
+        ),
+        credential_resolver=LiteralCredentialResolver(),
+        transport=LiteralProviderTransport(
+            ProviderHttpResponse(403, b'{"message":"subscription does not permit SIP"}')
+        ),
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+    )
+
+    with pytest.raises(RuntimeError, match="source_provider_unavailable"):
+        collector.collect(
+            SourcePartitionRequest(
+                request_id="request-ticket-07-provider-forbidden",
+                trace_id="trace-ticket-07-provider-forbidden",
+                source_id="alpaca-us-stock-bars",
+                mode="historical",
+                listing_ids=("70000000-0000-4000-8000-000000000001",),
+                start_date=date(2024, 1, 3),
+                end_date=date(2024, 1, 3),
+                expected_checkpoint=None,
+                distribution_id="alpaca-us-stock-bars-v2",
+                distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+                bundle_members=_bundle_member_requests(),
+            )
+        )
+
+
 def test_alpaca_collector_rejects_a_repeated_pagination_token() -> None:
     repeated_page = ProviderHttpResponse(
         200,
@@ -702,7 +801,7 @@ def test_alpaca_collector_builds_one_immutable_paginated_source_bundle() -> None
     ]
     assert transport.requests[0].query == {
         "adjustment": "raw",
-        "asof": "2024-01-03",
+        "asof": "-",
         "end": "2024-01-03",
         "feed": "sip",
         "limit": "10000",
@@ -993,7 +1092,7 @@ def test_alpaca_collector_marks_a_missing_symbol_session_incomplete() -> None:
     assert collection.coverage.observed_end is None
 
 
-def test_alpaca_decoder_rejects_cross_listing_symbol_reuse() -> None:
+def test_alpaca_decoder_rejects_overlapping_cross_listing_symbol_reuse() -> None:
     with pytest.raises(ValueError, match="source_identity_mapping_ambiguous"):
         AlpacaSourceDecoder(
             source_id="alpaca-us-stock-bars",
@@ -1004,6 +1103,154 @@ def test_alpaca_decoder_rejects_cross_listing_symbol_reuse() -> None:
                 }
             ),
         )
+
+
+def test_alpaca_decoder_resolves_non_overlapping_symbol_reuse_by_effective_date() -> None:
+    first_listing_id = "70000000-0000-4000-8000-000000000021"
+    second_listing_id = "70000000-0000-4000-8000-000000000022"
+    reference_graph = AlpacaReferenceGraph(
+        version_id="engineering-symbol-reuse-v1",
+        listings=(
+            AlpacaReferenceListing(
+                listing_id=first_listing_id,
+                aliases=(
+                    ExternalSecurityAlias(
+                        security_code="SAME",
+                        security_name="First Same",
+                        valid_from=date(2010, 1, 1),
+                        valid_to=date(2020, 12, 31),
+                    ),
+                ),
+                lifecycle=(
+                    ListingLifecycleRecord(
+                        listing_id=first_listing_id,
+                        effective_date=date(2010, 1, 1),
+                        status="active",
+                        source_event_id="first-same-active",
+                    ),
+                ),
+            ),
+            AlpacaReferenceListing(
+                listing_id=second_listing_id,
+                aliases=(
+                    ExternalSecurityAlias(
+                        security_code="SAME",
+                        security_name="Second Same",
+                        valid_from=date(2021, 1, 1),
+                        valid_to=None,
+                    ),
+                ),
+                lifecycle=(
+                    ListingLifecycleRecord(
+                        listing_id=second_listing_id,
+                        effective_date=date(2021, 1, 1),
+                        status="active",
+                        source_event_id="second-same-active",
+                    ),
+                ),
+            ),
+        ),
+        company_action_expectations=(),
+        lifecycle_complete=True,
+        company_actions_complete=True,
+    )
+    collection = _collected_partition_for_reference_graph(
+        reference_graph,
+        listing_ids=(first_listing_id, second_listing_id),
+        start_date=date(2020, 12, 31),
+        end_date=date(2021, 1, 4),
+        bars={
+            "SAME": [
+                {"t": "2020-12-31T05:00:00Z", "o": 10, "h": 11, "l": 9, "c": 10.5, "v": 100},
+                {"t": "2021-01-04T05:00:00Z", "o": 20, "h": 21, "l": 19, "c": 20.5, "v": 200},
+            ]
+        },
+        corporate_actions={
+            "cash_dividends": [
+                {"id": "first-dividend", "symbol": "SAME", "ex_date": "2020-12-31", "rate": "0.1"},
+                {"id": "second-dividend", "symbol": "SAME", "ex_date": "2021-01-04", "rate": "0.2"},
+            ]
+        },
+    )
+
+    decoded = AlpacaSourceDecoder(
+        source_id="alpaca-us-stock-bars",
+        reference_graph=reference_graph,
+    ).decode(collection)
+
+    assert [(row.listing_id, row.session_date) for row in decoded.prices] == [
+        (first_listing_id, date(2020, 12, 31)),
+        (second_listing_id, date(2021, 1, 4)),
+    ]
+    assert [(action.listing_id, action.source_action_id) for action in decoded.company_actions] == [
+        (first_listing_id, "first-dividend"),
+        (second_listing_id, "second-dividend"),
+    ]
+    assert decoded.quality_issues == ()
+
+
+def test_alpaca_decoder_quarantines_out_of_window_aliases_and_duplicate_prices() -> None:
+    listing_id = "70000000-0000-4000-8000-000000000023"
+    reference_graph = AlpacaReferenceGraph(
+        version_id="engineering-provider-faithful-rename-v1",
+        listings=(
+            AlpacaReferenceListing(
+                listing_id=listing_id,
+                aliases=(
+                    ExternalSecurityAlias(
+                        security_code="OLD",
+                        security_name="Rename Example",
+                        valid_from=date(2010, 1, 1),
+                        valid_to=date(2022, 6, 8),
+                    ),
+                    ExternalSecurityAlias(
+                        security_code="NEW",
+                        security_name="Rename Example",
+                        valid_from=date(2022, 6, 9),
+                        valid_to=None,
+                    ),
+                ),
+                lifecycle=(
+                    ListingLifecycleRecord(
+                        listing_id=listing_id,
+                        effective_date=date(2010, 1, 1),
+                        status="active",
+                        source_event_id="rename-example-active",
+                    ),
+                ),
+            ),
+        ),
+        company_action_expectations=(),
+        lifecycle_complete=True,
+        company_actions_complete=True,
+    )
+    collection = _collected_partition_for_reference_graph(
+        reference_graph,
+        listing_ids=(listing_id,),
+        start_date=date(2022, 6, 8),
+        end_date=date(2022, 6, 9),
+        bars={
+            "OLD": [
+                {"t": "2022-06-08T04:00:00Z", "o": 10, "h": 11, "l": 9, "c": 10.5, "v": 100},
+                {"t": "2022-06-08T04:00:00Z", "o": 10, "h": 11, "l": 9, "c": 10.5, "v": 100},
+            ],
+            "NEW": [
+                {"t": "2022-06-08T04:00:00Z", "o": 99, "h": 100, "l": 98, "c": 99.5, "v": 999},
+                {"t": "2022-06-09T04:00:00Z", "o": 11, "h": 12, "l": 10, "c": 11.5, "v": 120},
+            ],
+        },
+    )
+
+    decoded = AlpacaSourceDecoder(
+        source_id="alpaca-us-stock-bars",
+        reference_graph=reference_graph,
+    ).decode(collection)
+
+    assert [(row.listing_id, row.session_date, row.close) for row in decoded.prices] == [
+        (listing_id, date(2022, 6, 8), Decimal("10.5")),
+        (listing_id, date(2022, 6, 9), Decimal("11.5")),
+    ]
+    assert decoded.quality_issues == ("identity_ambiguous",)
 
 
 def test_alpaca_decoder_uses_permanent_listing_ids_and_internal_action_semantics() -> None:
@@ -1157,21 +1404,21 @@ def test_alpaca_decoder_uses_permanent_listing_ids_and_internal_action_semantics
             symbol="AAPL",
             valid_from=date(2000, 1, 1),
             valid_to=None,
-            source_event_id="engineering-reference-multi-listing-v1:AAPL",
+            source_event_id=(f"engineering-reference-multi-listing-v1:{aapl_listing_id}:AAPL"),
         ),
         SymbolIdentityRecord(
             listing_id=meta_listing_id,
             symbol="FB",
             valid_from=date(2000, 1, 1),
             valid_to=date(2000, 12, 31),
-            source_event_id="engineering-reference-multi-listing-v1:FB",
+            source_event_id=(f"engineering-reference-multi-listing-v1:{meta_listing_id}:FB"),
         ),
         SymbolIdentityRecord(
             listing_id=meta_listing_id,
             symbol="META",
             valid_from=date(2001, 1, 1),
             valid_to=None,
-            source_event_id="engineering-reference-multi-listing-v1:META",
+            source_event_id=(f"engineering-reference-multi-listing-v1:{meta_listing_id}:META"),
         ),
     )
     assert decoded.market_sessions == (
@@ -1183,9 +1430,9 @@ def test_alpaca_decoder_uses_permanent_listing_ids_and_internal_action_semantics
         ),
     )
     assert set(decoded.identity_assertion_ids) == {
-        "engineering-reference-multi-listing-v1:AAPL",
-        "engineering-reference-multi-listing-v1:FB",
-        "engineering-reference-multi-listing-v1:META",
+        f"engineering-reference-multi-listing-v1:{aapl_listing_id}:AAPL",
+        f"engineering-reference-multi-listing-v1:{meta_listing_id}:FB",
+        f"engineering-reference-multi-listing-v1:{meta_listing_id}:META",
         "ca-dividend-aapl",
         "ca-name-meta",
         "ca-split-aapl",
@@ -1486,14 +1733,14 @@ def test_alpaca_decoder_uses_a_versioned_reference_graph_instead_of_bar_dates() 
             symbol="OLD",
             valid_from=date(2010, 1, 4),
             valid_to=date(2023, 12, 31),
-            source_event_id="engineering-us-reference-graph-v1:OLD",
+            source_event_id=f"engineering-us-reference-graph-v1:{listing_id}:OLD",
         ),
         SymbolIdentityRecord(
             listing_id=listing_id,
             symbol="NEW",
             valid_from=date(2024, 1, 1),
             valid_to=None,
-            source_event_id="engineering-us-reference-graph-v1:NEW",
+            source_event_id=f"engineering-us-reference-graph-v1:{listing_id}:NEW",
         ),
     )
     assert decoded.quality_issues == ()

@@ -563,8 +563,9 @@ for (const button of document.querySelectorAll('[data-operation]')) {
       body: request.body ? JSON.stringify(request.body) : undefined,
     });
     const result = await response.json();
+    const credential = result.credential ?? result;
     form.querySelector('output').textContent = response.ok
-      ? `${result.readiness}: ${result.reason_code}`
+      ? `${credential.readiness}: ${credential.reason_code} (v${credential.version})`
       : `${result.code || 'request_failed'}`;
     form.reset();
   });

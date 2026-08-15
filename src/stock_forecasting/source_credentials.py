@@ -37,6 +37,7 @@ _VALIDATION_DATASET_IDS = frozenset(
 )
 _SOURCE_CONTRACT_REASON_CODES = frozenset(
     {
+        "source_contract_forbidden",
         "source_contract_probe_failed",
         "source_contract_rate_limited",
         "source_contract_schema_invalid",
@@ -115,6 +116,26 @@ class SourceContractAssessment:
             and self.source_contract_reason_code not in _SOURCE_CONTRACT_REASON_CODES
         ):
             raise ValueError("source_contract_assessment_invalid")
+        has_measurement = any(
+            value is not None
+            for value in (
+                self.contract_id,
+                self.ticker_count,
+                self.pagination_pages,
+                self.symbol_lifecycle_probe,
+                self.source_contract_reason_code,
+            )
+        ) or bool(self.datasets)
+        if self.live_validation == "not_run" and has_measurement:
+            raise ValueError("source_contract_assessment_invalid")
+        if self.live_validation == "passed" and (
+            self.contract_id is None or self.source_contract_reason_code is not None
+        ):
+            raise ValueError("source_contract_assessment_invalid")
+        if self.live_validation == "failed" and (
+            self.contract_id is None or self.source_contract_reason_code is None
+        ):
+            raise ValueError("source_contract_assessment_invalid")
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -147,6 +168,42 @@ class CredentialValidationResult:
             SourceContractAssessment,
         ):
             raise ValueError("source_contract_assessment_invalid")
+        state = (self.readiness, self.reason_code, self.evidence.authentication_status)
+        allowed_states = {
+            ("valid", "source_credential_valid", "passed"),
+            (
+                "configured",
+                "source_credential_validation_inconclusive",
+                "not_run",
+            ),
+            (
+                "validation_failed",
+                "source_credential_authentication_failed",
+                "failed",
+            ),
+            (
+                "validation_failed",
+                "source_credential_fields_invalid",
+                "not_run",
+            ),
+            (
+                "validation_failed",
+                "source_credential_validator_output_rejected",
+                "not_run",
+            ),
+            ("expired", "source_credential_expired", "not_run"),
+        }
+        if state not in allowed_states:
+            raise ValueError("source_credential_validation_result_invalid")
+        if self.readiness == "configured" and (
+            self.source_contract_assessment is None
+            or self.source_contract_assessment.live_validation != "failed"
+        ):
+            raise ValueError("source_credential_validation_result_invalid")
+        if self.readiness in {"validation_failed", "expired"} and (
+            self.source_contract_assessment is not None
+        ):
+            raise ValueError("source_credential_validation_result_invalid")
 
 
 class SourceCredentialValidator(Protocol):

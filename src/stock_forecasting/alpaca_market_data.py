@@ -360,11 +360,22 @@ class AlpacaCredentialValidator:
                 },
             )
         )
-        if response.status_code in {401, 403}:
+        if response.status_code == 401:
             return CredentialValidationResult(
                 readiness="validation_failed",
                 reason_code="source_credential_authentication_failed",
                 evidence=CredentialValidationEvidence(authentication_status="failed"),
+            )
+        if response.status_code == 403:
+            return CredentialValidationResult(
+                readiness="valid",
+                reason_code="source_credential_valid",
+                evidence=CredentialValidationEvidence(authentication_status="passed"),
+                source_contract_assessment=SourceContractAssessment(
+                    contract_id="alpaca-credential-probe-v1",
+                    live_validation="failed",
+                    source_contract_reason_code="source_contract_forbidden",
+                ),
             )
         if response.status_code == 429:
             return CredentialValidationResult(
@@ -591,8 +602,10 @@ class AlpacaLiveContractValidator:
         response = self._transport.send(
             ProviderHttpRequest(method="GET", url=url, query=query, headers=headers)
         )
-        if response.status_code in {401, 403}:
+        if response.status_code == 401:
             return self._failure("source_credential_authentication_failed")
+        if response.status_code == 403:
+            return self._source_contract_failure("source_contract_forbidden")
         if response.status_code == 429:
             return self._failure("source_credential_validation_rate_limited")
         if response.status_code != 200:
@@ -766,7 +779,7 @@ class AlpacaSourceCollector:
             url="https://data.alpaca.markets/v2/stocks/bars",
             query={
                 "adjustment": "raw",
-                "asof": request.end_date.isoformat(),
+                "asof": "-",
                 "end": request.end_date.isoformat(),
                 "feed": "sip",
                 "limit": "10000",
@@ -956,8 +969,10 @@ class AlpacaSourceCollector:
 
     def _request_json(self, request: ProviderHttpRequest) -> object:
         response = self._transport.send(request)
-        if response.status_code in {401, 403}:
+        if response.status_code == 401:
             raise SourceCredentialRequired("source_credential_authentication_failed")
+        if response.status_code == 403:
+            raise RuntimeError("source_provider_unavailable")
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", "60")
             try:
@@ -1039,15 +1054,21 @@ class AlpacaSourceDecoder:
             listing.listing_id: tuple(alias.security_code for alias in listing.aliases)
             for listing in reference_graph.listings
         }
-        symbol_to_listing: dict[str, str] = {}
-        for listing_id, symbols in self._listing_symbols.items():
-            if not symbols:
+        aliases_by_symbol: dict[str, list[tuple[str, ExternalSecurityAlias]]] = {}
+        for listing in reference_graph.listings:
+            if not listing.aliases:
                 raise ValueError("source_identity_mapping_invalid")
-            for symbol in symbols:
-                if symbol in symbol_to_listing and symbol_to_listing[symbol] != listing_id:
+            for alias in listing.aliases:
+                entries = aliases_by_symbol.setdefault(alias.security_code, [])
+                if any(
+                    self._alias_intervals_overlap(alias, existing_alias)
+                    for _, existing_alias in entries
+                ):
                     raise ValueError("source_identity_mapping_ambiguous")
-                symbol_to_listing[symbol] = listing_id
-        self._symbol_to_listing = symbol_to_listing
+                entries.append((listing.listing_id, alias))
+        self._aliases_by_symbol = {
+            symbol: tuple(entries) for symbol, entries in aliases_by_symbol.items()
+        }
 
     def decode(self, collection: CollectedSourcePartition) -> DecodedSourcePartition:
         if collection.source_id != self._source_id:
@@ -1099,7 +1120,9 @@ class AlpacaSourceDecoder:
                 symbol=alias.security_code,
                 valid_from=alias.valid_from,
                 valid_to=alias.valid_to,
-                source_event_id=f"{self._reference_graph.version_id}:{alias.security_code}",
+                source_event_id=(
+                    f"{self._reference_graph.version_id}:{listing.listing_id}:{alias.security_code}"
+                ),
             )
             for listing in requested_reference_listings
             for alias in listing.aliases
@@ -1137,6 +1160,7 @@ class AlpacaSourceDecoder:
         pages = bundle.get("bars_pages")
         if not isinstance(pages, list):
             raise ValueError("source_provider_schema_invalid")
+        seen_keys: set[tuple[str, date]] = set()
         try:
             for page in pages:
                 if not isinstance(page, dict) or not isinstance(page.get("bars"), dict):
@@ -1144,19 +1168,28 @@ class AlpacaSourceDecoder:
                 for symbol, rows in page["bars"].items():
                     if not isinstance(symbol, str) or not isinstance(rows, list):
                         raise TypeError
-                    listing_id = self._symbol_to_listing.get(symbol)
-                    if listing_id is None:
-                        quality_issues.add("identity_ambiguous")
-                        continue
                     for row in rows:
                         if not isinstance(row, dict):
                             raise TypeError
+                        session_date = datetime.fromisoformat(
+                            str(row["t"]).replace("Z", "+00:00")
+                        ).date()
+                        listing_id = self._listing_for_symbol(
+                            symbol,
+                            effective_date=session_date,
+                        )
+                        if listing_id is None:
+                            quality_issues.add("identity_ambiguous")
+                            continue
+                        key = (listing_id, session_date)
+                        if key in seen_keys:
+                            quality_issues.add("identity_ambiguous")
+                            continue
+                        seen_keys.add(key)
                         prices.append(
                             CanonicalPriceRow(
                                 listing_id=listing_id,
-                                session_date=datetime.fromisoformat(
-                                    str(row["t"]).replace("Z", "+00:00")
-                                ).date(),
+                                session_date=session_date,
                                 open=Decimal(str(row["o"])),
                                 high=Decimal(str(row["h"])),
                                 low=Decimal(str(row["l"])),
@@ -1194,7 +1227,11 @@ class AlpacaSourceDecoder:
                     old_symbol = action.get("old_symbol") or action.get("initiating_symbol")
                     new_symbol = action.get("new_symbol") or action.get("target_symbol")
                     effective_date = self._action_date(action)
-                    listing_id = self._listing_for_action_symbols(old_symbol, new_symbol)
+                    listing_id = self._listing_for_action_symbols(
+                        old_symbol,
+                        new_symbol,
+                        effective_date=effective_date,
+                    )
                     if listing_id is None:
                         quality_issues.add("identity_ambiguous")
                         continue
@@ -1218,7 +1255,11 @@ class AlpacaSourceDecoder:
                     )
                     continue
                 symbol = action.get("symbol") or action.get("initiating_symbol")
-                listing_id = self._symbol_to_listing.get(str(symbol))
+                effective_date = self._action_date(action)
+                listing_id = self._listing_for_symbol(
+                    str(symbol),
+                    effective_date=effective_date,
+                )
                 if listing_id is None:
                     quality_issues.add("identity_ambiguous")
                     continue
@@ -1226,7 +1267,7 @@ class AlpacaSourceDecoder:
                     company_actions.append(
                         CompanyActionRecord(
                             listing_id=listing_id,
-                            effective_date=self._action_date(action),
+                            effective_date=effective_date,
                             kind="cash_dividend",
                             value=Decimal(
                                 str(
@@ -1245,7 +1286,7 @@ class AlpacaSourceDecoder:
                     company_actions.append(
                         CompanyActionRecord(
                             listing_id=listing_id,
-                            effective_date=self._action_date(action),
+                            effective_date=effective_date,
                             kind="split",
                             value=new_rate / old_rate,
                             currency=None,
@@ -1286,15 +1327,62 @@ class AlpacaSourceDecoder:
             raise ValueError("source_provider_schema_invalid")
         return date.fromisoformat(value)
 
-    def _listing_for_action_symbols(self, *symbols: object) -> str | None:
+    def _listing_for_action_symbols(
+        self,
+        old_symbol: object,
+        new_symbol: object,
+        *,
+        effective_date: date,
+    ) -> str | None:
         listing_ids = {
-            self._symbol_to_listing[symbol]
-            for symbol in symbols
-            if isinstance(symbol, str) and symbol in self._symbol_to_listing
+            listing_id
+            for listing_id in (
+                (
+                    self._listing_for_symbol(
+                        old_symbol,
+                        effective_date=effective_date - timedelta(days=1),
+                    )
+                    if isinstance(old_symbol, str)
+                    else None
+                ),
+                (
+                    self._listing_for_symbol(new_symbol, effective_date=effective_date)
+                    if isinstance(new_symbol, str)
+                    else None
+                ),
+            )
+            if listing_id is not None
         }
         if len(listing_ids) != 1:
             return None
         return listing_ids.pop()
+
+    def _listing_for_symbol(self, symbol: str, *, effective_date: date) -> str | None:
+        listing_ids = {
+            listing_id
+            for listing_id, alias in self._aliases_by_symbol.get(symbol, ())
+            if self._alias_is_active(alias, effective_date=effective_date)
+        }
+        if len(listing_ids) != 1:
+            return None
+        return listing_ids.pop()
+
+    @staticmethod
+    def _alias_is_active(alias: ExternalSecurityAlias, *, effective_date: date) -> bool:
+        return (alias.valid_from is None or alias.valid_from <= effective_date) and (
+            alias.valid_to is None or alias.valid_to >= effective_date
+        )
+
+    @staticmethod
+    def _alias_intervals_overlap(
+        first: ExternalSecurityAlias,
+        second: ExternalSecurityAlias,
+    ) -> bool:
+        first_start = first.valid_from or date.min
+        first_end = first.valid_to or date.max
+        second_start = second.valid_from or date.min
+        second_end = second.valid_to or date.max
+        return first_start <= second_end and second_start <= first_end
 
     @staticmethod
     def _decode_market_sessions(

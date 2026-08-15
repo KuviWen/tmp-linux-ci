@@ -61,6 +61,7 @@ class CallbackCredentialValidator:
         return CredentialValidationResult(
             readiness="valid",
             reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
         )
 
 
@@ -258,6 +259,10 @@ def test_operations_page_exposes_write_only_credential_controls_and_provider_lin
     assert 'data-operation="revoke"' in response.text
     assert "/api/v1/operations/source-credentials/alpaca-market-data-basic" in response.text
     assert "程式不會自動建立帳號、處理 CAPTCHA、email、MFA 或接受條款" in response.text
+    assert "const credential = result.credential ?? result;" in response.text
+    assert "`${credential.readiness}: ${credential.reason_code} (v${credential.version})`" in (
+        response.text
+    )
 
 
 def test_alpaca_credential_can_be_set_without_ever_being_returned(tmp_path: Path) -> None:
@@ -554,6 +559,91 @@ def test_credential_validation_rejects_arbitrary_secret_bearing_evidence() -> No
         SourceContractAssessment(datasets=("super-secret-value",))
 
 
+@pytest.mark.parametrize(
+    ("readiness", "reason_code", "authentication_status", "assessment"),
+    [
+        (
+            "valid",
+            "source_credential_authentication_failed",
+            "failed",
+            None,
+        ),
+        (
+            "valid",
+            "source_credential_valid",
+            "not_run",
+            None,
+        ),
+        (
+            "validation_failed",
+            "source_credential_authentication_failed",
+            "passed",
+            None,
+        ),
+        (
+            "configured",
+            "source_credential_validation_inconclusive",
+            "not_run",
+            None,
+        ),
+        (
+            "expired",
+            "source_credential_valid",
+            "passed",
+            None,
+        ),
+        (
+            "validation_failed",
+            "source_credential_fields_invalid",
+            "not_run",
+            SourceContractAssessment(
+                contract_id="alpaca-credential-probe-v1",
+                live_validation="failed",
+                source_contract_reason_code="source_contract_schema_invalid",
+            ),
+        ),
+    ],
+)
+def test_credential_validation_result_rejects_incoherent_state_combinations(
+    readiness: str,
+    reason_code: str,
+    authentication_status: str,
+    assessment: SourceContractAssessment | None,
+) -> None:
+    with pytest.raises(ValueError, match="source_credential_validation_result_invalid"):
+        CredentialValidationResult(
+            readiness=readiness,
+            reason_code=reason_code,
+            evidence=CredentialValidationEvidence(
+                authentication_status=authentication_status,  # type: ignore[arg-type]
+            ),
+            source_contract_assessment=assessment,
+        )
+
+
+@pytest.mark.parametrize(
+    "assessment_fields",
+    [
+        {
+            "contract_id": "alpaca-credential-probe-v1",
+            "live_validation": "passed",
+            "source_contract_reason_code": "source_contract_unavailable",
+        },
+        {
+            "contract_id": "alpaca-credential-probe-v1",
+            "live_validation": "failed",
+        },
+        {"live_validation": "passed"},
+        {"live_validation": "not_run", "ticker_count": 1},
+    ],
+)
+def test_source_contract_assessment_rejects_incoherent_state_combinations(
+    assessment_fields: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="source_contract_assessment_invalid"):
+        SourceContractAssessment(**assessment_fields)  # type: ignore[arg-type]
+
+
 def test_operations_rejects_validator_output_that_echoes_a_credential_value(
     tmp_path: Path,
 ) -> None:
@@ -562,6 +652,7 @@ def test_operations_rejects_validator_output_that_echoes_a_credential_value(
         CredentialValidationResult(
             readiness="valid",
             reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
             source_contract_assessment=SourceContractAssessment(
                 contract_id=secret_value,
                 live_validation="passed",
@@ -605,6 +696,7 @@ def test_only_a_valid_managed_credential_can_be_resolved_for_provider_use(
         CredentialValidationResult(
             readiness="valid",
             reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
         )
     )
     application, client, headers = _credential_application(
@@ -653,7 +745,11 @@ def test_rest_managed_credential_is_consumed_by_the_application_us_adapter(
     tmp_path: Path,
 ) -> None:
     validator = LiteralCredentialValidator(
-        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
     )
     application, client, headers = _credential_application(
         tmp_path,
@@ -777,6 +873,7 @@ def test_failed_validation_keeps_provider_use_fail_closed(tmp_path: Path) -> Non
         CredentialValidationResult(
             readiness="validation_failed",
             reason_code="source_credential_authentication_failed",
+            evidence=CredentialValidationEvidence(authentication_status="failed"),
         )
     )
     application, client, headers = _credential_application(
@@ -874,7 +971,11 @@ def test_validation_authorizes_before_reading_restricted_credential_state(
 
 def test_expired_credential_is_fail_closed_without_contacting_provider(tmp_path: Path) -> None:
     validator = LiteralCredentialValidator(
-        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
     )
     application, client, headers = _credential_application(
         tmp_path,
@@ -915,7 +1016,11 @@ def test_expired_credential_is_fail_closed_without_contacting_provider(tmp_path:
 
 def test_a_previously_valid_credential_fails_closed_after_its_expiry(tmp_path: Path) -> None:
     validator = LiteralCredentialValidator(
-        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
     )
     application, client, headers = _credential_application(
         tmp_path,
@@ -1058,7 +1163,11 @@ def test_failed_write_compensation_is_added_to_the_durable_cleanup_queue(
 
 def test_validation_projects_a_missing_secret_as_not_ready(tmp_path: Path) -> None:
     validator = LiteralCredentialValidator(
-        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
     )
     application, client, headers = _credential_application(
         tmp_path,
@@ -1091,7 +1200,11 @@ def test_validation_projects_a_corrupt_encrypted_secret_as_fail_closed(
     tmp_path: Path,
 ) -> None:
     validator = LiteralCredentialValidator(
-        CredentialValidationResult(readiness="valid", reason_code="source_credential_valid")
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
     )
     secret_root = tmp_path / "encrypted-source-secrets"
     secret_provider = EncryptedFilesystemSecretProvider(secret_root)
