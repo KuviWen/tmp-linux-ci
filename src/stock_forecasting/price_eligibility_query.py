@@ -9,6 +9,7 @@ from stock_forecasting.authorization import (
     SecurityContext,
     authorization_audit_payload,
 )
+from stock_forecasting.data_supply import load_taiwan_stock_pool_manifest
 from stock_forecasting.platform.state_store import StateStore
 
 
@@ -40,9 +41,25 @@ class PriceEligibilityQuery:
         modes = {str(source["source_mode"]) for source in sources}
         required_modes_present = modes == {"current", "historical"}
         statuses = {str(source["status"]) for source in sources}
+        manifest = load_taiwan_stock_pool_manifest()
+        formal_evidence_available = (
+            manifest.formally_qualified
+            and manifest.matches_formal_source_lineage(sources)
+            and manifest.formal_qualification_artifact_id is not None
+            and self._state_store.has_canonical_artifact(manifest.formal_qualification_artifact_id)
+        )
+        evaluated_at = self._authorization_time or datetime.now(UTC)
+        source_rights_expired = any(
+            _parse_instant(str(source["policy_valid_until"])) <= evaluated_at
+            for source in sources
+            if source["status"] != "policy_blocked"
+        )
         if "policy_blocked" in statuses or not required_modes_present:
             status = "policy_blocked"
             reason_code = "dependency_evidence_unverified"
+        elif source_rights_expired:
+            status = "policy_blocked"
+            reason_code = "source_rights_not_effective"
         elif "quarantined" in statuses:
             status = "quarantined"
             reason_code = next(
@@ -50,10 +67,13 @@ class PriceEligibilityQuery:
                 for source in sources
                 if source["status"] == "quarantined"
             )
+        elif not formal_evidence_available:
+            status = "policy_blocked"
+            reason_code = "qualification_evidence_unverified"
         else:
             status = "qualified"
             reason_code = "qualified_price_materialized"
-        checks = _qualification_checks(status)
+        checks = _aggregate_qualification_checks(sources)
         return {
             "listing_id": listing_id,
             "market": "XTAI",
@@ -104,27 +124,25 @@ class PriceEligibilityQuery:
         return None if decision.allowed else PolicyDeniedOutcome.from_decision(decision)
 
 
-def _qualification_checks(status: str) -> dict[str, str]:
-    if status == "qualified":
-        return {
-            "policy": "passed",
-            "coverage": "passed",
-            "schema": "passed",
-            "integrity": "passed",
-            "depth": "passed",
+def _aggregate_qualification_checks(sources: list[dict[str, object]]) -> dict[str, str]:
+    aggregated: dict[str, str] = {}
+    for check_name in ("policy", "coverage", "schema", "integrity", "depth"):
+        values = {
+            str(source_checks[check_name])
+            for source in sources
+            if isinstance((source_checks := source.get("checks")), dict)
         }
-    if status == "quarantined":
-        return {
-            "policy": "passed",
-            "coverage": "blocked",
-            "schema": "blocked",
-            "integrity": "blocked",
-            "depth": "blocked",
-        }
-    return {
-        "policy": "blocked",
-        "coverage": "not_evaluated",
-        "schema": "not_evaluated",
-        "integrity": "not_evaluated",
-        "depth": "not_evaluated",
-    }
+        if "blocked" in values:
+            aggregated[check_name] = "blocked"
+        elif "not_evaluated" in values or not values:
+            aggregated[check_name] = "not_evaluated"
+        else:
+            aggregated[check_name] = "passed"
+    return aggregated
+
+
+def _parse_instant(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("price_eligibility_instant_timezone_required")
+    return parsed

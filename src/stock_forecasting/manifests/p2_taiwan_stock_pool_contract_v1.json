@@ -5,6 +5,12 @@
     "US": 10
   },
   "market_calendar_cases": ["half_day_session"],
+  "taiwan_sources": {
+    "current": "twse-open-data-current",
+    "historical": "twse-contracted-history"
+  },
+  "formal_qualification_artifact_id": null,
+  "historical_availability_claim_id": null,
   "evidence_status": "qualification_candidate",
   "taiwan_listings": [
     {

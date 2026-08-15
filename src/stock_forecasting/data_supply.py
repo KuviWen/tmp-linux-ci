@@ -33,6 +33,7 @@ ManifestEvidenceStatus = Literal["qualification_candidate", "qualified"]
 TaiwanPriceSourceMode = Literal["current", "historical"]
 SourceRevisionKind = Literal["original", "late_arrival", "correction", "withdrawal"]
 SourceQualityIssue = Literal["identity_ambiguous", "missing_company_action"]
+HistoricalEvidenceLevel = Literal["platform_observed", "archive_attested", "published_current_only"]
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,36 @@ class SourceCollectionCoverage:
     observed_start: date | None
     observed_end: date | None
     complete: bool
+
+
+@dataclass(frozen=True)
+class HistoricalAvailabilityClaim:
+    claim_id: str
+    source_id: str
+    evidence_level: HistoricalEvidenceLevel
+    observed_start: date
+    observed_end: date
+    schema_version: str
+    exact_sessions_verified: bool
+    integrity_verified: bool
+    company_actions_verified: bool
+    listing_lifecycle_verified: bool
+    qualification_artifact_id: str
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "claim_id": self.claim_id,
+            "source_id": self.source_id,
+            "evidence_level": self.evidence_level,
+            "observed_start": self.observed_start.isoformat(),
+            "observed_end": self.observed_end.isoformat(),
+            "schema_version": self.schema_version,
+            "exact_sessions_verified": self.exact_sessions_verified,
+            "integrity_verified": self.integrity_verified,
+            "company_actions_verified": self.company_actions_verified,
+            "listing_lifecycle_verified": self.listing_lifecycle_verified,
+            "qualification_artifact_id": self.qualification_artifact_id,
+        }
 
 
 @dataclass(frozen=True)
@@ -179,14 +210,18 @@ class PriceMaterializationOutcome:
     listing_ids: tuple[str, ...]
     trace_id: str
     policy_decision_id: str
+    policy_evaluation_id: str
+    policy_valid_until: datetime
     evaluated_at: datetime
     raw_object_id: str | None = None
+    retrieval_receipt_id: str | None = None
     normalized_object_id: str | None = None
     source_revision: str | None = None
     checkpoint: str | None = None
     coverage: SourceCollectionCoverage | None = None
     dataset_version_id: str | None = None
     adjustment_version_id: str | None = None
+    historical_availability_claim_id: str | None = None
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -199,14 +234,19 @@ class PriceMaterializationOutcome:
             "listing_ids": list(self.listing_ids),
             "trace_id": self.trace_id,
             "policy_decision_id": self.policy_decision_id,
+            "policy_evaluation_id": self.policy_evaluation_id,
+            "policy_valid_until": _instant(self.policy_valid_until),
             "evaluated_at": _instant(self.evaluated_at),
             "raw_object_id": self.raw_object_id,
+            "retrieval_receipt_id": self.retrieval_receipt_id,
             "normalized_object_id": self.normalized_object_id,
             "source_revision": self.source_revision,
             "checkpoint": self.checkpoint,
             "coverage": _coverage_payload(self.coverage) if self.coverage is not None else None,
             "dataset_version_id": self.dataset_version_id,
             "adjustment_version_id": self.adjustment_version_id,
+            "historical_availability_claim_id": self.historical_availability_claim_id,
+            "checks": _source_qualification_checks(self.status, self.reason_code),
         }
 
 
@@ -232,6 +272,7 @@ class DataSupply:
         object_repository: FilesystemObjectRepository,
         state_store: StateStore,
         clock: Callable[[], datetime],
+        historical_availability_claims: Mapping[str, HistoricalAvailabilityClaim] | None = None,
     ) -> None:
         self._authorization_policy = authorization_policy
         self._security_context = security_context
@@ -239,6 +280,7 @@ class DataSupply:
         self._object_repository = object_repository
         self._state_store = state_store
         self._clock = clock
+        self._historical_availability_claims = dict(historical_availability_claims or {})
 
     def materialize(self, request: SourcePartitionRequest) -> PriceMaterializationOutcome:
         if request.policy_decision_id is not None:
@@ -270,6 +312,8 @@ class DataSupply:
             listing_ids=request.listing_ids,
             trace_id=request.trace_id,
             policy_decision_id=decision.decision_id,
+            policy_evaluation_id=decision.evaluation_id,
+            policy_valid_until=decision.valid_until,
             evaluated_at=decision.evaluated_at,
         )
         self._state_store.publish_price_research_evaluation(
@@ -290,10 +334,17 @@ class DataSupply:
         adapter = self._adapters.get(request.source_id)
         if adapter is None:
             raise ValueError("qualified_source_adapter_unavailable")
+        durable_checkpoint = self._state_store.get_price_source_checkpoint(
+            source_id=request.source_id,
+            source_mode=request.mode,
+        )
+        if request.expected_checkpoint != durable_checkpoint:
+            raise ValueError("source_checkpoint_state_mismatch")
         authorized_request = replace(request, policy_decision_id=decision.decision_id)
         loaded = adapter.load(authorized_request)
         collection = loaded.collection
         decoded = loaded.decoded
+        historical_claim = self._historical_availability_claims.get(request.source_id)
         if (
             collection.request_id != request.request_id
             or collection.source_id != request.source_id
@@ -314,7 +365,13 @@ class DataSupply:
                 "object_kind": "raw_source_object",
             },
         )
-        quarantine_reason = _quarantine_reason(request, collection, decoded)
+        raw_artifact = _raw_source_artifact(raw_object.object_id)
+        retrieval_receipt = _source_retrieval_receipt_artifact(
+            request,
+            collection,
+            raw_object.object_id,
+        )
+        quarantine_reason = _quarantine_reason(request, collection, decoded, historical_claim)
         if quarantine_reason is not None:
             quarantine_payload: dict[str, object] = {
                 "reason_code": quarantine_reason,
@@ -323,8 +380,12 @@ class DataSupply:
                 "revision_kind": decoded.revision_kind,
                 "quality_issues": list(decoded.quality_issues),
                 "raw_object_id": raw_object.object_id,
+                "retrieval_receipt_id": retrieval_receipt["artifact_id"],
                 "coverage": _coverage_payload(collection.coverage),
                 "policy_decision_id": decision.decision_id,
+                "historical_availability_claim_id": (
+                    historical_claim.claim_id if historical_claim is not None else None
+                ),
             }
             quarantine_id = _artifact_id("quarantine_record", quarantine_payload)
             outcome = PriceMaterializationOutcome(
@@ -337,23 +398,33 @@ class DataSupply:
                 listing_ids=request.listing_ids,
                 trace_id=request.trace_id,
                 policy_decision_id=decision.decision_id,
+                policy_evaluation_id=decision.evaluation_id,
+                policy_valid_until=decision.valid_until,
                 evaluated_at=decision.evaluated_at,
                 raw_object_id=raw_object.object_id,
+                retrieval_receipt_id=str(retrieval_receipt["artifact_id"]),
                 source_revision=collection.source_revision,
                 checkpoint=collection.checkpoint_after,
                 coverage=collection.coverage,
+                historical_availability_claim_id=(
+                    historical_claim.claim_id if historical_claim is not None else None
+                ),
             )
+            quarantine_artifacts: list[dict[str, Any]] = [
+                raw_artifact,
+                retrieval_receipt,
+                {
+                    "artifact_id": quarantine_id,
+                    "artifact_kind": "quarantine_record",
+                    "payload": quarantine_payload,
+                },
+            ]
+            if historical_claim is not None:
+                quarantine_artifacts.append(_historical_claim_artifact(historical_claim))
             self._state_store.publish_price_research_evaluation(
                 trace_id=request.trace_id,
                 execution_purpose="price_research",
-                artifacts=[
-                    _raw_source_artifact(request, collection, raw_object.object_id),
-                    {
-                        "artifact_id": quarantine_id,
-                        "artifact_kind": "quarantine_record",
-                        "payload": quarantine_payload,
-                    },
-                ],
+                artifacts=quarantine_artifacts,
                 authorization=authorization_audit_payload(decision),
                 authorization_outcome="allowed",
                 eligibility_records=_eligibility_records(outcome),
@@ -379,12 +450,13 @@ class DataSupply:
             "price_semantics": "unadjusted",
             "raw_object_id": raw_object.object_id,
             "normalized_object_id": normalized_object.object_id,
-            "checkpoint_before": collection.checkpoint_before,
-            "checkpoint_after": collection.checkpoint_after,
             "coverage": _coverage_payload(collection.coverage),
             "identity_assertion_ids": list(decoded.identity_assertion_ids),
             "parent_object_ids": [raw_object.object_id, *decoded.parent_object_ids],
             "policy_decision_id": decision.decision_id,
+            "historical_availability_claim_id": (
+                historical_claim.claim_id if historical_claim is not None else None
+            ),
             "integrity": {
                 "raw_sha256": raw_object.checksum,
                 "normalized_sha256": normalized_object.checksum,
@@ -407,7 +479,8 @@ class DataSupply:
         }
         adjustment_version_id = _artifact_id("adjustment_version", adjustment_payload)
         artifacts: list[dict[str, Any]] = [
-            _raw_source_artifact(request, collection, raw_object.object_id),
+            raw_artifact,
+            retrieval_receipt,
             {
                 "artifact_id": normalized_object.object_id,
                 "artifact_kind": "normalized_price_object",
@@ -428,6 +501,8 @@ class DataSupply:
                 "payload": adjustment_payload,
             },
         ]
+        if historical_claim is not None:
+            artifacts.append(_historical_claim_artifact(historical_claim))
         outcome = PriceMaterializationOutcome(
             status="published",
             reason_code="qualified_price_materialized",
@@ -438,14 +513,20 @@ class DataSupply:
             listing_ids=request.listing_ids,
             trace_id=request.trace_id,
             policy_decision_id=decision.decision_id,
+            policy_evaluation_id=decision.evaluation_id,
+            policy_valid_until=decision.valid_until,
             evaluated_at=decision.evaluated_at,
             raw_object_id=raw_object.object_id,
+            retrieval_receipt_id=str(retrieval_receipt["artifact_id"]),
             normalized_object_id=normalized_object.object_id,
             source_revision=collection.source_revision,
             checkpoint=collection.checkpoint_after,
             coverage=collection.coverage,
             dataset_version_id=dataset_version_id,
             adjustment_version_id=adjustment_version_id,
+            historical_availability_claim_id=(
+                historical_claim.claim_id if historical_claim is not None else None
+            ),
         )
         self._state_store.publish_price_research_evaluation(
             trace_id=request.trace_id,
@@ -473,6 +554,46 @@ def _public_policy_reason(policy_reason_code: str) -> str:
     return "source_rights_not_effective"
 
 
+def _source_qualification_checks(status: str, reason_code: str) -> dict[str, str]:
+    if status == "published":
+        return {
+            "policy": "passed",
+            "coverage": "passed",
+            "schema": "passed",
+            "integrity": "passed",
+            "depth": "passed",
+        }
+    if status == "policy_blocked":
+        return {
+            "policy": "blocked",
+            "coverage": "not_evaluated",
+            "schema": "not_evaluated",
+            "integrity": "not_evaluated",
+            "depth": "not_evaluated",
+        }
+    checks = {
+        "policy": "passed",
+        "coverage": "passed",
+        "schema": "passed",
+        "integrity": "passed",
+        "depth": "passed",
+    }
+    if reason_code == "incomplete_coverage":
+        checks["coverage"] = "blocked"
+    elif reason_code == "schema_incompatible":
+        checks["schema"] = "blocked"
+    elif reason_code in {
+        "insufficient_history_depth",
+        "historical_evidence_unverified",
+        "historical_evidence_reconstruction_only",
+        "published_current_only",
+    }:
+        checks["depth"] = "blocked"
+    else:
+        checks["integrity"] = "blocked"
+    return checks
+
+
 def _eligibility_records(outcome: PriceMaterializationOutcome) -> list[dict[str, object]]:
     payload = outcome.as_payload()
     records: list[dict[str, object]] = []
@@ -483,7 +604,8 @@ def _eligibility_records(outcome: PriceMaterializationOutcome) -> list[dict[str,
                     uuid5(
                         NAMESPACE_URL,
                         "stock-forecasting/price-eligibility/"
-                        f"{outcome.policy_decision_id}/{listing_id}",
+                        f"{outcome.policy_evaluation_id}/{outcome.source_id}/"
+                        f"{outcome.source_mode}/{listing_id}",
                     )
                 ),
                 "listing_id": listing_id,
@@ -591,21 +713,42 @@ def _derive_adjusted_closes(decoded: DecodedSourcePartition) -> list[dict[str, s
     return adjusted_rows
 
 
-def _raw_source_artifact(
-    request: SourcePartitionRequest,
-    collection: CollectedSourcePartition,
-    raw_object_id: str,
-) -> dict[str, object]:
+def _raw_source_artifact(raw_object_id: str) -> dict[str, Any]:
     return {
         "artifact_id": raw_object_id,
         "artifact_kind": "raw_source_object",
-        "payload": {
-            "object_id": raw_object_id,
-            "source_id": request.source_id,
-            "source_revision": collection.source_revision,
-            "sanitized_source_uri": collection.sanitized_source_uri,
-            "acquired_at": _instant(collection.acquired_at),
-        },
+        "payload": {"object_id": raw_object_id},
+    }
+
+
+def _source_retrieval_receipt_artifact(
+    request: SourcePartitionRequest,
+    collection: CollectedSourcePartition,
+    raw_object_id: str,
+) -> dict[str, Any]:
+    payload: dict[str, object] = {
+        "object_id": raw_object_id,
+        "request_id": request.request_id,
+        "source_id": request.source_id,
+        "source_mode": request.mode,
+        "source_revision": collection.source_revision,
+        "sanitized_source_uri": collection.sanitized_source_uri,
+        "acquired_at": _instant(collection.acquired_at),
+        "checkpoint_before": collection.checkpoint_before,
+        "checkpoint_after": collection.checkpoint_after,
+    }
+    return {
+        "artifact_id": _artifact_id("source_retrieval_receipt", payload),
+        "artifact_kind": "source_retrieval_receipt",
+        "payload": payload,
+    }
+
+
+def _historical_claim_artifact(claim: HistoricalAvailabilityClaim) -> dict[str, Any]:
+    return {
+        "artifact_id": claim.claim_id,
+        "artifact_kind": "historical_availability_claim",
+        "payload": claim.as_payload(),
     }
 
 
@@ -613,6 +756,7 @@ def _quarantine_reason(
     request: SourcePartitionRequest,
     collection: CollectedSourcePartition,
     decoded: DecodedSourcePartition,
+    historical_claim: HistoricalAvailabilityClaim | None,
 ) -> str | None:
     if (
         not collection.coverage.complete
@@ -634,6 +778,24 @@ def _quarantine_reason(
             or collection.coverage.observed_end < request.end_date
         ):
             return "insufficient_history_depth"
+        if historical_claim is None:
+            return "historical_evidence_unverified"
+        if historical_claim.source_id != request.source_id:
+            return "historical_evidence_unverified"
+        if historical_claim.evidence_level == "published_current_only":
+            return "published_current_only"
+        if historical_claim.evidence_level == "archive_attested":
+            return "historical_evidence_reconstruction_only"
+        if (
+            historical_claim.observed_start > depth_boundary
+            or historical_claim.observed_end < request.end_date
+            or historical_claim.schema_version != decoded.schema_version
+            or not historical_claim.exact_sessions_verified
+            or not historical_claim.integrity_verified
+            or not historical_claim.company_actions_verified
+            or not historical_claim.listing_lifecycle_verified
+        ):
+            return "historical_evidence_unverified"
     if decoded.revision_kind == "withdrawal":
         return "source_withdrawn"
     if "identity_ambiguous" in decoded.quality_issues or not decoded.identity_assertion_ids:
@@ -645,8 +807,11 @@ def _quarantine_reason(
         for items in (decoded.prices, decoded.company_actions, decoded.listing_lifecycle)
         for item in items
     }
-    if not observed_listing_ids <= set(request.listing_ids):
+    requested_listing_ids = set(request.listing_ids)
+    if not observed_listing_ids <= requested_listing_ids:
         return "identity_ambiguous"
+    if observed_listing_ids != requested_listing_ids:
+        return "incomplete_coverage"
     return None
 
 
@@ -668,6 +833,10 @@ class TaiwanStockPoolManifest:
     united_states_target: int
     listings: tuple[StockPoolListing, ...]
     market_calendar_cases: frozenset[Literal["half_day_session"]]
+    current_source_id: str
+    historical_source_id: str
+    formal_qualification_artifact_id: str | None
+    historical_availability_claim_id: str | None
     evidence_status: ManifestEvidenceStatus
 
     def __post_init__(self) -> None:
@@ -682,7 +851,30 @@ class TaiwanStockPoolManifest:
 
     @property
     def formally_qualified(self) -> bool:
-        return self.evidence_status == "qualified"
+        return (
+            self.evidence_status == "qualified"
+            and self.formal_qualification_artifact_id is not None
+            and self.historical_availability_claim_id is not None
+        )
+
+    def matches_formal_source_lineage(self, sources: list[dict[str, object]]) -> bool:
+        by_mode = {str(source["source_mode"]): source for source in sources}
+        current = by_mode.get("current")
+        historical = by_mode.get("historical")
+        return (
+            current is not None
+            and historical is not None
+            and current["source_id"] == self.current_source_id
+            and historical["source_id"] == self.historical_source_id
+            and historical["historical_availability_claim_id"]
+            == self.historical_availability_claim_id
+            and all(
+                source["status"] == "published"
+                and source["dataset_version_id"] is not None
+                and source["adjustment_version_id"] is not None
+                for source in (current, historical)
+            )
+        )
 
 
 def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
@@ -691,6 +883,7 @@ def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
     )
     payload = cast(dict[str, object], json.loads(manifest_path.read_text(encoding="utf-8")))
     targets = cast(dict[str, int], payload["market_targets"])
+    source_ids = cast(dict[str, str], payload["taiwan_sources"])
     listing_payloads = cast(list[dict[str, object]], payload["taiwan_listings"])
     market_calendar_cases = cast(
         list[Literal["half_day_session"]], payload["market_calendar_cases"]
@@ -711,5 +904,13 @@ def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
             for listing in listing_payloads
         ),
         market_calendar_cases=frozenset(market_calendar_cases),
+        current_source_id=source_ids["current"],
+        historical_source_id=source_ids["historical"],
+        formal_qualification_artifact_id=cast(
+            str | None, payload["formal_qualification_artifact_id"]
+        ),
+        historical_availability_claim_id=cast(
+            str | None, payload["historical_availability_claim_id"]
+        ),
         evidence_status=cast(ManifestEvidenceStatus, payload["evidence_status"]),
     )

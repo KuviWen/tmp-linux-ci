@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import fields
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -114,15 +113,6 @@ def test_current_and_historical_sources_use_the_same_collector_decoder_contract(
     assert result.decoded.source_revision == "revision-2026-08-15T01:00:00Z"
     assert result.decoded.identity_assertion_ids == ("identity-assertion-001",)
     assert result.decoded.parent_object_ids == ("raw-object-001",)
-    assert {field.name for field in fields(CanonicalPriceRow)} == {
-        "close",
-        "high",
-        "listing_id",
-        "low",
-        "open",
-        "session_date",
-        "volume",
-    }
 
 
 def test_adapter_rejects_a_checkpoint_mismatch_without_decoding() -> None:

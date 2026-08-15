@@ -170,7 +170,7 @@ class StateStore:
         operations: PublicationDisposition,
         artifacts: list[dict[str, Any]],
         fixture_predictions: list[dict[str, Any]],
-        authorization_decision: dict[str, str | None],
+        authorization_decision: dict[str, object],
     ) -> dict[str, Any]:
         identity = payload["identity"]
         with self.engine.begin() as connection:
@@ -415,7 +415,7 @@ class StateStore:
     def record_authorization_decision(
         self,
         *,
-        authorization: dict[str, str | None],
+        authorization: dict[str, object],
         outcome: str,
         trace_id: str,
     ) -> None:
@@ -441,6 +441,22 @@ class StateStore:
         if payload is None:
             raise KeyError(listing_id)
         return deepcopy(cast(dict[str, Any], payload))
+
+    def get_price_source_checkpoint(self, *, source_id: str, source_mode: str) -> str | None:
+        with self.engine.connect() as connection:
+            payloads = connection.execute(
+                select(price_research_eligibility.c.payload)
+                .where(
+                    price_research_eligibility.c.source_id == source_id,
+                    price_research_eligibility.c.source_mode == source_mode,
+                )
+                .order_by(price_research_eligibility.c.sequence.desc())
+            ).scalars()
+            for payload in payloads:
+                checkpoint = cast(dict[str, Any], payload).get("checkpoint")
+                if isinstance(checkpoint, str):
+                    return checkpoint
+        return None
 
     def list_price_research_eligibility(
         self,
@@ -476,7 +492,7 @@ class StateStore:
         trace_id: str,
         execution_purpose: str,
         artifacts: list[dict[str, Any]],
-        authorization: dict[str, str | None],
+        authorization: dict[str, object],
         authorization_outcome: str,
         eligibility_records: list[dict[str, object]],
     ) -> None:
@@ -556,16 +572,27 @@ class StateStore:
             raise KeyError(artifact_id)
         return deepcopy(dict(row))
 
+    def has_canonical_artifact(self, artifact_id: str) -> bool:
+        with self.engine.connect() as connection:
+            return (
+                connection.execute(
+                    select(canonical_artifacts.c.artifact_id).where(
+                        canonical_artifacts.c.artifact_id == artifact_id
+                    )
+                ).scalar_one_or_none()
+                is not None
+            )
+
     def _insert_authorization_decision(
         self,
         connection: Connection,
         *,
-        authorization: dict[str, str | None],
+        authorization: dict[str, object],
         outcome: str,
         trace_id: str,
     ) -> None:
         event_id = authorization["evaluation_id"]
-        if event_id is None:
+        if not isinstance(event_id, str):
             raise ValueError("authorization_evaluation_id_required")
         exists = connection.execute(
             select(security_audit_events.c.event_id).where(

@@ -28,4 +28,8 @@ def test_taiwan_segment_declares_versioned_ten_listing_qualification_contract() 
     }
     assert manifest.market_calendar_cases == frozenset({"half_day_session"})
     assert manifest.evidence_status == "qualification_candidate"
+    assert manifest.current_source_id == "twse-open-data-current"
+    assert manifest.historical_source_id == "twse-contracted-history"
+    assert manifest.formal_qualification_artifact_id is None
+    assert manifest.historical_availability_claim_id is None
     assert manifest.formally_qualified is False

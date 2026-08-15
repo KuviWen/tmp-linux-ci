@@ -16,6 +16,7 @@ from stock_forecasting.authorization import (
     SourceEntitlement,
     SourcePolicyVersion,
     SourceUseRight,
+    authorization_audit_payload,
 )
 from stock_forecasting.cli import main
 
@@ -787,3 +788,5 @@ def test_price_source_rights_allow_collection_only_when_all_required_uses_are_ef
 
     assert decision.allowed is True
     assert decision.reason_code == "authorized"
+    assert decision.required_uses == required_uses
+    assert authorization_audit_payload(decision)["required_uses"] == sorted(required_uses)

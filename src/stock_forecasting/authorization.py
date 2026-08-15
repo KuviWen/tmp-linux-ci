@@ -406,6 +406,7 @@ class AuthorizationDecision:
     dataset_id: str
     purpose: AuthorizationPurpose
     environment: RuntimeEnvironment
+    required_uses: frozenset[SourceUseRight]
     grant_version_id: str | None
     source_policy_version_id: str | None
     source_entitlement_version_id: str | None
@@ -482,8 +483,8 @@ def source_entitlement_version_payload(
     return payload
 
 
-def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, str | None]:
-    return {
+def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, object]:
+    payload: dict[str, object] = {
         "evaluation_id": decision.evaluation_id,
         "decision_id": decision.decision_id,
         "correlation_id": decision.correlation_id,
@@ -502,6 +503,9 @@ def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, st
         "evaluated_at": _instant(decision.evaluated_at),
         "valid_until": _instant(decision.valid_until),
     }
+    if decision.required_uses:
+        payload["required_uses"] = sorted(decision.required_uses)
+    return payload
 
 
 @dataclass(frozen=True)
@@ -633,22 +637,23 @@ class AuthorizationPolicy:
         elif not intent.required_uses <= entitlement.allowed_uses:
             reason_code = "source_entitlement_use_denied"
         allowed = reason_code == "authorized"
-        decision_identity = "/".join(
-            (
-                context.principal_id,
-                intent.action,
-                intent.dataset_id,
-                intent.purpose,
-                intent.environment,
-                intent.resource_state,
-                grant.version_id if grant is not None else "no-grant",
-                source_policy.version_id if source_policy is not None else "no-policy",
-                entitlement.version_id if entitlement is not None else "no-entitlement",
-                reason_code,
-                intent.trace_id,
-                intent.correlation_id,
-            )
-        )
+        decision_identity_parts = [
+            context.principal_id,
+            intent.action,
+            intent.dataset_id,
+            intent.purpose,
+            intent.environment,
+            intent.resource_state,
+            grant.version_id if grant is not None else "no-grant",
+            source_policy.version_id if source_policy is not None else "no-policy",
+            entitlement.version_id if entitlement is not None else "no-entitlement",
+            reason_code,
+            intent.trace_id,
+            intent.correlation_id,
+        ]
+        if intent.required_uses:
+            decision_identity_parts.append(f"uses:{','.join(sorted(intent.required_uses))}")
+        decision_identity = "/".join(decision_identity_parts)
         valid_until = intent.evaluated_at
         if allowed and grant is not None and source_policy is not None and entitlement is not None:
             valid_until = min(
@@ -669,6 +674,7 @@ class AuthorizationPolicy:
             dataset_id=intent.dataset_id,
             purpose=intent.purpose,
             environment=intent.environment,
+            required_uses=intent.required_uses,
             grant_version_id=grant.version_id if grant is not None else None,
             source_policy_version_id=(
                 source_policy.version_id if source_policy is not None else None

@@ -512,10 +512,20 @@ def create_web_app(application: Application) -> FastAPI:
             raise HTTPException(status_code=404, detail="listing_not_found") from error
         if isinstance(outcome, PolicyDeniedOutcome):
             return authorization_denied(request, outcome)
-        blocked = outcome["status"] == "policy_blocked"
-        state_text = "政策阻擋" if blocked else "已具研究資格"
-        provider_text = "未接觸來源" if blocked else "來源資料已保存"
         sources = cast(list[dict[str, object]], outcome["sources"])
+        status = str(outcome["status"])
+        if status == "quarantined":
+            state_text = "資料隔離"
+            provider_text = "不具研究資格；來源原始證據已隔離保存"
+        elif status == "policy_blocked":
+            source_contacted = any(source["status"] != "policy_blocked" for source in sources)
+            state_text = "資格阻擋" if source_contacted else "政策阻擋"
+            provider_text = (
+                "來源候選資料已保存；不具正式研究資格" if source_contacted else "未接觸來源"
+            )
+        else:
+            state_text = "已具研究資格"
+            provider_text = "來源資料已保存"
         source_rows = "".join(
             "<tr>"
             f"<td>{escape(str(source['source_mode']))}</td>"

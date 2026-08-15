@@ -334,14 +334,19 @@ components:
         - listing_ids
         - trace_id
         - policy_decision_id
+        - policy_evaluation_id
+        - policy_valid_until
         - evaluated_at
         - raw_object_id
+        - retrieval_receipt_id
         - normalized_object_id
         - source_revision
         - checkpoint
         - coverage
         - dataset_version_id
         - adjustment_version_id
+        - historical_availability_claim_id
+        - checks
       properties:
         status: {type: string, enum: [published, policy_blocked, quarantined]}
         reason_code: {type: string}
@@ -354,8 +359,12 @@ components:
           items: {type: string, format: uuid}
         trace_id: {type: string}
         policy_decision_id: {type: string, format: uuid}
+        policy_evaluation_id: {type: string, format: uuid}
+        policy_valid_until: {type: string, format: date-time}
         evaluated_at: {type: string, format: date-time}
         raw_object_id:
+          type: [string, 'null']
+        retrieval_receipt_id:
           type: [string, 'null']
         normalized_object_id:
           type: [string, 'null']
@@ -371,6 +380,10 @@ components:
           type: [string, 'null']
         adjustment_version_id:
           type: [string, 'null']
+        historical_availability_claim_id:
+          type: [string, 'null']
+        checks:
+          $ref: '#/components/schemas/PriceQualificationChecks'
     SourceCollectionCoverage:
       type: object
       additionalProperties: false
