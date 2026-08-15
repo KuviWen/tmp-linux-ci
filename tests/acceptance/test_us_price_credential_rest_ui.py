@@ -65,6 +65,11 @@ class CallbackCredentialValidator:
         )
 
 
+class SecretBearingExceptionValidator:
+    def validate(self, credential_fields: Mapping[str, str]) -> CredentialValidationResult:
+        raise ValueError(f"provider rejected credential fields: {credential_fields}")
+
+
 class RecordingSecretProvider:
     def __init__(self) -> None:
         self.delegate = InMemorySecretProvider()
@@ -689,6 +694,40 @@ def test_operations_rejects_validator_output_that_echoes_a_credential_value(
     assert secret_value not in validated.text
 
 
+def test_operations_sanitizes_a_secret_bearing_validator_exception(tmp_path: Path) -> None:
+    validator = SecretBearingExceptionValidator()
+    _, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,  # type: ignore[arg-type]
+    )
+    secret_value = "exception-secret-canary"
+    client.put(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-EXCEPTION-CANARY",
+                "api_secret_key": secret_value,
+            }
+        },
+    )
+
+    validated = client.post(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/validations",
+        headers=headers,
+    )
+
+    assert validated.status_code == 200
+    assert validated.json()["credential"]["readiness"] == "validation_failed"
+    assert validated.json()["credential"]["reason_code"] == (
+        "source_credential_validator_output_rejected"
+    )
+    assert "validation_evidence" not in validated.json()["credential"]
+    assert validated.json()["source_contract_assessment"] is None
+    assert "PK-EXCEPTION-CANARY" not in validated.text
+    assert secret_value not in validated.text
+
+
 def test_only_a_valid_managed_credential_can_be_resolved_for_provider_use(
     tmp_path: Path,
 ) -> None:
@@ -945,6 +984,51 @@ def test_operations_page_can_mutate_with_an_http_only_session_and_csrf_token(
     assert configured.json()["readiness"] == "configured"
     assert "PK-BROWSER" not in configured.text
     assert "browser-secret" not in configured.text
+
+
+def test_operations_page_bounds_browser_sessions_and_evicts_the_oldest(
+    tmp_path: Path,
+) -> None:
+    _, client, headers = _credential_application(tmp_path)
+    first_page = client.get("/operations/source-credentials", headers=headers)
+    first_csrf = re.search(r'<meta name="csrf-token" content="([^"]+)">', first_page.text)
+    assert first_csrf is not None
+    session_cookie_name = "stock_forecasting_operations_session"
+    first_session_id = first_page.cookies.get(session_cookie_name)
+    assert first_session_id is not None
+
+    latest_page = first_page
+    for _ in range(256):
+        latest_page = client.get("/operations/source-credentials", headers=headers)
+    latest_csrf = re.search(r'<meta name="csrf-token" content="([^"]+)">', latest_page.text)
+    assert latest_csrf is not None
+
+    evicted_client = TestClient(client.app, client=("127.0.0.1", 50001))
+    evicted_client.cookies.set(session_cookie_name, first_session_id)
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    evicted = evicted_client.put(
+        endpoint,
+        headers={"X-CSRF-Token": first_csrf.group(1)},
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-EVICTED",
+                "api_secret_key": "evicted-secret",
+            }
+        },
+    )
+    newest = client.put(
+        endpoint,
+        headers={"X-CSRF-Token": latest_csrf.group(1)},
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-NEWEST",
+                "api_secret_key": "newest-secret",
+            }
+        },
+    )
+
+    assert evicted.status_code == 401
+    assert newest.status_code == 200
 
 
 def test_validation_authorizes_before_reading_restricted_credential_state(

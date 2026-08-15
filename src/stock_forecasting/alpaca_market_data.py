@@ -368,9 +368,8 @@ class AlpacaCredentialValidator:
             )
         if response.status_code == 403:
             return CredentialValidationResult(
-                readiness="valid",
-                reason_code="source_credential_valid",
-                evidence=CredentialValidationEvidence(authentication_status="passed"),
+                readiness="configured",
+                reason_code="source_credential_validation_inconclusive",
                 source_contract_assessment=SourceContractAssessment(
                     contract_id="alpaca-credential-probe-v1",
                     live_validation="failed",
@@ -605,7 +604,7 @@ class AlpacaLiveContractValidator:
         if response.status_code == 401:
             return self._failure("source_credential_authentication_failed")
         if response.status_code == 403:
-            return self._source_contract_failure("source_contract_forbidden")
+            return self._failure("source_credential_provider_forbidden")
         if response.status_code == 429:
             return self._failure("source_credential_validation_rate_limited")
         if response.status_code != 200:
@@ -646,6 +645,7 @@ class AlpacaLiveContractValidator:
     @staticmethod
     def _failure(reason_code: str) -> CredentialValidationResult:
         source_contract_reason = {
+            "source_credential_provider_forbidden": "source_contract_forbidden",
             "source_credential_validation_rate_limited": "source_contract_rate_limited",
             "source_credential_provider_unavailable": "source_contract_unavailable",
             "source_credential_provider_schema_invalid": "source_contract_schema_invalid",
@@ -663,7 +663,11 @@ class AlpacaLiveContractValidator:
         return CredentialValidationResult(
             readiness="validation_failed",
             reason_code=reason_code,
-            evidence=CredentialValidationEvidence(authentication_status="failed"),
+            evidence=CredentialValidationEvidence(
+                authentication_status=(
+                    "not_run" if reason_code == "source_credential_fields_invalid" else "failed"
+                )
+            ),
         )
 
     @staticmethod
@@ -986,9 +990,39 @@ class AlpacaSourceCollector:
         if response.status_code != 200:
             raise RuntimeError("source_provider_unavailable")
         try:
-            return json.loads(response.body)
+            payload = json.loads(response.body)
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise ValueError("source_provider_schema_invalid") from error
+        credential_values = tuple(
+            value
+            for header_name in ("APCA-API-KEY-ID", "APCA-API-SECRET-KEY")
+            if (value := request.headers.get(header_name))
+        )
+        if self._contains_credential_value(payload, credential_values=credential_values):
+            raise ValueError("source_provider_credential_echo_detected")
+        return payload
+
+    @classmethod
+    def _contains_credential_value(
+        cls,
+        value: object,
+        *,
+        credential_values: tuple[str, ...],
+    ) -> bool:
+        if isinstance(value, str):
+            return any(credential_value in value for credential_value in credential_values)
+        if isinstance(value, Mapping):
+            return any(
+                cls._contains_credential_value(item, credential_values=credential_values)
+                for pair in value.items()
+                for item in pair
+            )
+        if isinstance(value, list):
+            return any(
+                cls._contains_credential_value(item, credential_values=credential_values)
+                for item in value
+            )
+        return False
 
     @staticmethod
     def _alias_overlaps(
@@ -1222,7 +1256,6 @@ class AlpacaSourceDecoder:
                 action_type = action.get("type") or action.get("corporate_action_type")
                 if not isinstance(action_id, str) or not isinstance(action_type, str):
                     raise ValueError("source_provider_schema_invalid")
-                assertion_ids.add(action_id)
                 if action_type == "name_change":
                     old_symbol = action.get("old_symbol") or action.get("initiating_symbol")
                     new_symbol = action.get("new_symbol") or action.get("target_symbol")
@@ -1235,6 +1268,7 @@ class AlpacaSourceDecoder:
                     if listing_id is None:
                         quality_issues.add("identity_ambiguous")
                         continue
+                    assertion_ids.add(action_id)
                     symbol_identities.extend(
                         (
                             SymbolIdentityRecord(
@@ -1263,6 +1297,7 @@ class AlpacaSourceDecoder:
                 if listing_id is None:
                     quality_issues.add("identity_ambiguous")
                     continue
+                assertion_ids.add(action_id)
                 if action_type == "cash_dividend":
                     company_actions.append(
                         CompanyActionRecord(
@@ -1334,28 +1369,19 @@ class AlpacaSourceDecoder:
         *,
         effective_date: date,
     ) -> str | None:
-        listing_ids = {
-            listing_id
-            for listing_id in (
-                (
-                    self._listing_for_symbol(
-                        old_symbol,
-                        effective_date=effective_date - timedelta(days=1),
-                    )
-                    if isinstance(old_symbol, str)
-                    else None
-                ),
-                (
-                    self._listing_for_symbol(new_symbol, effective_date=effective_date)
-                    if isinstance(new_symbol, str)
-                    else None
-                ),
-            )
-            if listing_id is not None
-        }
-        if len(listing_ids) != 1:
+        if not isinstance(old_symbol, str) or not isinstance(new_symbol, str):
             return None
-        return listing_ids.pop()
+        old_listing_id = self._listing_for_symbol(
+            old_symbol,
+            effective_date=effective_date - timedelta(days=1),
+        )
+        new_listing_id = self._listing_for_symbol(
+            new_symbol,
+            effective_date=effective_date,
+        )
+        if old_listing_id is None or old_listing_id != new_listing_id:
+            return None
+        return old_listing_id
 
     def _listing_for_symbol(self, symbol: str, *, effective_date: date) -> str | None:
         listing_ids = {

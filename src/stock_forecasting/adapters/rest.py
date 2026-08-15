@@ -145,6 +145,7 @@ def create_web_app(application: Application) -> FastAPI:
     )
     browser_sessions: dict[str, tuple[SecurityContext, str, float]] = {}
     browser_session_ttl_seconds = 300
+    browser_session_max_entries = 256
 
     @app.get("/openapi/openapi.yaml", include_in_schema=False)
     def openapi_source() -> FileResponse:
@@ -492,12 +493,18 @@ def create_web_app(application: Application) -> FastAPI:
         )
         if isinstance(outcome, PolicyDeniedOutcome):
             return authorization_denied(request, outcome)
+        now = time.monotonic()
+        for expired_session_id, session in tuple(browser_sessions.items()):
+            if session[2] <= now:
+                browser_sessions.pop(expired_session_id, None)
+        while len(browser_sessions) >= browser_session_max_entries:
+            browser_sessions.pop(next(iter(browser_sessions)))
         session_id = secrets.token_urlsafe(32)
         csrf_token = secrets.token_urlsafe(32)
         browser_sessions[session_id] = (
             security_context,
             csrf_token,
-            time.monotonic() + browser_session_ttl_seconds,
+            now + browser_session_ttl_seconds,
         )
         provider_sections: list[str] = []
         for provider in outcome:

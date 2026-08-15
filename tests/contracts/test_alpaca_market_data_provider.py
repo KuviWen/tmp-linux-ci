@@ -384,8 +384,8 @@ def test_urllib_provider_transport_encodes_query_and_keeps_auth_in_headers() -> 
         (
             403,
             b'{"message":"forbidden"}',
-            "valid",
-            "source_credential_valid",
+            "configured",
+            "source_credential_validation_inconclusive",
             "source_contract_forbidden",
         ),
         (
@@ -584,16 +584,70 @@ def test_live_contract_keeps_an_authenticated_credential_valid_when_source_probe
     )
 
 
-def test_live_contract_classifies_forbidden_data_as_source_contract_not_bad_credentials() -> None:
+def test_live_contract_keeps_prior_authentication_when_a_later_probe_is_forbidden() -> None:
+    regular_symbols = "AAPL,AMZN,BRK.B,GME,GOOG,GOOGL,META,NVDA,TSM"
+    transport = SequenceProviderTransport(
+        [
+            ProviderHttpResponse(
+                200,
+                json.dumps(
+                    {
+                        "bars": {
+                            symbol: [
+                                {
+                                    "t": "2024-01-03T05:00:00Z",
+                                    "o": 1,
+                                    "h": 2,
+                                    "l": 0.5,
+                                    "c": 1.5,
+                                    "v": 100,
+                                }
+                            ]
+                            for symbol in regular_symbols.split(",")
+                        },
+                        "next_page_token": None,
+                    }
+                ).encode(),
+            ),
+            ProviderHttpResponse(403, b'{"message":"subscription does not permit SIP"}'),
+        ]
+    )
+
+    result = AlpacaLiveContractValidator(transport).validate(
+        {"api_key_id": "PK-AUTHENTICATED", "api_secret_key": "authenticated-secret"}
+    )
+
+    assert result.readiness == "valid"
+    assert result.reason_code == "source_credential_valid"
+    assert result.evidence.authentication_status == "passed"
+    assert result.source_contract_assessment is not None
+    assert result.source_contract_assessment.source_contract_reason_code == (
+        "source_contract_forbidden"
+    )
+
+
+def test_live_contract_returns_stable_invalid_readiness_for_missing_fields() -> None:
+    transport = LiteralProviderTransport(ProviderHttpResponse(500, b"must not be used"))
+
+    result = AlpacaLiveContractValidator(transport).validate({"api_key_id": "PK-ONLY"})
+
+    assert result.readiness == "validation_failed"
+    assert result.reason_code == "source_credential_fields_invalid"
+    assert result.evidence.authentication_status == "not_run"
+    assert result.source_contract_assessment is None
+    assert transport.requests == []
+
+
+def test_live_contract_treats_an_initial_forbidden_response_as_inconclusive() -> None:
     result = AlpacaLiveContractValidator(
         LiteralProviderTransport(
             ProviderHttpResponse(403, b'{"message":"subscription does not permit SIP"}')
         )
     ).validate({"api_key_id": "PK-AUTHENTICATED", "api_secret_key": "authenticated-secret"})
 
-    assert result.readiness == "valid"
-    assert result.reason_code == "source_credential_valid"
-    assert result.evidence.authentication_status == "passed"
+    assert result.readiness == "configured"
+    assert result.reason_code == "source_credential_validation_inconclusive"
+    assert result.evidence.authentication_status == "not_run"
     assert result.source_contract_assessment is not None
     assert result.source_contract_assessment.live_validation == "failed"
     assert (
@@ -828,6 +882,79 @@ def test_alpaca_collector_builds_one_immutable_paginated_source_bundle() -> None
         and request.headers["APCA-API-SECRET-KEY"] == "collector-contract-secret"
         for request in transport.requests
     )
+
+
+@pytest.mark.parametrize("echo_response", ["bars", "actions", "calendar"])
+def test_alpaca_collector_rejects_provider_responses_that_echo_credentials(
+    echo_response: str,
+) -> None:
+    secret_value = "collector-contract-secret"
+    bars_payload: dict[str, object] = {
+        "bars": {
+            "AAPL": [
+                {
+                    "t": "2024-01-03T05:00:00Z",
+                    "o": 184.22,
+                    "h": 185.88,
+                    "l": 183.43,
+                    "c": 184.25,
+                    "v": 58414460,
+                }
+            ]
+        },
+        "next_page_token": None,
+    }
+    actions_payload: dict[str, object] = {
+        "cash_dividends": [],
+        "next_page_token": None,
+    }
+    calendar_payload: list[dict[str, object]] = [
+        {"date": "2024-01-03", "open": "09:30", "close": "16:00"}
+    ]
+    if echo_response == "bars":
+        bars_payload["echo"] = secret_value
+    elif echo_response == "actions":
+        actions_payload["echo"] = secret_value
+    else:
+        calendar_payload[0]["echo"] = secret_value
+    transport = SequenceProviderTransport(
+        [
+            ProviderHttpResponse(200, json.dumps(bars_payload).encode()),
+            ProviderHttpResponse(200, json.dumps(actions_payload).encode()),
+            ProviderHttpResponse(200, json.dumps(calendar_payload).encode()),
+        ]
+    )
+    collector = AlpacaSourceCollector(
+        source_id="alpaca-us-stock-bars",
+        provider_id="alpaca-market-data-basic",
+        reference_graph=_complete_reference_graph(
+            listing_id="70000000-0000-4000-8000-000000000001"
+        ),
+        credential_resolver=LiteralCredentialResolver(),
+        transport=transport,
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+    )
+
+    with pytest.raises(ValueError) as raised:
+        collector.collect(
+            SourcePartitionRequest(
+                request_id=f"request-ticket-07-secret-echo-{echo_response}",
+                trace_id=f"trace-ticket-07-secret-echo-{echo_response}",
+                source_id="alpaca-us-stock-bars",
+                mode="historical",
+                listing_ids=("70000000-0000-4000-8000-000000000001",),
+                start_date=date(2024, 1, 3),
+                end_date=date(2024, 1, 3),
+                expected_checkpoint=None,
+                distribution_id="alpaca-us-stock-bars-v2",
+                distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+                bundle_members=_bundle_member_requests(),
+            )
+        )
+
+    assert str(raised.value) == "source_provider_credential_echo_detected"
+    assert secret_value not in str(raised.value)
 
 
 def test_alpaca_collector_derives_company_action_completeness_from_reference_graph() -> None:
@@ -1253,6 +1380,102 @@ def test_alpaca_decoder_quarantines_out_of_window_aliases_and_duplicate_prices()
     assert decoded.quality_issues == ("identity_ambiguous",)
 
 
+@pytest.mark.parametrize(
+    ("old_symbol", "new_symbol"),
+    [
+        ("OLD", "UNKNOWN"),
+        ("UNKNOWN", "NEW"),
+        ("OLD", "OTHERNEW"),
+    ],
+)
+def test_alpaca_decoder_quarantines_partially_resolved_or_cross_listing_name_changes(
+    old_symbol: str,
+    new_symbol: str,
+) -> None:
+    listing_id = "70000000-0000-4000-8000-000000000024"
+    other_listing_id = "70000000-0000-4000-8000-000000000025"
+    reference_graph = AlpacaReferenceGraph(
+        version_id="engineering-name-change-resolution-v1",
+        listings=(
+            AlpacaReferenceListing(
+                listing_id=listing_id,
+                aliases=(
+                    ExternalSecurityAlias(
+                        security_code="OLD",
+                        security_name="Rename Example",
+                        valid_from=date(2010, 1, 1),
+                        valid_to=date(2022, 6, 8),
+                    ),
+                    ExternalSecurityAlias(
+                        security_code="NEW",
+                        security_name="Rename Example",
+                        valid_from=date(2022, 6, 9),
+                        valid_to=None,
+                    ),
+                ),
+                lifecycle=(
+                    ListingLifecycleRecord(
+                        listing_id=listing_id,
+                        effective_date=date(2010, 1, 1),
+                        status="active",
+                        source_event_id="rename-example-active",
+                    ),
+                ),
+            ),
+            AlpacaReferenceListing(
+                listing_id=other_listing_id,
+                aliases=(
+                    ExternalSecurityAlias(
+                        security_code="OTHERNEW",
+                        security_name="Other Rename Example",
+                        valid_from=date(2022, 6, 9),
+                        valid_to=None,
+                    ),
+                ),
+                lifecycle=(
+                    ListingLifecycleRecord(
+                        listing_id=other_listing_id,
+                        effective_date=date(2022, 6, 9),
+                        status="active",
+                        source_event_id="other-rename-example-active",
+                    ),
+                ),
+            ),
+        ),
+        company_action_expectations=(),
+        lifecycle_complete=True,
+        company_actions_complete=True,
+    )
+    collection = replace(
+        _collected_partition_for_reference_graph(
+            reference_graph,
+            listing_ids=(listing_id, other_listing_id),
+            start_date=date(2022, 6, 9),
+            end_date=date(2022, 6, 9),
+            bars={},
+            corporate_actions={
+                "name_changes": [
+                    {
+                        "id": "unresolved-name-change",
+                        "old_symbol": old_symbol,
+                        "new_symbol": new_symbol,
+                        "process_date": "2022-06-09",
+                    }
+                ]
+            },
+        ),
+        expected_company_action_ids=frozenset({"unresolved-name-change"}),
+    )
+
+    decoded = AlpacaSourceDecoder(
+        source_id="alpaca-us-stock-bars",
+        reference_graph=reference_graph,
+    ).decode(collection)
+
+    assert "unresolved-name-change" not in decoded.identity_assertion_ids
+    assert decoded.quality_issues == ("identity_ambiguous", "missing_company_action")
+
+
 def test_alpaca_decoder_uses_permanent_listing_ids_and_internal_action_semantics() -> None:
     aapl_listing_id = "70000000-0000-4000-8000-000000000001"
     meta_listing_id = "70000000-0000-4000-8000-000000000002"
@@ -1261,6 +1484,29 @@ def test_alpaca_decoder_uses_permanent_listing_ids_and_internal_action_semantics
             aapl_listing_id: ("AAPL",),
             meta_listing_id: ("FB", "META"),
         }
+    )
+    reference_graph = replace(
+        reference_graph,
+        listings=(
+            reference_graph.listing(aapl_listing_id),
+            replace(
+                reference_graph.listing(meta_listing_id),
+                aliases=(
+                    ExternalSecurityAlias(
+                        security_code="FB",
+                        security_name="FB engineering reference",
+                        valid_from=date(2012, 5, 18),
+                        valid_to=date(2022, 6, 8),
+                    ),
+                    ExternalSecurityAlias(
+                        security_code="META",
+                        security_name="META engineering reference",
+                        valid_from=date(2022, 6, 9),
+                        valid_to=None,
+                    ),
+                ),
+            ),
+        ),
     )
     requested_listing_ids = (aapl_listing_id, meta_listing_id)
     raw_payload = json.dumps(
@@ -1409,14 +1655,14 @@ def test_alpaca_decoder_uses_permanent_listing_ids_and_internal_action_semantics
         SymbolIdentityRecord(
             listing_id=meta_listing_id,
             symbol="FB",
-            valid_from=date(2000, 1, 1),
-            valid_to=date(2000, 12, 31),
+            valid_from=date(2012, 5, 18),
+            valid_to=date(2022, 6, 8),
             source_event_id=(f"engineering-reference-multi-listing-v1:{meta_listing_id}:FB"),
         ),
         SymbolIdentityRecord(
             listing_id=meta_listing_id,
             symbol="META",
-            valid_from=date(2001, 1, 1),
+            valid_from=date(2022, 6, 9),
             valid_to=None,
             source_event_id=(f"engineering-reference-multi-listing-v1:{meta_listing_id}:META"),
         ),

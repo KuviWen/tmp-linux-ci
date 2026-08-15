@@ -294,32 +294,40 @@ class OperationsControl:
                 )
             else:
                 credential_fields = lease.credential_fields()
-                validation = validator.validate(credential_fields)
-                serialized_validation = json.dumps(
-                    {
-                        "reason_code": validation.reason_code,
-                        "evidence": validation.evidence.as_payload(),
-                        "source_contract_assessment": (
-                            validation.source_contract_assessment.as_payload()
-                            if validation.source_contract_assessment is not None
-                            else None
-                        ),
-                    },
-                    sort_keys=True,
-                )
-                if any(
-                    credential_value in serialized_validation
-                    for credential_value in credential_fields.values()
-                ):
+                try:
+                    validation = validator.validate(credential_fields)
+                    serialized_validation = json.dumps(
+                        {
+                            "reason_code": validation.reason_code,
+                            "evidence": validation.evidence.as_payload(),
+                            "source_contract_assessment": (
+                                validation.source_contract_assessment.as_payload()
+                                if validation.source_contract_assessment is not None
+                                else None
+                            ),
+                        },
+                        sort_keys=True,
+                    )
+                    output_contains_secret = any(
+                        credential_value in serialized_validation
+                        for credential_value in credential_fields.values()
+                    )
+                except Exception:
                     validation_readiness = "validation_failed"
                     validation_reason = "source_credential_validator_output_rejected"
                     validation_evidence = None
                     source_contract_assessment = None
                 else:
-                    validation_readiness = validation.readiness
-                    validation_reason = validation.reason_code
-                    validation_evidence = validation.evidence
-                    source_contract_assessment = validation.source_contract_assessment
+                    if output_contains_secret:
+                        validation_readiness = "validation_failed"
+                        validation_reason = "source_credential_validator_output_rejected"
+                        validation_evidence = None
+                        source_contract_assessment = None
+                    else:
+                        validation_readiness = validation.readiness
+                        validation_reason = validation.reason_code
+                        validation_evidence = validation.evidence
+                        source_contract_assessment = validation.source_contract_assessment
         expected_version = current["version"]
         if not isinstance(expected_version, int):
             raise ValueError("source_credential_version_invalid")
