@@ -1250,7 +1250,7 @@ class TaiwanStockPoolManifest:
                 raise ValueError("taiwan_stock_pool_source_archive_invalid")
             try:
                 content = object_repository.open_by_id(reference.raw_object_id).read()
-            except (FileNotFoundError, ObjectIntegrityError, ValueError) as error:
+            except (OSError, ObjectIntegrityError, ValueError) as error:
                 raise ValueError("taiwan_stock_pool_source_archive_invalid") from error
             if hashlib.sha256(content).hexdigest() != reference.observed_content_sha256:
                 raise ValueError("taiwan_stock_pool_source_archive_invalid")
@@ -1438,6 +1438,5 @@ def load_taiwan_stock_pool_manifest(
         ),
         evidence_status=cast(ManifestEvidenceStatus, payload["evidence_status"]),
     )
-    if object_repository is not None:
-        manifest.verify_source_archive(object_repository)
+    manifest.verify_source_archive(object_repository)
     return manifest

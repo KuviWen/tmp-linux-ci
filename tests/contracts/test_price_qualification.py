@@ -222,6 +222,31 @@ def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contra
             trace_id="trace-archive-corrupt-gate-rejected",
         )
 
+    unreadable_workflow = TaiwanPriceQualificationWorkflow(
+        state_store,
+        authorization_policy=policy,
+        security_context=identity.context,
+        clock=lambda: now,
+        object_repository=UnreadableObjectRepository(tmp_path / "unreadable-archive"),
+    )
+    with pytest.raises(ValueError, match="formal_gate_requires_verified_source_archive"):
+        unreadable_workflow.register_formal_qualification_gate(
+            manifest=archived_manifest,
+            historical_availability_claim_id=historical_claim_id,
+            trace_id="trace-archive-unreadable-gate-rejected",
+        )
+    unreadable_audit = state_store.list_audit_events(
+        trace_id="trace-archive-unreadable-gate-rejected"
+    )
+    assert len(unreadable_audit) == 2
+    assert {event["outcome"] for event in unreadable_audit} == {"allowed"}
+    unreadable_trace = state_store.get_trace_evidence("trace-archive-unreadable-gate-rejected")
+    unreadable_rejection = state_store.get_canonical_artifact(unreadable_trace["artifact_ids"][0])
+    assert unreadable_rejection["payload"] == {
+        "operation": "register_formal_qualification_gate",
+        "reason_code": "formal_gate_requires_verified_source_archive",
+    }
+
     with pytest.raises(
         ValueError,
         match="candidate_claim_cannot_assert_qualification_evidence",
@@ -323,3 +348,8 @@ def _archive_selection_sources(
         )
         object_refs.append(object_ref)
     return replace(manifest, source_references=tuple(archived_sources)), object_refs
+
+
+class UnreadableObjectRepository(FilesystemObjectRepository):
+    def open_by_id(self, object_id: str) -> BytesIO:
+        raise PermissionError(object_id)

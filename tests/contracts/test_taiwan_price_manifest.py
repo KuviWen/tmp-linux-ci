@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from importlib.resources import files
 from io import BytesIO
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 
+import stock_forecasting.data_supply as data_supply
 from stock_forecasting.data_supply import (
     ExternalSecurityAlias,
     StockPoolListing,
@@ -336,6 +339,69 @@ def test_verified_selection_source_archive_rehashes_object_repository_bytes(
     Path(object_ref.uri).write_bytes(b"corrupt")
     with pytest.raises(ValueError, match="taiwan_stock_pool_source_archive_invalid"):
         verified_manifest.verify_source_archive(repository)
+
+
+def test_manifest_loader_requires_and_rehashes_verified_source_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+    source = manifest.source_references[0]
+    content = b"loader-selection-source-archive-contract-fixture"
+    checksum = hashlib.sha256(content).hexdigest()
+    repository = FilesystemObjectRepository(tmp_path / "objects")
+    acquired_at = datetime(2026, 8, 15, 9, 0, tzinfo=UTC)
+    object_ref = repository.put_verified(
+        BytesIO(content),
+        expected_checksum=checksum,
+        metadata={"source": "loader-contract-fixture"},
+    )
+    pending_receipt = replace(
+        source,
+        observed_content_sha256=checksum,
+        archival_status="verified",
+        acquired_at=acquired_at,
+        raw_object_id=object_ref.object_id,
+        retrieval_receipt_id="pending",
+    )
+    verified_source = replace(
+        pending_receipt,
+        retrieval_receipt_id=pending_receipt.expected_retrieval_receipt_id,
+    )
+
+    bundled_manifest = files("stock_forecasting").joinpath(
+        "manifests/p2_taiwan_stock_pool_contract_v1.json"
+    )
+    payload = json.loads(bundled_manifest.read_text(encoding="utf-8"))
+    source_payload = next(
+        item
+        for item in payload["selection_source_references"]
+        if item["source_reference_id"] == source.source_reference_id
+    )
+    source_payload.update(
+        {
+            "observed_content_sha256": verified_source.observed_content_sha256,
+            "archival_status": verified_source.archival_status,
+            "acquired_at": acquired_at.isoformat(),
+            "raw_object_id": verified_source.raw_object_id,
+            "retrieval_receipt_id": verified_source.retrieval_receipt_id,
+        }
+    )
+    resource_root = tmp_path / "package"
+    manifest_path = resource_root / "manifests" / "p2_taiwan_stock_pool_contract_v1.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(data_supply, "files", lambda _package: resource_root)
+
+    with pytest.raises(ValueError, match="taiwan_stock_pool_source_archive_invalid"):
+        load_taiwan_stock_pool_manifest()
+
+    loaded = load_taiwan_stock_pool_manifest(repository)
+    assert loaded.source_references[0] == verified_source
+
+    Path(object_ref.uri).write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="taiwan_stock_pool_source_archive_invalid"):
+        load_taiwan_stock_pool_manifest(repository)
 
 
 def test_taiwan_selection_evidence_rejects_a_mismatched_assertion_kind() -> None:

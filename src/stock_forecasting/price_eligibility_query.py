@@ -68,14 +68,17 @@ class PriceEligibilityQuery:
         modes = {str(source["source_mode"]) for source in sources}
         required_modes_present = modes == {"current", "historical"}
         statuses = {str(source["status"]) for source in sources}
-        manifest = load_taiwan_stock_pool_manifest()
-        formal_evidence_available = TaiwanPriceQualificationWorkflow(
-            self._state_store,
-            object_repository=self._object_repository,
-        ).formal_qualification_available(
-            manifest,
-            sources,
-        )
+        try:
+            manifest = load_taiwan_stock_pool_manifest(self._object_repository)
+            formal_evidence_available = TaiwanPriceQualificationWorkflow(
+                self._state_store,
+                object_repository=self._object_repository,
+            ).formal_qualification_available(
+                manifest,
+                sources,
+            )
+        except ValueError:
+            formal_evidence_available = False
         current_source_rights_denied = any(
             isinstance((current := source.get("current_policy_decision")), dict)
             and current.get("outcome") == "denied"
