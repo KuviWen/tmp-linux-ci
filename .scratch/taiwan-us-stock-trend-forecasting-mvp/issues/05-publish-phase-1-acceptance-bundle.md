@@ -28,13 +28,13 @@ Status: ready-for-agent
 - 每個平台 run 發布獨立的 content-addressed evidence，綁定實際 OCI image ID、Git、application
   payload、deployment、migration、contract、scenario、restart 與 resource 結果；只有同一
   provenance 的 Windows Docker Desktop 與 Linux CI evidence 都通過，P1-EXIT 才能 passing。
-- GitHub hosted Ubuntu run `31851846154` 在 commit
-  `9ddefa723682faf1b9947841b3809d7409ccd29b` 通過 host suite、真實 PostgreSQL opt-in、mypy、Ruff、
+- GitHub hosted Ubuntu run `31853187753` 在 commit
+  `f0225f21086b86cf7c9589f72cf313da72a851ca` 通過 host suite、真實 PostgreSQL opt-in、mypy、Ruff、
   Compose config、相同 deployed acceptance 命令與 checksum 驗證；artifact
-  `p1-linux-acceptance-evidence` 保留 Linux bundle `sha256:f44d90ae0c43e98390093057adaf409739a4229160f0a40c8fbd713024d2bc0a`。
+  `p1-linux-acceptance-evidence` 保留 Linux bundle `sha256:a818c078bda39b44d8083cc384a081be3e380cd21a7efca19219419bf152b9e6`。
 - Windows Docker Desktop 從清除 ticket-05 專屬 volumes 的乾淨 state，以同一命令及上述 Linux
   artifact 聚合通過。最終 bundle
-  `sha256:74fd6dca75f1d3f7235189c417b250b9e95f4a19ebf9413c089143d3ae298c20`
+  `sha256:195eafb00048e43baa7cff83df98abea3ec2df484ccfbf987198f8573d077469`
   的 envelope／bundle checksum／failure-object manifest 全部驗證有效，`linux_ci` 與
   `windows_docker_desktop` platform runs、8 個 hard gates 及 14 個 scenarios 全為 `passed`。
 - Source provenance 對 CRLF／LF checkout 使用 canonical LF bytes，忽略並從 Docker context 排除
