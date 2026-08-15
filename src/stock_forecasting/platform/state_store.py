@@ -56,6 +56,16 @@ def _content_digest(payload: object) -> str:
     return hashlib.sha256(canonical_payload).hexdigest()
 
 
+def _canonical_artifact_id(artifact_kind: str, payload: object) -> str:
+    canonical_payload = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(artifact_kind.encode() + canonical_payload).hexdigest()}"
+
+
 class StateStore:
     def __init__(self, database_url: str, *, create_schema: bool) -> None:
         if database_url == "sqlite+pysqlite:///:memory:":
@@ -571,6 +581,73 @@ class StateStore:
         if row is None:
             raise KeyError(artifact_id)
         return deepcopy(dict(row))
+
+    def publish_governance_artifact(
+        self,
+        *,
+        artifact_kind: str,
+        payload: dict[str, object],
+        trace_id: str,
+    ) -> str:
+        artifact_id = _canonical_artifact_id(artifact_kind, payload)
+        with self.engine.begin() as connection:
+            existing = (
+                connection.execute(
+                    select(
+                        canonical_artifacts.c.artifact_kind,
+                        canonical_artifacts.c.execution_purpose,
+                        canonical_artifacts.c.payload,
+                    ).where(canonical_artifacts.c.artifact_id == artifact_id)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing is None:
+                connection.execute(
+                    canonical_artifacts.insert().values(
+                        artifact_id=artifact_id,
+                        artifact_kind=artifact_kind,
+                        execution_purpose="governance",
+                        payload=payload,
+                    )
+                )
+            elif (
+                existing["artifact_kind"] != artifact_kind
+                or existing["execution_purpose"] != "governance"
+                or existing["payload"] != payload
+            ):
+                raise ImmutableStateConflict("immutable_artifact_conflict")
+            reference_exists = connection.execute(
+                select(trace_artifact_refs.c.sequence).where(
+                    trace_artifact_refs.c.trace_id == trace_id,
+                    trace_artifact_refs.c.artifact_id == artifact_id,
+                )
+            ).scalar_one_or_none()
+            if reference_exists is None:
+                connection.execute(
+                    trace_artifact_refs.insert().values(
+                        trace_id=trace_id,
+                        artifact_id=artifact_id,
+                    )
+                )
+        return artifact_id
+
+    def get_verified_governance_artifact(
+        self,
+        *,
+        artifact_id: str,
+        artifact_kind: str,
+    ) -> dict[str, object]:
+        artifact = self.get_canonical_artifact(artifact_id)
+        payload = artifact["payload"]
+        if (
+            artifact["artifact_kind"] != artifact_kind
+            or artifact["execution_purpose"] != "governance"
+            or not isinstance(payload, dict)
+            or _canonical_artifact_id(artifact_kind, payload) != artifact_id
+        ):
+            raise KeyError(artifact_id)
+        return deepcopy(cast(dict[str, object], payload))
 
     def has_canonical_artifact(self, artifact_id: str) -> bool:
         with self.engine.connect() as connection:

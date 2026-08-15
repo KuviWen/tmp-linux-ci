@@ -11,6 +11,7 @@ from stock_forecasting.authorization import (
 )
 from stock_forecasting.data_supply import load_taiwan_stock_pool_manifest
 from stock_forecasting.platform.state_store import StateStore
+from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
 
 
 class PriceEligibilityQuery:
@@ -42,11 +43,11 @@ class PriceEligibilityQuery:
         required_modes_present = modes == {"current", "historical"}
         statuses = {str(source["status"]) for source in sources}
         manifest = load_taiwan_stock_pool_manifest()
-        formal_evidence_available = (
-            manifest.formally_qualified
-            and manifest.matches_formal_source_lineage(sources)
-            and manifest.formal_qualification_artifact_id is not None
-            and self._state_store.has_canonical_artifact(manifest.formal_qualification_artifact_id)
+        formal_evidence_available = TaiwanPriceQualificationWorkflow(
+            self._state_store
+        ).formal_qualification_available(
+            manifest,
+            sources,
         )
         evaluated_at = self._authorization_time or datetime.now(UTC)
         source_rights_expired = any(
@@ -54,7 +55,13 @@ class PriceEligibilityQuery:
             for source in sources
             if source["status"] != "policy_blocked"
         )
-        if "policy_blocked" in statuses or not required_modes_present:
+        if "policy_blocked" in statuses:
+            status = "policy_blocked"
+            reason_code = "dependency_evidence_unverified"
+        elif "deferred" in statuses:
+            status = "policy_blocked"
+            reason_code = "source_collection_deferred"
+        elif not required_modes_present:
             status = "policy_blocked"
             reason_code = "dependency_evidence_unverified"
         elif source_rights_expired:
@@ -74,6 +81,8 @@ class PriceEligibilityQuery:
             status = "qualified"
             reason_code = "qualified_price_materialized"
         checks = _aggregate_qualification_checks(sources)
+        if status == "policy_blocked":
+            checks["policy"] = "blocked"
         return {
             "listing_id": listing_id,
             "market": "XTAI",

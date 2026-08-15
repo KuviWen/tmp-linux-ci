@@ -28,10 +28,13 @@ from stock_forecasting.data_supply import (
     LoadedSourcePartition,
     SourceCollectionCoverage,
     SourcePartitionRequest,
+    SourceRateLimited,
+    TaiwanPriceSourceAdapter,
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
+from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
 
 
 class ForbiddenPriceAdapter:
@@ -50,6 +53,29 @@ class LiteralPriceAdapter:
     def load(self, request: SourcePartitionRequest) -> LoadedSourcePartition:
         self.requests.append(request)
         return self.loaded
+
+
+class RateLimitedThenCollector:
+    def __init__(self, collection: CollectedSourcePartition) -> None:
+        self.collection = collection
+        self.calls = 0
+
+    def collect(self, request: SourcePartitionRequest) -> CollectedSourcePartition:
+        self.calls += 1
+        if self.calls == 1:
+            raise SourceRateLimited(
+                retry_after_seconds=30,
+                rate_limit_policy_id="provider-rate-limit-v1",
+            )
+        return self.collection
+
+
+class LiteralPriceDecoder:
+    def __init__(self, decoded: DecodedSourcePartition) -> None:
+        self.decoded = decoded
+
+    def decode(self, collection: CollectedSourcePartition) -> DecodedSourcePartition:
+        return self.decoded
 
 
 def _qualified_price_policy(
@@ -219,7 +245,7 @@ def test_unverified_taiwan_market_dependency_blocks_before_provider_access(
     identity = LocalApiKeyIdentity.issue(
         owner="ticket-06-test",
         environment="development",
-        scopes={"market_data.collect"},
+        scopes={"market_data.collect", "price_research_eligibility.read"},
         issued_at=now - timedelta(hours=1),
         expires_at=now + timedelta(hours=23),
         data_protection_classes={"licensed"},
@@ -286,6 +312,8 @@ def test_unverified_taiwan_market_dependency_blocks_before_provider_access(
         "dataset_version_id": None,
         "adjustment_version_id": None,
         "historical_availability_claim_id": None,
+        "rate_limit_policy_id": None,
+        "retry_after_seconds": None,
         "checks": {
             "policy": "blocked",
             "coverage": "not_evaluated",
@@ -417,11 +445,12 @@ def test_qualified_source_materializes_immutable_unadjusted_and_internal_adjustm
         f"sqlite+pysqlite:///{tmp_path / 'ticket-06-qualified.db'}",
         create_schema=True,
     )
+    object_repository = FilesystemObjectRepository(tmp_path / "objects")
     data_supply = DataSupply(
         authorization_policy=_qualified_price_policy(identity, now),
         security_context=identity.context,
         adapters={collection.source_id: adapter},
-        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        object_repository=object_repository,
         state_store=state_store,
         clock=lambda: now,
     )
@@ -456,12 +485,7 @@ def test_qualified_source_materializes_immutable_unadjusted_and_internal_adjustm
     assert first.adjustment_version_id is not None
     assert first.raw_object_id is not None
     assert first.normalized_object_id is not None
-    normalized_checksum = first.normalized_object_id.removeprefix("sha256:")
-    normalized_payload = json.loads(
-        (tmp_path / "objects" / "sha256" / normalized_checksum[:2] / normalized_checksum).read_text(
-            encoding="utf-8"
-        )
-    )
+    normalized_payload = json.loads(object_repository.open_by_id(first.normalized_object_id).read())
     assert "providerAdjustedClose" not in json.dumps(normalized_payload)
     assert set(normalized_payload["prices"][0]) == {
         "close",
@@ -544,6 +568,24 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
         f"sqlite+pysqlite:///{tmp_path / 'candidate-query.db'}",
         create_schema=True,
     )
+    historical_claim_id = TaiwanPriceQualificationWorkflow(
+        state_store
+    ).register_historical_availability_claim(
+        HistoricalAvailabilityClaim(
+            source_id=current.collection.source_id,
+            evidence_level="archive_attested",
+            evidence_status="qualification_candidate",
+            observed_start=date(2019, 8, 14),
+            observed_end=date(2026, 8, 14),
+            schema_version="taiwan-unadjusted-eod-v1",
+            exact_sessions_verified=True,
+            integrity_verified=True,
+            company_actions_verified=True,
+            listing_lifecycle_verified=True,
+            qualification_artifact_id=None,
+        ),
+        trace_id="trace-candidate-history-qualification",
+    )
     data_supply = DataSupply(
         authorization_policy=_qualified_price_policy(identity, now),
         security_context=identity.context,
@@ -551,21 +593,6 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
         object_repository=FilesystemObjectRepository(tmp_path / "objects"),
         state_store=state_store,
         clock=lambda: now,
-        historical_availability_claims={
-            current.collection.source_id: HistoricalAvailabilityClaim(
-                claim_id="historical-claim-candidate-001",
-                source_id=current.collection.source_id,
-                evidence_level="platform_observed",
-                observed_start=date(2019, 8, 14),
-                observed_end=date(2026, 8, 14),
-                schema_version="taiwan-unadjusted-eod-v1",
-                exact_sessions_verified=True,
-                integrity_verified=True,
-                company_actions_verified=True,
-                listing_lifecycle_verified=True,
-                qualification_artifact_id="synthetic-contract-evidence-only",
-            )
-        },
     )
     outcomes = []
     for mode, loaded in (("current", current), ("historical", historical)):
@@ -581,12 +608,15 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
                     start_date=loaded.collection.coverage.requested_start,
                     end_date=loaded.collection.coverage.requested_end,
                     expected_checkpoint=None,
+                    historical_availability_claim_id=(
+                        historical_claim_id if mode == "historical" else None
+                    ),
                 )
             )
         )
 
     assert [outcome.status for outcome in outcomes] == ["published", "published"]
-    assert outcomes[1].historical_availability_claim_id == "historical-claim-candidate-001"
+    assert outcomes[1].historical_availability_claim_id == historical_claim_id
 
     result = PriceEligibilityQuery(
         state_store,
@@ -602,6 +632,7 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
     assert result["status"] == "policy_blocked"
     assert result["reason_code"] == "qualification_evidence_unverified"
     assert result["formally_qualified"] is False
+    assert result["checks"]["policy"] == "blocked"  # type: ignore[index]
 
     after_source_rights_expiry = now + timedelta(days=2)
     expired_result = PriceEligibilityQuery(
@@ -790,6 +821,205 @@ def test_missing_requested_listing_is_quarantined_instead_of_published(
     assert outcome.status == "quarantined"
     assert outcome.reason_code == "incomplete_coverage"
     assert outcome.dataset_version_id is None
+
+
+def test_unapproved_price_schema_is_quarantined_and_reported_as_blocked(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    loaded = _loaded_partition(
+        now=now,
+        listing_id=listing_id,
+        request_id="request-schema-drift",
+        source_revision="revision-schema-drift",
+        raw_payload=b'{"schema":"provider-v2"}',
+    )
+    loaded = replace(
+        loaded,
+        decoded=replace(loaded.decoded, schema_version="provider-v2"),
+    )
+    data_supply = DataSupply(
+        authorization_policy=_qualified_price_policy(identity, now),
+        security_context=identity.context,
+        adapters={loaded.collection.source_id: LiteralPriceAdapter(loaded)},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=StateStore(
+            f"sqlite+pysqlite:///{tmp_path / 'schema-drift.db'}",
+            create_schema=True,
+        ),
+        clock=lambda: now,
+    )
+
+    outcome = data_supply.materialize(
+        SourcePartitionRequest(
+            request_id=loaded.collection.request_id,
+            trace_id="trace-schema-drift",
+            source_id=loaded.collection.source_id,
+            mode="current",
+            listing_ids=(listing_id,),
+            start_date=loaded.collection.coverage.requested_start,
+            end_date=loaded.collection.coverage.requested_end,
+            expected_checkpoint=None,
+        )
+    )
+
+    assert outcome.status == "quarantined"
+    assert outcome.reason_code == "schema_incompatible"
+    assert outcome.as_payload()["checks"]["schema"] == "blocked"  # type: ignore[index]
+    assert outcome.dataset_version_id is None
+
+
+def test_provider_adjusted_close_mismatch_blocks_integrity_publication(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    loaded = _loaded_partition(
+        now=now,
+        listing_id=listing_id,
+        request_id="request-adjustment-mismatch",
+        source_revision="revision-adjustment-mismatch",
+        raw_payload=b'{"provider_adjusted_close":"1.00"}',
+    )
+    loaded = replace(
+        loaded,
+        decoded=replace(
+            loaded.decoded,
+            adjusted_close_cross_checks=(Decimal("1.00"), Decimal("1.00")),
+        ),
+    )
+    data_supply = DataSupply(
+        authorization_policy=_qualified_price_policy(identity, now),
+        security_context=identity.context,
+        adapters={loaded.collection.source_id: LiteralPriceAdapter(loaded)},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=StateStore(
+            f"sqlite+pysqlite:///{tmp_path / 'adjustment-mismatch.db'}",
+            create_schema=True,
+        ),
+        clock=lambda: now,
+    )
+
+    outcome = data_supply.materialize(
+        SourcePartitionRequest(
+            request_id=loaded.collection.request_id,
+            trace_id="trace-adjustment-mismatch",
+            source_id=loaded.collection.source_id,
+            mode="current",
+            listing_ids=(listing_id,),
+            start_date=loaded.collection.coverage.requested_start,
+            end_date=loaded.collection.coverage.requested_end,
+            expected_checkpoint=None,
+        )
+    )
+
+    assert outcome.status == "quarantined"
+    assert outcome.reason_code == "adjustment_cross_check_mismatch"
+    assert outcome.as_payload()["checks"]["integrity"] == "blocked"  # type: ignore[index]
+    assert outcome.dataset_version_id is None
+    assert outcome.adjustment_version_id is None
+
+
+def test_rate_limited_collection_is_deferred_without_advancing_the_checkpoint(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-test",
+        environment="development",
+        scopes={"market_data.collect", "price_research_eligibility.read"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    loaded = _loaded_partition(
+        now=now,
+        listing_id=listing_id,
+        request_id="request-rate-limited",
+        source_revision="revision-rate-limited",
+        raw_payload=b'{"retry":"succeeded"}',
+    )
+    collector = RateLimitedThenCollector(loaded.collection)
+    adapter = TaiwanPriceSourceAdapter(
+        source_id=loaded.collection.source_id,
+        mode="current",
+        adapter_version="taiwan-price-adapter-v1",
+        rate_limit_policy_id="provider-rate-limit-v1",
+        collector=collector,
+        decoder=LiteralPriceDecoder(loaded.decoded),
+    )
+    state_store = StateStore(
+        f"sqlite+pysqlite:///{tmp_path / 'rate-limited.db'}",
+        create_schema=True,
+    )
+    data_supply = DataSupply(
+        authorization_policy=_qualified_price_policy(identity, now),
+        security_context=identity.context,
+        adapters={loaded.collection.source_id: adapter},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=state_store,
+        clock=lambda: now,
+    )
+    request = SourcePartitionRequest(
+        request_id=loaded.collection.request_id,
+        trace_id="trace-rate-limited-first",
+        source_id=loaded.collection.source_id,
+        mode="current",
+        listing_ids=(listing_id,),
+        start_date=loaded.collection.coverage.requested_start,
+        end_date=loaded.collection.coverage.requested_end,
+        expected_checkpoint=None,
+    )
+
+    deferred = data_supply.materialize(request)
+
+    assert deferred.status == "deferred"
+    assert deferred.reason_code == "source_rate_limited"
+    assert deferred.rate_limit_policy_id == "provider-rate-limit-v1"
+    assert deferred.retry_after_seconds == 30
+    assert (
+        state_store.get_price_source_checkpoint(
+            source_id=request.source_id,
+            source_mode=request.mode,
+        )
+        is None
+    )
+    query_result = PriceEligibilityQuery(
+        state_store,
+        authorization_policy=_price_read_policy(identity, now),
+        authorization_time=now,
+    ).get_listing(
+        listing_id=listing_id,
+        trace_id="trace-rate-limited-query",
+        security_context=identity.context,
+    )
+    assert isinstance(query_result, dict)
+    assert query_result["status"] == "policy_blocked"
+    assert query_result["reason_code"] == "source_collection_deferred"
+
+    published = data_supply.materialize(replace(request, trace_id="trace-rate-limited-retry"))
+
+    assert published.status == "published"
+    assert published.checkpoint == "page:1"
+    assert collector.calls == 2
 
 
 def test_repeated_policy_evaluation_appends_a_new_eligibility_event(

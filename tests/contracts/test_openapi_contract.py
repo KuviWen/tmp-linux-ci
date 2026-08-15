@@ -85,6 +85,12 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "quarantined",
     ]
     source = contract["components"]["schemas"]["PriceSourceEligibility"]
+    assert source["properties"]["status"]["enum"] == [
+        "published",
+        "policy_blocked",
+        "quarantined",
+        "deferred",
+    ]
     assert source["properties"]["source_mode"]["enum"] == ["current", "historical"]
     assert source["properties"]["dataset_version_id"]["type"] == ["string", "null"]
     assert source["properties"]["adjustment_version_id"]["type"] == ["string", "null"]
@@ -92,6 +98,11 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert source["properties"]["retrieval_receipt_id"]["type"] == ["string", "null"]
     assert source["properties"]["source_revision"]["type"] == ["string", "null"]
     assert source["properties"]["checkpoint"]["type"] == ["string", "null"]
+    assert source["properties"]["rate_limit_policy_id"]["type"] == ["string", "null"]
+    assert source["properties"]["retry_after_seconds"] == {
+        "type": ["integer", "null"],
+        "minimum": 0,
+    }
     assert source["properties"]["evaluated_at"] == {"type": "string", "format": "date-time"}
     assert source["properties"]["policy_evaluation_id"] == {
         "type": "string",

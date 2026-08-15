@@ -59,6 +59,18 @@ class FilesystemObjectRepository:
             raise ObjectIntegrityError("checksum_mismatch")
         return BytesIO(content)
 
+    def open_by_id(self, object_id: str) -> BytesIO:
+        prefix, separator, checksum = object_id.partition(":")
+        if separator != ":" or prefix != "sha256":
+            raise ValueError("invalid_object_id")
+        return self.open(
+            ObjectRef(
+                object_id=object_id,
+                checksum=checksum,
+                uri=str(self._object_path(checksum)),
+            )
+        )
+
     def stat(self, reference: ObjectRef) -> dict[str, object]:
         content = self.open(reference).read()
         metadata_path = Path(reference.uri).with_suffix(".metadata.json")
