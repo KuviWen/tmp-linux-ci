@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
+from io import BytesIO
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -11,6 +14,7 @@ from stock_forecasting.data_supply import (
     StockPoolListing,
     load_taiwan_stock_pool_manifest,
 )
+from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 
 
 def test_stock_pool_listing_can_preserve_a_time_bounded_external_code_change() -> None:
@@ -84,7 +88,7 @@ def test_taiwan_segment_declares_versioned_ten_listing_qualification_contract() 
 def test_taiwan_segment_binds_real_selection_and_calendar_cases_to_official_evidence() -> None:
     manifest = load_taiwan_stock_pool_manifest()
 
-    assert manifest.selection_evidence_version == "twse-10-selection-evidence-v2"
+    assert manifest.selection_evidence_version == "twse-10-selection-evidence-v3"
     assert manifest.selection_as_of == date(2026, 8, 15)
     assert {listing.external_security_code for listing in manifest.listings} == {
         "2317",
@@ -155,13 +159,21 @@ def test_taiwan_segment_binds_real_selection_and_calendar_cases_to_official_evid
             for evidence_id in listing.selection_evidence_ids
         }
         assert listing.coverage_cases <= evidenced_cases
-    assert all(evidence.publisher in {"TWSE", "issuer"} for evidence in manifest.evidence)
-    assert all(evidence.source_url.startswith("https://") for evidence in manifest.evidence)
     assert all(
-        len(evidence.source_content_sha256) == 64 and int(evidence.source_content_sha256, 16) >= 0
-        for evidence in manifest.evidence
+        reference.publisher in {"TWSE", "issuer"} for reference in manifest.source_references
     )
-    assert all(evidence.retrieved_on <= manifest.selection_as_of for evidence in manifest.evidence)
+    assert all(
+        reference.source_url.startswith("https://") for reference in manifest.source_references
+    )
+    assert all(
+        len(reference.observed_content_sha256) == 64
+        and int(reference.observed_content_sha256, 16) >= 0
+        for reference in manifest.source_references
+    )
+    assert all(
+        reference.observed_on <= manifest.selection_as_of
+        for reference in manifest.source_references
+    )
 
     half_day = manifest.market_calendar_evidence
     assert half_day.coverage_case == "half_day_session"
@@ -180,6 +192,9 @@ def test_taiwan_suspension_evidence_preserves_the_resume_boundary_and_listing_su
 
     suspension = evidence_by_id["twse-2317-trading-halt"]
     resume = evidence_by_id["twse-2317-trading-resume"]
+    source_by_id = {
+        reference.source_reference_id: reference for reference in manifest.source_references
+    }
 
     assert suspension.evidence_kind == "trading_suspension"
     assert suspension.effective_from == date(2025, 7, 30)
@@ -188,7 +203,7 @@ def test_taiwan_suspension_evidence_preserves_the_resume_boundary_and_listing_su
         (subject.listing_id, subject.external_security_code) for subject in suspension.subjects
     ] == [(listing_by_code["2317"].listing_id, "2317")]
     assert resume.evidence_kind == "trading_resume"
-    assert resume.source_content_sha256 == (
+    assert source_by_id[resume.source_reference_id].observed_content_sha256 == (
         "dd326e7841732c3e350092d417eefbd588a9682cb30ca452af7af3eccc0efc9c"
     )
     assert resume.effective_from == date(2025, 7, 31)
@@ -242,14 +257,85 @@ def test_taiwan_manifest_rejects_unrelated_calendar_evidence() -> None:
         replace(manifest, market_calendar_evidence=unrelated)
 
 
-def test_taiwan_selection_retrieval_receipts_reject_content_digest_corruption() -> None:
+def test_taiwan_selection_evidence_separates_one_source_acquisition_from_derived_assertions() -> (
+    None
+):
     manifest = load_taiwan_stock_pool_manifest()
+    evidence_by_id = {evidence.evidence_id: evidence for evidence in manifest.evidence}
+    shared_assertion_ids = {
+        "twse-3714-common-share",
+        "twse-2448-common-share",
+        "twse-2448-3714-share-exchange",
+        "twse-2448-delisting",
+    }
+    source_reference_ids = {
+        evidence_by_id[evidence_id].source_reference_id for evidence_id in shared_assertion_ids
+    }
 
-    assert all(
-        evidence.retrieval_receipt_id.startswith("sha256:") for evidence in manifest.evidence
+    assert source_reference_ids == {"twse-2448-3714-pdf-acquisition"}
+    source_by_id = {
+        reference.source_reference_id: reference for reference in manifest.source_references
+    }
+    shared_source = source_by_id["twse-2448-3714-pdf-acquisition"]
+    assert shared_source.observed_content_sha256 == (
+        "c5170640828b61a12e4d9c5ca41666a42491c562ef60e3846be0dcf2d3fa7003"
     )
-    with pytest.raises(ValueError, match="taiwan_stock_pool_evidence_receipt_mismatch"):
-        replace(manifest.evidence[0], source_content_sha256="0" * 64)
+    assert shared_source.archival_status == "not_archived"
+    assert shared_source.raw_object_id is None
+    assert shared_source.retrieval_receipt_id is None
+
+
+def test_verified_selection_source_archive_rehashes_object_repository_bytes(
+    tmp_path: Path,
+) -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+    content = b"selection-source-archive-contract-fixture"
+    checksum = hashlib.sha256(content).hexdigest()
+    repository = FilesystemObjectRepository(tmp_path)
+    object_ref = repository.put_verified(
+        BytesIO(content),
+        expected_checksum=checksum,
+        metadata={"source": "contract-fixture"},
+    )
+    source = manifest.source_references[0]
+    pending_receipt = replace(
+        source,
+        observed_content_sha256=checksum,
+        archival_status="verified",
+        acquired_at=datetime(2026, 8, 15, 9, 0, tzinfo=UTC),
+        raw_object_id=object_ref.object_id,
+        retrieval_receipt_id="pending",
+    )
+    verified_source = replace(
+        pending_receipt,
+        retrieval_receipt_id=pending_receipt.expected_retrieval_receipt_id,
+    )
+    verified_manifest = replace(
+        manifest,
+        source_references=(verified_source, *manifest.source_references[1:]),
+    )
+
+    future_pending_receipt = replace(
+        verified_source,
+        acquired_at=datetime(2026, 8, 16, 9, 0, tzinfo=UTC),
+        retrieval_receipt_id="pending",
+    )
+    future_source = replace(
+        future_pending_receipt,
+        retrieval_receipt_id=future_pending_receipt.expected_retrieval_receipt_id,
+    )
+    with pytest.raises(ValueError, match="taiwan_stock_pool_future_source_reference"):
+        replace(
+            manifest,
+            source_references=(future_source, *manifest.source_references[1:]),
+        )
+
+    verified_manifest.verify_source_archive(repository)
+    assert verified_manifest.formally_qualified is False
+
+    Path(object_ref.uri).write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="taiwan_stock_pool_source_archive_invalid"):
+        verified_manifest.verify_source_archive(repository)
 
 
 def test_taiwan_selection_evidence_rejects_a_mismatched_assertion_kind() -> None:

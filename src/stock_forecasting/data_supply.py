@@ -19,7 +19,10 @@ from stock_forecasting.authorization import (
     SourceUseRight,
     authorization_audit_payload,
 )
-from stock_forecasting.platform.object_repository import FilesystemObjectRepository
+from stock_forecasting.platform.object_repository import (
+    FilesystemObjectRepository,
+    ObjectIntegrityError,
+)
 from stock_forecasting.platform.state_store import StateStore
 
 StockPoolCoverageCase = Literal[
@@ -51,6 +54,7 @@ SelectionEvidenceKind = Literal[
     "historical_delisting",
     "shortened_session_regime",
 ]
+SelectionSourceArchiveStatus = Literal["not_archived", "verified"]
 ManifestEvidenceStatus = Literal["qualification_candidate", "qualified"]
 TaiwanPriceSourceMode = Literal["current", "historical"]
 SourceRevisionKind = Literal["original", "late_arrival", "correction", "withdrawal"]
@@ -955,18 +959,64 @@ class SelectionEvidenceSubject:
 
 
 @dataclass(frozen=True)
-class ListingSelectionEvidence:
-    evidence_id: str
-    evidence_kind: SelectionEvidenceKind
-    coverage_case: SelectionEvidenceCoverageCase
+class SelectionSourceReference:
+    source_reference_id: str
     publisher: Literal["TWSE", "issuer"]
     source_url: str
-    source_content_sha256: str
+    observed_content_sha256: str
+    observed_on: date
+    archival_status: SelectionSourceArchiveStatus
+    acquired_at: datetime | None
+    raw_object_id: str | None
+    retrieval_receipt_id: str | None
+
+    def __post_init__(self) -> None:
+        try:
+            digest = bytes.fromhex(self.observed_content_sha256)
+        except ValueError as error:
+            raise ValueError("taiwan_stock_pool_source_digest_invalid") from error
+        if (
+            len(digest) != 32
+            or not self.source_url.startswith("https://")
+            or self.publisher not in {"TWSE", "issuer"}
+            or self.archival_status not in {"not_archived", "verified"}
+            or (self.acquired_at is not None and self.acquired_at.tzinfo is None)
+        ):
+            raise ValueError("taiwan_stock_pool_source_reference_invalid")
+        archive_fields = (self.acquired_at, self.raw_object_id, self.retrieval_receipt_id)
+        if self.archival_status == "not_archived" and any(
+            value is not None for value in archive_fields
+        ):
+            raise ValueError("taiwan_stock_pool_source_archive_invalid")
+        if self.archival_status == "verified" and (
+            any(value is None for value in archive_fields)
+            or self.raw_object_id != f"sha256:{self.observed_content_sha256}"
+        ):
+            raise ValueError("taiwan_stock_pool_source_archive_invalid")
+
+    @property
+    def expected_retrieval_receipt_id(self) -> str | None:
+        if self.archival_status != "verified":
+            return None
+        payload = {
+            "source_reference_id": self.source_reference_id,
+            "publisher": self.publisher,
+            "source_url": self.source_url,
+            "raw_object_id": self.raw_object_id,
+            "acquired_at": self.acquired_at.isoformat() if self.acquired_at is not None else None,
+        }
+        return _artifact_id("selection_source_retrieval_receipt", payload)
+
+
+@dataclass(frozen=True)
+class ListingSelectionEvidence:
+    evidence_id: str
+    source_reference_id: str
+    evidence_kind: SelectionEvidenceKind
+    coverage_case: SelectionEvidenceCoverageCase
     subjects: tuple[SelectionEvidenceSubject, ...]
     effective_from: date
     effective_to: date
-    retrieved_on: date
-    retrieval_receipt_id: str
 
     def __post_init__(self) -> None:
         expected_coverage: dict[str, str] = {
@@ -985,40 +1035,8 @@ class ListingSelectionEvidence:
             self.evidence_kind == "shortened_session_regime"
         ) != (not self.subjects):
             raise ValueError("taiwan_stock_pool_evidence_assertion_invalid")
-        try:
-            digest = bytes.fromhex(self.source_content_sha256)
-        except ValueError as error:
-            raise ValueError("taiwan_stock_pool_evidence_digest_invalid") from error
-        if (
-            len(digest) != 32
-            or not self.source_url.startswith("https://")
-            or self.effective_from > self.effective_to
-            or self.effective_from > self.retrieved_on
-        ):
+        if self.effective_from > self.effective_to:
             raise ValueError("taiwan_stock_pool_evidence_invalid")
-        if self.retrieval_receipt_id != self._expected_retrieval_receipt_id():
-            raise ValueError("taiwan_stock_pool_evidence_receipt_mismatch")
-
-    def _expected_retrieval_receipt_id(self) -> str:
-        payload = {
-            "evidence_id": self.evidence_id,
-            "evidence_kind": self.evidence_kind,
-            "coverage_case": self.coverage_case,
-            "publisher": self.publisher,
-            "source_url": self.source_url,
-            "source_content_sha256": self.source_content_sha256,
-            "subjects": [
-                {
-                    "listing_id": subject.listing_id,
-                    "external_security_code": subject.external_security_code,
-                }
-                for subject in self.subjects
-            ],
-            "effective_from": self.effective_from.isoformat(),
-            "effective_to": self.effective_to.isoformat(),
-            "retrieved_on": self.retrieved_on.isoformat(),
-        }
-        return _artifact_id("selection_source_retrieval_receipt", payload)
 
 
 @dataclass(frozen=True)
@@ -1098,6 +1116,7 @@ class TaiwanStockPoolManifest:
     listings: tuple[StockPoolListing, ...]
     market_calendar_cases: frozenset[Literal["half_day_session"]]
     market_calendar_evidence: MarketCalendarSelectionEvidence
+    source_references: tuple[SelectionSourceReference, ...]
     evidence: tuple[ListingSelectionEvidence, ...]
     listing_relationships: tuple[ListingSelectionRelationship, ...]
     current_source_id: str
@@ -1115,9 +1134,28 @@ class TaiwanStockPoolManifest:
             raise ValueError("taiwan_stock_pool_issuer_id_reused")
         if len({listing.security_id for listing in self.listings}) != len(self.listings):
             raise ValueError("taiwan_stock_pool_security_id_reused")
+        source_references_by_id = {
+            reference.source_reference_id: reference for reference in self.source_references
+        }
+        if len(source_references_by_id) != len(self.source_references):
+            raise ValueError("taiwan_stock_pool_source_reference_id_reused")
+        if any(
+            reference.observed_on > self.selection_as_of
+            or (
+                reference.acquired_at is not None
+                and reference.acquired_at.date() > self.selection_as_of
+            )
+            for reference in self.source_references
+        ):
+            raise ValueError("taiwan_stock_pool_future_source_reference")
         evidence_by_id = {item.evidence_id: item for item in self.evidence}
         if len(evidence_by_id) != len(self.evidence):
             raise ValueError("taiwan_stock_pool_evidence_id_reused")
+        if any(
+            evidence.source_reference_id not in source_references_by_id
+            for evidence in self.evidence
+        ):
+            raise ValueError("taiwan_stock_pool_evidence_source_missing")
         calendar_source_evidence = evidence_by_id.get(self.market_calendar_evidence.evidence_id)
         if calendar_source_evidence is None:
             raise ValueError("taiwan_stock_pool_calendar_evidence_missing")
@@ -1129,8 +1167,6 @@ class TaiwanStockPoolManifest:
             or calendar_source_evidence.effective_to != self.market_calendar_evidence.valid_to
         ):
             raise ValueError("taiwan_stock_pool_calendar_evidence_invalid")
-        if any(item.retrieved_on > self.selection_as_of for item in self.evidence):
-            raise ValueError("taiwan_stock_pool_future_evidence")
         listings_by_id = {listing.listing_id: listing for listing in self.listings}
         listing_ids = listings_by_id.keys()
         for relationship in self.listing_relationships:
@@ -1196,7 +1232,28 @@ class TaiwanStockPoolManifest:
             self.evidence_status == "qualified"
             and self.formal_qualification_artifact_id is not None
             and self.historical_availability_claim_id is not None
+            and all(reference.archival_status == "verified" for reference in self.source_references)
         )
+
+    def verify_source_archive(
+        self,
+        object_repository: FilesystemObjectRepository | None,
+    ) -> None:
+        for reference in self.source_references:
+            if reference.archival_status == "not_archived":
+                continue
+            if (
+                object_repository is None
+                or reference.retrieval_receipt_id != reference.expected_retrieval_receipt_id
+                or reference.raw_object_id is None
+            ):
+                raise ValueError("taiwan_stock_pool_source_archive_invalid")
+            try:
+                content = object_repository.open_by_id(reference.raw_object_id).read()
+            except (FileNotFoundError, ObjectIntegrityError, ValueError) as error:
+                raise ValueError("taiwan_stock_pool_source_archive_invalid") from error
+            if hashlib.sha256(content).hexdigest() != reference.observed_content_sha256:
+                raise ValueError("taiwan_stock_pool_source_archive_invalid")
 
     def matches_formal_source_lineage(
         self,
@@ -1221,7 +1278,9 @@ class TaiwanStockPoolManifest:
         )
 
 
-def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
+def load_taiwan_stock_pool_manifest(
+    object_repository: FilesystemObjectRepository | None = None,
+) -> TaiwanStockPoolManifest:
     manifest_path = files("stock_forecasting").joinpath(
         "manifests/p2_taiwan_stock_pool_contract_v1.json"
     )
@@ -1230,12 +1289,15 @@ def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
     source_ids = cast(dict[str, str], payload["taiwan_sources"])
     listing_payloads = cast(list[dict[str, object]], payload["taiwan_listings"])
     evidence_payloads = cast(list[dict[str, object]], payload["selection_evidence"])
+    source_reference_payloads = cast(
+        list[dict[str, object]], payload["selection_source_references"]
+    )
     relationship_payloads = cast(list[dict[str, object]], payload["listing_relationships"])
     calendar_payload = cast(dict[str, object], payload["market_calendar_evidence"])
     market_calendar_cases = cast(
         list[Literal["half_day_session"]], payload["market_calendar_cases"]
     )
-    return TaiwanStockPoolManifest(
+    manifest = TaiwanStockPoolManifest(
         manifest_id=str(payload["manifest_id"]),
         selection_evidence_version=str(payload["selection_evidence_version"]),
         selection_as_of=date.fromisoformat(str(payload["selection_as_of"])),
@@ -1288,14 +1350,36 @@ def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
             ),
             evidence_id=str(calendar_payload["evidence_id"]),
         ),
+        source_references=tuple(
+            SelectionSourceReference(
+                source_reference_id=str(reference["source_reference_id"]),
+                publisher=cast(Literal["TWSE", "issuer"], reference["publisher"]),
+                source_url=str(reference["source_url"]),
+                observed_content_sha256=str(reference["observed_content_sha256"]),
+                observed_on=date.fromisoformat(str(reference["observed_on"])),
+                archival_status=cast(
+                    SelectionSourceArchiveStatus,
+                    reference["archival_status"],
+                ),
+                acquired_at=(
+                    datetime.fromisoformat(str(reference["acquired_at"]))
+                    if reference["acquired_at"] is not None
+                    else None
+                ),
+                raw_object_id=cast(str | None, reference["raw_object_id"]),
+                retrieval_receipt_id=cast(
+                    str | None,
+                    reference["retrieval_receipt_id"],
+                ),
+            )
+            for reference in source_reference_payloads
+        ),
         evidence=tuple(
             ListingSelectionEvidence(
                 evidence_id=str(evidence["evidence_id"]),
+                source_reference_id=str(evidence["source_reference_id"]),
                 evidence_kind=cast(SelectionEvidenceKind, evidence["evidence_kind"]),
                 coverage_case=cast(SelectionEvidenceCoverageCase, evidence["coverage_case"]),
-                publisher=cast(Literal["TWSE", "issuer"], evidence["publisher"]),
-                source_url=str(evidence["source_url"]),
-                source_content_sha256=str(evidence["source_content_sha256"]),
                 subjects=tuple(
                     SelectionEvidenceSubject(
                         listing_id=str(subject["listing_id"]),
@@ -1305,8 +1389,6 @@ def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
                 ),
                 effective_from=date.fromisoformat(str(evidence["effective_from"])),
                 effective_to=date.fromisoformat(str(evidence["effective_to"])),
-                retrieved_on=date.fromisoformat(str(evidence["retrieved_on"])),
-                retrieval_receipt_id=str(evidence["retrieval_receipt_id"]),
             )
             for evidence in evidence_payloads
         ),
@@ -1333,3 +1415,5 @@ def load_taiwan_stock_pool_manifest() -> TaiwanStockPoolManifest:
         ),
         evidence_status=cast(ManifestEvidenceStatus, payload["evidence_status"]),
     )
+    manifest.verify_source_archive(object_repository)
+    return manifest

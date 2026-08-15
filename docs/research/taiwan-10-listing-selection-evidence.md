@@ -2,7 +2,7 @@
 
 查證日期：2026-08-15
 
-證據版本：`twse-10-selection-evidence-v2`
+證據版本：`twse-10-selection-evidence-v3`
 
 ## 結論
 
@@ -76,11 +76,12 @@ TWSE 2000-11-20 正式函釋鎖定生效日：自 2001-01-01 起，集中市場�
 
 研究證據轉入 versioned manifest 時，至少應保存：
 
-- `selection_evidence_version = twse-10-selection-evidence-v2`
+- `selection_evidence_version = twse-10-selection-evidence-v3`
 - `selection_as_of = 2026-08-15`
 - 不可重用的 `issuer_id`、`security_id`、`listing_id`
 - `venue = XTAI`、security type、currency 及具有效期的外部代號／名稱 assertions
-- 每個 source URL、來源擁有者、事件日、生效區間、查得時間、content hash，以及綁定 assertion kind、listing subject 與 content hash 的 content-addressed retrieval receipt
+- source acquisition reference 與 derived assertion 分立：前者保存 URL、來源擁有者、查得日期、observed content hash 與 archive 狀態；後者只引用 source reference 並保存 assertion kind、listing subject 與生效區間
+- 只有 raw bytes 已寫入不可變 object repository 並重新驗證時，source reference 才能標記 `verified` 並取得一個 acquisition retrieval receipt；目前研究 reference 必須標記 `not_archived`
 - `2448` 與 `3714` 分立 listing IDs，以及帶換股比例的 predecessor／successor edge
 - dividend、suspension、resume、delisting 分立事件，不把它們折成一般 OHLC 缺值
 - calendar version 及 session type；`scheduled_half_day` 不適用時要有明確 reason
