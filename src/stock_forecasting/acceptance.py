@@ -22,6 +22,7 @@ from sqlalchemy import text
 from stock_forecasting.acceptance_bundle import (
     P1_FAILURE_EVIDENCE_CATALOG,
     P1_HARD_GATE_OWNERS,
+    P1_REPRODUCTION_COMMAND,
     P1_SCENARIO_OWNERS,
     P1_TRACE_IDS,
     P1AcceptanceBundlePublisher,
@@ -1969,7 +1970,7 @@ def _run_ticket_05(
             evidence_ids,
         ) in failure_outcomes.items()
     )
-    reproduction_command = "docker compose --profile acceptance run --build --rm acceptance"
+    reproduction_command = P1_REPRODUCTION_COMMAND
     contract_results = {
         "dagster_wrapper": _contract_result(
             {
@@ -2076,7 +2077,7 @@ def _run_ticket_05(
         attempt_id=f"p1-{uuid4()}",
         created_at=datetime.now(UTC),
         git_commit=git_commit,
-        image_digest=application_payload_digest,
+        application_payload_digest=application_payload_digest,
         deployment_digest=deployment_digest,
         migration_digest=migration_digest,
         fixture_digests=fixture_digests,
@@ -2172,12 +2173,12 @@ def run_ticket_05(
         if isinstance(error, _PreviousAcceptanceBundleInvalid):
             resolved_previous_bundle_reference = error.reference
         repository = FilesystemObjectRepository(object_root)
-        reproduction_command = "docker compose --profile acceptance run --build --rm acceptance"
+        reproduction_command = P1_REPRODUCTION_COMMAND
         evaluation = P1AcceptanceEvaluation(
             attempt_id=f"p1-{uuid4()}",
             created_at=datetime.now(UTC),
             git_commit="unavailable:evidence_capture_failed",
-            image_digest="unavailable:evidence_capture_failed",
+            application_payload_digest="unavailable:evidence_capture_failed",
             deployment_digest="unavailable:evidence_capture_failed",
             migration_digest="unavailable:evidence_capture_failed",
             fixture_digests={},

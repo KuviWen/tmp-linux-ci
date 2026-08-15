@@ -14,6 +14,8 @@ from stock_forecasting.platform.object_repository import (
     ObjectRef,
 )
 
+P1_REPRODUCTION_COMMAND = "docker compose --profile acceptance run --build --rm acceptance"
+
 P1_TRACE_IDS = (
     "P1-ENTRY-01",
     "P1-TRACE-TW-01",
@@ -280,8 +282,7 @@ def _passing_provenance_is_complete(
         and is_sha256_reference(rest_golden_digest)
         and is_sha256_reference(ui_golden_digest)
         and (previous_bundle_reference is None or is_sha256_reference(previous_bundle_reference))
-        and reproduction_command
-        == "docker compose --profile acceptance run --build --rm acceptance"
+        and reproduction_command == P1_REPRODUCTION_COMMAND
     )
 
 
@@ -474,8 +475,7 @@ def _common_bundle_envelope_is_valid(payload: Mapping[str, object]) -> bool:
             "kind": "automated_hard_gate_evaluation",
         }
         or payload.get("claims") != P1_SCOPE_CLAIMS
-        or payload.get("reproduction_command")
-        != "docker compose --profile acceptance run --build --rm acceptance"
+        or payload.get("reproduction_command") != P1_REPRODUCTION_COMMAND
         or (
             payload.get("previous_bundle_reference") is not None
             and not is_sha256_reference(payload.get("previous_bundle_reference"))
@@ -578,8 +578,7 @@ def _platform_evidence_is_valid(
         != provenance.get("application_payload_digest")
         or evidence.get("deployment_digest") != provenance.get("deployment_digest")
         or evidence.get("migration_digest") != provenance.get("migration_digest")
-        or evidence.get("reproduction_command")
-        != "docker compose --profile acceptance run --build --rm acceptance"
+        or evidence.get("reproduction_command") != P1_REPRODUCTION_COMMAND
         or not is_sha256_reference(evidence.get("container_image_digest"))
         or not isinstance(contracts, Mapping)
         or not isinstance(scenarios, Mapping)
@@ -752,7 +751,7 @@ def _passing_evidence_is_consistent(evaluation: P1AcceptanceEvaluation) -> bool:
     return (
         _passing_provenance_is_complete(
             git_commit=evaluation.git_commit,
-            application_digest=evaluation.image_digest,
+            application_digest=evaluation.application_payload_digest,
             deployment_digest=evaluation.deployment_digest,
             migration_digest=evaluation.migration_digest,
             fixture_digests=evaluation.fixture_digests,
@@ -798,7 +797,7 @@ class P1AcceptanceEvaluation:
     attempt_id: str
     created_at: datetime
     git_commit: str
-    image_digest: str
+    application_payload_digest: str
     deployment_digest: str
     migration_digest: str
     fixture_digests: Mapping[str, str]
@@ -867,7 +866,7 @@ def _fail_closed_payload(evaluation: P1AcceptanceEvaluation) -> dict[str, object
             "images": {},
             "migration_digest": "unavailable:evidence_capture_failed",
         },
-        "reproduction_command": "docker compose --profile acceptance run --build --rm acceptance",
+        "reproduction_command": P1_REPRODUCTION_COMMAND,
         "resource_smoke": {},
         "restart": {},
         "scenario_results": {"acceptance_runner": {"status": "blocked"}},
@@ -901,7 +900,7 @@ class P1AcceptanceBundlePublisher:
         ):
             raise ValueError("passing_gate_evidence_inconsistent")
         evaluation_provenance = {
-            "application_payload_digest": evaluation.image_digest,
+            "application_payload_digest": evaluation.application_payload_digest,
             "deployment_digest": evaluation.deployment_digest,
             "git_commit": evaluation.git_commit,
             "migration_digest": evaluation.migration_digest,
@@ -1004,7 +1003,7 @@ class P1AcceptanceBundlePublisher:
             "platform_runs": platform_runs,
             "previous_bundle_reference": evaluation.previous_bundle_reference,
             "provenance": {
-                "application_payload_digest": evaluation.image_digest,
+                "application_payload_digest": evaluation.application_payload_digest,
                 "deployment_digest": evaluation.deployment_digest,
                 "fixture_digests": evaluation.fixture_digests,
                 "git_commit": evaluation.git_commit,
