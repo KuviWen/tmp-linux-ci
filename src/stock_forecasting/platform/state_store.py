@@ -592,6 +592,7 @@ class StateStore:
     ) -> str:
         if artifact_kind not in {
             "historical_availability_claim",
+            "qualification_governance_rejection",
             "taiwan_price_qualification_gate",
         }:
             raise ValueError("unsupported_qualification_artifact_kind")

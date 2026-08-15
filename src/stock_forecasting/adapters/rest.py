@@ -521,7 +521,9 @@ def create_web_app(application: Application) -> FastAPI:
             state_text = "來源延後"
             provider_text = "來源限流，尚未取得資料；checkpoint 未前進"
         elif status == "policy_blocked":
-            source_contacted = any(source["status"] != "policy_blocked" for source in sources)
+            source_contacted = outcome["reason_code"] == "source_rights_not_effective" or any(
+                source["status"] != "policy_blocked" for source in sources
+            )
             state_text = "資格阻擋" if source_contacted else "政策阻擋"
             provider_text = (
                 "來源候選資料已保存；不具正式研究資格" if source_contacted else "未接觸來源"

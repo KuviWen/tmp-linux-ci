@@ -575,6 +575,7 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
         f"/api/v1/research/listings/{listing_id}/price-eligibility",
         headers=headers,
     )
+    operations_response = client.get("/api/v1/operations/sources", headers=headers)
     ui_response = client.get(
         f"/research/listings/{listing_id}/price-eligibility",
         headers=headers,
@@ -585,6 +586,12 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
     assert rest["status"] == "policy_blocked"
     assert rest["reason_code"] == "source_rights_not_effective"
     assert rest["checks"]["policy"] == "blocked"
+    assert operations_response.status_code == 200
+    operations = operations_response.json()
+    assert len(operations["items"]) == 1
+    assert operations["items"][0]["status"] == "policy_blocked"
+    assert operations["items"][0]["reason_code"] == "source_rights_not_effective"
+    assert operations["items"][0]["checks"]["policy"] == "blocked"
     assert ui_response.status_code == 200
     assert "資格阻擋" in ui_response.text
     assert "已具研究資格" not in ui_response.text

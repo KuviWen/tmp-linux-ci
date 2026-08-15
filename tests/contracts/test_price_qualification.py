@@ -175,3 +175,45 @@ def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contra
             historical_availability_claim_id=historical_claim_id,
             trace_id="trace-rejected-formal-gate",
         )
+
+    rejected_audit = state_store.list_audit_events(trace_id="trace-rejected-formal-gate")
+    assert len(rejected_audit) == 2
+    assert {event["outcome"] for event in rejected_audit} == {"allowed"}
+    rejection_trace = state_store.get_trace_evidence("trace-rejected-formal-gate")
+    assert rejection_trace["artifact_kinds"] == ["qualification_governance_rejection"]
+    rejection = state_store.get_canonical_artifact(rejection_trace["artifact_ids"][0])
+    assert rejection["payload"] == {
+        "operation": "register_formal_qualification_gate",
+        "reason_code": "formal_gate_requires_qualified_historical_claim",
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="candidate_claim_cannot_assert_qualification_evidence",
+    ):
+        workflow.register_historical_availability_claim(
+            HistoricalAvailabilityClaim(
+                source_id=manifest.historical_source_id,
+                evidence_level="archive_attested",
+                evidence_status="qualification_candidate",
+                observed_start=date(2019, 8, 14),
+                observed_end=date(2026, 8, 14),
+                schema_version="taiwan-unadjusted-eod-v1",
+                exact_sessions_verified=True,
+                integrity_verified=True,
+                company_actions_verified=True,
+                listing_lifecycle_verified=True,
+                qualification_artifact_id="sha256:not-permitted-for-candidate",
+            ),
+            trace_id="trace-rejected-historical-claim",
+        )
+
+    claim_audit = state_store.list_audit_events(trace_id="trace-rejected-historical-claim")
+    assert len(claim_audit) == 1
+    assert claim_audit[0]["outcome"] == "allowed"
+    claim_trace = state_store.get_trace_evidence("trace-rejected-historical-claim")
+    claim_rejection = state_store.get_canonical_artifact(claim_trace["artifact_ids"][0])
+    assert claim_rejection["payload"] == {
+        "operation": "register_historical_availability_claim",
+        "reason_code": "candidate_claim_cannot_assert_qualification_evidence",
+    }

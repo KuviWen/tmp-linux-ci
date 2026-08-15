@@ -47,6 +47,13 @@ class PriceEligibilityQuery:
         sources = self._state_store.list_price_research_eligibility(listing_id=listing_id)
         if not sources:
             raise KeyError(listing_id)
+        evaluated_at = self._authorization_time or datetime.now(UTC)
+        sources = self._apply_current_source_rights(
+            sources=sources,
+            evaluated_at=evaluated_at,
+            trace_id=trace_id,
+            security_context=security_context,
+        )
         modes = {str(source["source_mode"]) for source in sources}
         required_modes_present = modes == {"current", "historical"}
         statuses = {str(source["status"]) for source in sources}
@@ -57,27 +64,16 @@ class PriceEligibilityQuery:
             manifest,
             sources,
         )
-        evaluated_at = self._authorization_time or datetime.now(UTC)
-        current_source_rights_allowed = self._current_source_rights_allowed(
-            sources=sources,
-            evaluated_at=evaluated_at,
-            trace_id=trace_id,
-            security_context=security_context,
-        )
-        source_rights_expired = any(
-            _parse_instant(str(source["policy_valid_until"])) <= evaluated_at
-            for source in sources
-            if source["status"] != "policy_blocked"
-        )
         if "policy_blocked" in statuses:
             status = "policy_blocked"
-            reason_code = "dependency_evidence_unverified"
+            reason_code = (
+                "source_rights_not_effective"
+                if any(source["reason_code"] == "source_rights_not_effective" for source in sources)
+                else "dependency_evidence_unverified"
+            )
         elif "deferred" in statuses:
             status = "deferred"
             reason_code = "source_collection_deferred"
-        elif source_rights_expired or not current_source_rights_allowed:
-            status = "policy_blocked"
-            reason_code = "source_rights_not_effective"
         elif not required_modes_present:
             status = "policy_blocked"
             reason_code = "dependency_evidence_unverified"
@@ -117,24 +113,29 @@ class PriceEligibilityQuery:
         denied = self._authorize(trace_id=trace_id, security_context=security_context)
         if denied is not None:
             return denied
-        return self._state_store.list_price_research_eligibility()
+        return self._apply_current_source_rights(
+            sources=self._state_store.list_price_research_eligibility(),
+            evaluated_at=self._authorization_time or datetime.now(UTC),
+            trace_id=trace_id,
+            security_context=security_context,
+        )
 
-    def _current_source_rights_allowed(
+    def _apply_current_source_rights(
         self,
         *,
         sources: list[dict[str, object]],
         evaluated_at: datetime,
         trace_id: str,
         security_context: SecurityContext,
-    ) -> bool:
-        published_source_ids = sorted(
+    ) -> list[dict[str, object]]:
+        source_ids = sorted(
             {str(source["source_id"]) for source in sources if source["status"] == "published"}
         )
-        if not published_source_ids:
-            return True
+        if not source_ids:
+            return sources
         policy = self._source_authorization_policy()
-        allowed = True
-        for source_id in published_source_ids:
+        source_allowed: dict[str, bool] = {}
+        for source_id in source_ids:
             decision = policy.evaluate(
                 security_context,
                 OperationIntent(
@@ -154,8 +155,26 @@ class PriceEligibilityQuery:
                 outcome="allowed" if decision.allowed else "denied",
                 trace_id=trace_id,
             )
-            allowed = allowed and decision.allowed
-        return allowed
+            source_allowed[source_id] = decision.allowed
+        projected_sources: list[dict[str, object]] = []
+        for source in sources:
+            source_id = str(source["source_id"])
+            policy_expired = (
+                source["status"] == "published"
+                and _parse_instant(str(source["policy_valid_until"])) <= evaluated_at
+            )
+            if source_allowed.get(source_id, True) and not policy_expired:
+                projected_sources.append(source)
+                continue
+            projected = dict(source)
+            projected["status"] = "policy_blocked"
+            projected["reason_code"] = "source_rights_not_effective"
+            source_checks = projected.get("checks")
+            checks = dict(source_checks) if isinstance(source_checks, dict) else {}
+            checks["policy"] = "blocked"
+            projected["checks"] = checks
+            projected_sources.append(projected)
+        return projected_sources
 
     def _authorize(
         self,

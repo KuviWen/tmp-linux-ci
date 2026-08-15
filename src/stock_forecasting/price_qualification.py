@@ -45,11 +45,23 @@ class TaiwanPriceQualificationWorkflow:
         trace_id: str,
     ) -> str:
         authorizations = self._authorize_sources((claim.source_id,), trace_id=trace_id)
-        if claim.evidence_status == "qualification_candidate":
-            if claim.qualification_artifact_id is not None:
-                raise ValueError("candidate_claim_cannot_assert_qualification_evidence")
-        else:
-            self._validate_dependency_evidence(claim, authorization=authorizations[0])
+        try:
+            if claim.evidence_status == "qualification_candidate":
+                if claim.qualification_artifact_id is not None:
+                    raise ValueError("candidate_claim_cannot_assert_qualification_evidence")
+            else:
+                self._validate_dependency_evidence(claim, authorization=authorizations[0])
+        except ValueError as error:
+            self._state_store._publish_authorized_governance_artifact(
+                artifact_kind="qualification_governance_rejection",
+                payload={
+                    "operation": "register_historical_availability_claim",
+                    "reason_code": str(error),
+                },
+                trace_id=trace_id,
+                authorizations=authorizations,
+            )
+            raise
         return self._state_store._publish_authorized_governance_artifact(
             artifact_kind="historical_availability_claim",
             payload=claim.as_payload(),
@@ -168,19 +180,31 @@ class TaiwanPriceQualificationWorkflow:
                 artifact_kind="historical_availability_claim",
             )
             claim = HistoricalAvailabilityClaim.from_payload(claim_payload)
+            if (
+                claim.evidence_status != "qualified"
+                or claim.source_id != manifest.historical_source_id
+            ):
+                raise ValueError("formal_gate_requires_qualified_historical_claim")
+            historical_authorization = next(
+                authorization
+                for authorization in authorizations
+                if authorization["dataset_id"] == manifest.historical_source_id
+            )
+            self._validate_dependency_evidence(
+                claim,
+                authorization=historical_authorization,
+            )
         except (KeyError, ValueError) as error:
+            self._state_store._publish_authorized_governance_artifact(
+                artifact_kind="qualification_governance_rejection",
+                payload={
+                    "operation": "register_formal_qualification_gate",
+                    "reason_code": "formal_gate_requires_qualified_historical_claim",
+                },
+                trace_id=trace_id,
+                authorizations=authorizations,
+            )
             raise ValueError("formal_gate_requires_qualified_historical_claim") from error
-        if claim.evidence_status != "qualified" or claim.source_id != manifest.historical_source_id:
-            raise ValueError("formal_gate_requires_qualified_historical_claim")
-        historical_authorization = next(
-            authorization
-            for authorization in authorizations
-            if authorization["dataset_id"] == manifest.historical_source_id
-        )
-        self._validate_dependency_evidence(
-            claim,
-            authorization=historical_authorization,
-        )
         return self._state_store._publish_authorized_governance_artifact(
             artifact_kind="taiwan_price_qualification_gate",
             payload={
