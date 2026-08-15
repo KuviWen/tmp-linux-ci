@@ -18,7 +18,7 @@
 
 限制也必須保留：本研究沒有找到**同一 listing identity** 的 security code／ticker 值變更證據；`2887` 支持的是 name／symbol history。`2448` → `3714` 則是有官方股份轉換證據的跨 listing external-code transition，不能把兩種情況混為同一件事。
 
-這份文件只證明選樣與事件事實，**不**證明資料自動存取、保存、建模、再散布或商業使用權，也不代表 `DEP-MKT-TW-01` 已成立。
+這份文件只證明選樣與事件事實，**不**證明每個引用頁面的自動存取、保存、建模或再散布權，也不代表行情已有足夠歷史深度。正式使用依據由 `TWSE-OGDL-OPEN-DATA-01` 對逐一明示 OGDL 的 distributions 建立；一般網頁引用仍只供選樣研究。
 
 ## 選樣規則
 
@@ -70,7 +70,7 @@ TWSE 2000-11-20 正式函釋鎖定生效日：自 2001-01-01 起，集中市場�
 1. 不得把完整休市、僅交割日或個股暫停日改標成 half-day；
 2. 若 manifest training history 延伸至 2001 年以前，可建立歷史星期六 shortened-session calendar version；
 3. 若 training history 僅涵蓋近七年，應將 `scheduled_half_day` 標為 `not_applicable`，不能製造近代 TWSE half-day；
-4. 若 acceptance criterion 嚴格要求近七年內真正排定的 half-day，現有官方證據不足，必須先澄清規格。
+4. 主規格已於 2026-08-15 正式接受此邊界：近代七年 XTAI 視窗不要求不存在的排定 half-day；歷史制度證據作 calendar-regime coverage，不能偽裝成近代特定 session。
 
 ## Manifest 落地要求
 
@@ -86,13 +86,13 @@ TWSE 2000-11-20 正式函釋鎖定生效日：自 2001-01-01 起，集中市場�
 - dividend、suspension、resume、delisting 分立事件，不把它們折成一般 OHLC 缺值
 - calendar version 及 session type；`scheduled_half_day` 不適用時要有明確 reason
 
-TWSE 的當期市場報表會改變；正式 acceptance bundle 必須保存查得回應的不可變副本，不能只保留 mutable URL。保存回應的技術行為與使用權仍須由 `DEP-MKT-TW-01` 或明確開放資料條款另行核准。
+TWSE 的當期市場報表會改變；正式 acceptance bundle 必須保存查得回應的不可變副本，不能只保留 mutable URL。只有資料集頁面明示的公開條款可建立正式使用依據；一般頁面公開可讀不能取代它。
 
 ## 未由本研究證明的事項
 
 - 同一 listing identity 的 security code／ticker 值曾變更；本文件證明的是 `2887` name history，以及 `2448`／`3714` 兩個 listing 間的 external-code transition；
 - 任一網站、OpenAPI、報表或 PDF 的自動擷取、七年保存、模型訓練、內部多人顯示或再散布權；
-- `DEP-MKT-TW-01` 的契約、entitlement、用途、保存期、離約後留存或正式 source-steward approval；
+- 逐一 dataset／distribution 的公開條款、實際保存 receipts、歷史深度或正式 qualification gate；
 - 10 檔在實際歷史價格來源中的完整 253-session／七年 coverage；
 - 一個已保存日曆與成交證據的特定歷史星期六 half-day；
 - 近代 TWSE 排定 half-day 的存在；

@@ -1,5 +1,7 @@
 # 部署拓撲、容量與災難復原契約
 
+> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文將 Kubernetes、三 failure domains、跨區復原、外部 OIDC／KMS 或固定 2,000-listing 負載列為必要門檻的段落。必要輪廓是本機 Compose 與實測支援池；本文的內容定址、單一寫入權威、backup／restore、fencing 與量測原則仍有效。
+
 本文件固定生產導向 MVP 在 Docker Compose 與 Kubernetes 的部署輪廓、程序與持久化形狀、資源隔離、備份復原、rolling deployment、容量驗收、首次上線及退役契約。它部署既有的八個 application module，而不把 module 名稱轉成微服務清單；module interface、權威帳本及資料語意分別沿用[服務模組契約](service-boundaries-and-api-contracts.md)、[資料平台架構](data-platform-architecture.md)、[可觀測性契約](observability-source-health-and-incidents.md)與[安全契約](security-identity-entitlement-and-retention.md)，部署輪廓的分期entry／exit由[分階段架構交接契約](phased-architecture-and-spec-handoff.md)固定。
 
 ## 決策摘要

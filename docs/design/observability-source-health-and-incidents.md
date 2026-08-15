@@ -1,5 +1,7 @@
 # 可觀測性、來源健康、漂移與事故契約
 
+> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文對外部商業來源、付費通知／監控服務及固定 production scale 的必要假設；健康與事故證據須可由本機開源元件完成，並以實際官方零成本支援池為範圍。本文的 canonical health／incident 與 telemetry projection 分離仍有效。
+
 ## 狀態與範圍
 
 本文件固定生產導向 MVP 的服務目標、來源健康評估、資料品質與漂移、重試／限流／熔斷、隔離／補跑、營運事故、通知、telemetry、儀表板及演練契約。它使用[資料平台](data-platform-architecture.md)、[模型生命週期](model-lifecycle-and-promotion.md)與[深模組／REST 契約](service-boundaries-and-api-contracts.md)既有的不可變證據、`WorkCoordinator`、`OperationsControl`、outbox 及正式預測批次語意；各階段必須交付的營運深度與SLO證據由[分階段架構交接契約](phased-architecture-and-spec-handoff.md)索引。

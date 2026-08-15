@@ -1,5 +1,7 @@
 # 15 — 美國總體 vintage 研究路徑
 
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+
 **What to build:** 將 BLS 與 BEA 的核准 release／vintage 經合法擷取、時間點版本、資料集資格及特徵建構，進入美股 shadow 預測支援與繁中研究介面，並證明 revision 不改寫舊 FeatureSnapshot 或 PredictionRecord。
 
 **Blocked by:** 11 — 發布 P2 正式價量 baseline acceptance bundle

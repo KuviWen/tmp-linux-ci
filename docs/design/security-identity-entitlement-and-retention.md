@@ -1,5 +1,7 @@
 # 安全、身分、來源授權與保存控制
 
+> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文對每個 P2＋來源皆需 principal entitlement、外部 OIDC／WebAuthn／KMS、商業簽章、獨立滲透測試及固定七年保存的必要假設。官方公開資料由 `open_data_terms` SourcePolicyVersion 建立資格；必要安全證據使用本機／開源工具。本文的 ActionGrant、用途／環境交集、secret 不外洩、append-only audit 與 policy deletion 仍有效。
+
 本文件固定生產導向 MVP 的信任域、人員與工作負載身分、行動權限、來源使用資格、secret、加密、資料保護、保存／刪除、安全稽核、供應鏈、執行隔離與安全驗收契約。它延伸既有的[資料平台架構](data-platform-architecture.md)、[文件處理管線](document-processing-pipeline.md)、[模型生命週期](model-lifecycle-and-promotion.md)、[模組與 REST 契約](service-boundaries-and-api-contracts.md)及[營運與事故契約](observability-source-health-and-incidents.md)，不取代其中的時間點、譜系、升版或營運語意；分期安全entry／exit與商業來源dependency由[分階段架構交接契約](phased-architecture-and-spec-handoff.md)固定。
 
 本文是工程安全與來源權利控制設計，不是法律、法遵或資料供應商契約意見。來源可否使用、保存、訓練、展示或再散布，仍須以部署者取得的有效文件及法務／採購判斷為準；程序身分、網路、備份、復原與供應鏈 gate 的部署形狀由[部署契約](deployment-topology-capacity-and-recovery.md)落實。

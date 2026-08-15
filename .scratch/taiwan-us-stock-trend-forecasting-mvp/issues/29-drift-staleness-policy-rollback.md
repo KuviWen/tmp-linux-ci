@@ -1,5 +1,7 @@
 # 29 — 漂移、過時、政策撤回與安全回退路徑
 
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+
 **What to build:** 將完整候選走過 hard gates、人工核准、五次 shadow 與原子 assignment，並以正式 EOD 展示漂移週窗、45／90／120 日過時階梯、來源政策撤回、可立即驗證 serving failure 及核准 rollback target 的不同處置；漂移只建立候選，不能自行升版或回退。
 
 **Blocked by:** 27 — 無網路 ModelArtifact 重現路徑, 28 — Integrated Gradients 到文件證據研究路徑

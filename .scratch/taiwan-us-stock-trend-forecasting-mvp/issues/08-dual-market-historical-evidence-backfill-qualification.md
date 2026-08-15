@@ -1,5 +1,7 @@
 # 08 — 雙市場歷史證據與回填資格路徑
 
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+
 **What to build:** 將台美行情、公司行動與身分回填依歷史證據等級進行資格審查，產生可重現的 historical-reconstruction 資料集、內部調整版本、成熟標籤、FeatureSnapshot 及 qualification report；不合格的目前最終值或自行宣稱證據必須一路阻斷到研究與營運介面。
 
 **Blocked by:** 06 — 台股合格行情到研究資格狀態, 07 — 美股合格行情到研究資格狀態
@@ -8,7 +10,7 @@
 
 Status: ready-for-agent
 
-- [ ] 平台 qualification workflow 建立 HistoricalAvailabilityClaim，保存 archive、版本／修訂語意、涵蓋、checksum、契約、審查、有效期與證據等級；adapter 或人工輸入不能直接自我核准。
+- [ ] 平台 qualification workflow 建立 HistoricalAvailabilityClaim，保存官方公開 archive／platform observation、版本／修訂語意、涵蓋、checksum、公開條款、有效期與證據等級；adapter 或人工輸入不能直接自我核准。
 - [ ] `platform_observed` 可供 production cutoff 與正式歷史；`archive_attested` 只供明示 historical reconstruction；`published_current_only` 及 unknown／self-asserted 不得進正式特徵、標籤或回測。
 - [ ] 新增、升級、撤銷或失效的歷史可得性主張只建立新資格與影響證據，不修改 first-observed time、observation sequence 或既有時間點視圖。
 - [ ] Qualification report 逐掛牌驗證 session、listing 生命週期、unadjusted price、公司行動、AdjustmentVersion、精確端點、修訂、來源政策及 claim ID，並列出每個排除原因。

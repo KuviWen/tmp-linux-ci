@@ -276,7 +276,7 @@ class PriceMaterializationOutcome:
     status: Literal["policy_blocked", "published", "quarantined", "deferred"]
     reason_code: str
     policy_reason_code: str
-    dependency_id: Literal["DEP-MKT-TW-01"]
+    source_basis_id: Literal["TWSE-OGDL-OPEN-DATA-01"]
     source_id: str
     source_mode: TaiwanPriceSourceMode
     listing_ids: tuple[str, ...]
@@ -303,7 +303,7 @@ class PriceMaterializationOutcome:
             "status": self.status,
             "reason_code": self.reason_code,
             "policy_reason_code": self.policy_reason_code,
-            "dependency_id": self.dependency_id,
+            "source_basis_id": self.source_basis_id,
             "source_id": self.source_id,
             "source_mode": self.source_mode,
             "listing_ids": list(self.listing_ids),
@@ -382,7 +382,7 @@ class DataSupply:
             status="policy_blocked",
             reason_code=_public_policy_reason(decision.reason_code),
             policy_reason_code=decision.reason_code,
-            dependency_id="DEP-MKT-TW-01",
+            source_basis_id="TWSE-OGDL-OPEN-DATA-01",
             source_id=request.source_id,
             source_mode=request.mode,
             listing_ids=request.listing_ids,
@@ -425,7 +425,7 @@ class DataSupply:
                 status="deferred",
                 reason_code="source_rate_limited",
                 policy_reason_code=decision.reason_code,
-                dependency_id="DEP-MKT-TW-01",
+                source_basis_id="TWSE-OGDL-OPEN-DATA-01",
                 source_id=request.source_id,
                 source_mode=request.mode,
                 listing_ids=request.listing_ids,
@@ -496,7 +496,7 @@ class DataSupply:
                 status="quarantined",
                 reason_code=quarantine_reason,
                 policy_reason_code=decision.reason_code,
-                dependency_id="DEP-MKT-TW-01",
+                source_basis_id="TWSE-OGDL-OPEN-DATA-01",
                 source_id=request.source_id,
                 source_mode=request.mode,
                 listing_ids=request.listing_ids,
@@ -599,7 +599,7 @@ class DataSupply:
             status="published",
             reason_code="qualified_price_materialized",
             policy_reason_code=decision.reason_code,
-            dependency_id="DEP-MKT-TW-01",
+            source_basis_id="TWSE-OGDL-OPEN-DATA-01",
             source_id=request.source_id,
             source_mode=request.mode,
             listing_ids=request.listing_ids,
@@ -652,7 +652,7 @@ class DataSupply:
 
 def _public_policy_reason(policy_reason_code: str) -> str:
     if policy_reason_code in {"source_policy_unknown", "source_entitlement_missing"}:
-        return "dependency_evidence_unverified"
+        return "source_basis_unverified"
     if policy_reason_code in {
         "source_policy_use_denied",
         "source_entitlement_use_denied",
@@ -1072,6 +1072,80 @@ class ListingSelectionRelationship:
 
 
 @dataclass(frozen=True)
+class OpenDataDatasetBasis:
+    dataset_id: str
+    dataset_url: str
+    qualification_scope: Literal[
+        "current_eod",
+        "current_corporate_action",
+        "current_dividend",
+        "current_listing_reference",
+        "selection_support",
+    ]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.dataset_id
+            or self.dataset_url != f"https://data.gov.tw/dataset/{self.dataset_id}"
+        ):
+            raise ValueError("taiwan_open_data_dataset_basis_invalid")
+
+    def as_payload(self) -> dict[str, str]:
+        return {
+            "dataset_id": self.dataset_id,
+            "dataset_url": self.dataset_url,
+            "qualification_scope": self.qualification_scope,
+        }
+
+
+@dataclass(frozen=True)
+class OpenDataSourceBasis:
+    source_basis_id: str
+    basis_type: Literal["open_data_terms"]
+    license_id: Literal["OGDL-1.0"]
+    terms_url: str
+    attribution: str
+    account_required: Literal[False]
+    application_required: Literal[False]
+    fee_required: Literal[False]
+    history_strategy: Literal["prospective_platform_observation"]
+    qualification_status: Literal["documented_not_archived"]
+    datasets: tuple[OpenDataDatasetBasis, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.source_basis_id
+            or self.basis_type != "open_data_terms"
+            or self.license_id != "OGDL-1.0"
+            or not self.terms_url.startswith("https://")
+            or not self.attribution.strip()
+            or self.account_required
+            or self.application_required
+            or self.fee_required
+            or self.history_strategy != "prospective_platform_observation"
+            or self.qualification_status != "documented_not_archived"
+            or not self.datasets
+            or len({dataset.dataset_id for dataset in self.datasets}) != len(self.datasets)
+        ):
+            raise ValueError("taiwan_open_data_source_basis_invalid")
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "source_basis_id": self.source_basis_id,
+            "basis_type": self.basis_type,
+            "license_id": self.license_id,
+            "terms_url": self.terms_url,
+            "attribution": self.attribution,
+            "account_required": self.account_required,
+            "application_required": self.application_required,
+            "fee_required": self.fee_required,
+            "history_strategy": self.history_strategy,
+            "qualification_status": self.qualification_status,
+            "datasets": [dataset.as_payload() for dataset in self.datasets],
+        }
+
+
+@dataclass(frozen=True)
 class StockPoolListing:
     listing_id: str
     issuer_id: str
@@ -1119,6 +1193,7 @@ class TaiwanStockPoolManifest:
     source_references: tuple[SelectionSourceReference, ...]
     evidence: tuple[ListingSelectionEvidence, ...]
     listing_relationships: tuple[ListingSelectionRelationship, ...]
+    source_basis: OpenDataSourceBasis
     current_source_id: str
     historical_source_id: str
     formal_qualification_artifact_id: str | None
@@ -1317,6 +1392,7 @@ def load_taiwan_stock_pool_manifest(
     )
     relationship_payloads = cast(list[dict[str, object]], payload["listing_relationships"])
     calendar_payload = cast(dict[str, object], payload["market_calendar_evidence"])
+    source_basis_payload = cast(dict[str, object], payload["taiwan_source_basis"])
     market_calendar_cases = cast(
         list[Literal["half_day_session"]], payload["market_calendar_cases"]
     )
@@ -1427,6 +1503,41 @@ def load_taiwan_stock_pool_manifest(
                 evidence_id=str(relationship["evidence_id"]),
             )
             for relationship in relationship_payloads
+        ),
+        source_basis=OpenDataSourceBasis(
+            source_basis_id=str(source_basis_payload["source_basis_id"]),
+            basis_type=cast(Literal["open_data_terms"], source_basis_payload["basis_type"]),
+            license_id=cast(Literal["OGDL-1.0"], source_basis_payload["license_id"]),
+            terms_url=str(source_basis_payload["terms_url"]),
+            attribution=str(source_basis_payload["attribution"]),
+            account_required=cast(Literal[False], source_basis_payload["account_required"]),
+            application_required=cast(Literal[False], source_basis_payload["application_required"]),
+            fee_required=cast(Literal[False], source_basis_payload["fee_required"]),
+            history_strategy=cast(
+                Literal["prospective_platform_observation"],
+                source_basis_payload["history_strategy"],
+            ),
+            qualification_status=cast(
+                Literal["documented_not_archived"],
+                source_basis_payload["qualification_status"],
+            ),
+            datasets=tuple(
+                OpenDataDatasetBasis(
+                    dataset_id=str(dataset["dataset_id"]),
+                    dataset_url=str(dataset["dataset_url"]),
+                    qualification_scope=cast(
+                        Literal[
+                            "current_eod",
+                            "current_corporate_action",
+                            "current_dividend",
+                            "current_listing_reference",
+                            "selection_support",
+                        ],
+                        dataset["qualification_scope"],
+                    ),
+                )
+                for dataset in cast(list[dict[str, object]], source_basis_payload["datasets"])
+            ),
         ),
         current_source_id=source_ids["current"],
         historical_source_id=source_ids["historical"],

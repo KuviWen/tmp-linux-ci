@@ -1,5 +1,7 @@
 # 12 — 台灣官方文件到可追溯研究證據
 
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+
 **What to build:** 將合格 MOPS／OGDL 重大訊息、月營收與財報摘要從來源政策、文件版本與安全抽取，經 FinancialFact、confirmed 標的連結及不可變 annotation，形成可供特徵使用且能在繁中研究頁、來源健康與 audit 追溯的台灣官方文件路徑。
 
 **Blocked by:** 11 — 發布 P2 正式價量 baseline acceptance bundle
@@ -8,7 +10,7 @@
 
 Status: ready-for-agent
 
-- [ ] 台灣來源 adapter 只使用明確允許的官方介面／檔案，綁定有效 SourcePolicyVersion、SourceEntitlement、內容保存模式與顯名要求。
+- [ ] 台灣來源 adapter 只使用明確允許、免帳號／免申請／免付費的官方介面／檔案，綁定有效 `open_data_terms` SourcePolicyVersion、條款雜湊、內容保存模式與顯名要求，不要求 principal-specific entitlement。
 - [ ] Document、DocumentVersion、Rendition、Segment 及附件關係以不可變身分建立，URL／ticker／內容雜湊不被當作永久文件或掛牌主鍵。
 - [ ] 初始、更新、更正、撤回、late attachment 及不同 rendition 只建立新版本與關係，不覆寫舊文件或既有正式預測輸入。
 - [ ] 月營收與財務資料優先形成可回到官方 context、period、unit、currency、dimension 及首次取得時間的 FinancialFact；OCR／文字推測不得覆寫正式 fact。

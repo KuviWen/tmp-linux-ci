@@ -1,5 +1,7 @@
 # 雲端中立的資料與 MLOps 元件比較
 
+> **2026-08-15 product decision:** ADR 0017 將本機 Compose／自管開源元件定為必要輪廓；本文的 Kubernetes、managed service 或付費雲端選項只保留比較研究，不形成後續 ticket 的完成條件。
+
 查證日期：2026-08-13
 
 ## 問題與比較方法

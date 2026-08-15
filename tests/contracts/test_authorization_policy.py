@@ -446,6 +446,165 @@ def test_platform_admin_identity_cannot_bypass_a_missing_source_entitlement() ->
     assert decision.reason_code == "source_entitlement_missing"
 
 
+def test_official_open_data_terms_do_not_require_a_principal_entitlement() -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-open-data-workload",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"public_source"},
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-ticket-06-open-data-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"market_data.collect"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=(
+            SourcePolicyVersion(
+                version_id="policy-twse-ogdl-current-v1",
+                dataset_id="twse-open-data-current",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="public_source",
+                resource_states=frozenset({"active"}),
+                allowed_uses=frozenset(
+                    {
+                        "ingest",
+                        "retain_7_years",
+                        "transform",
+                        "model",
+                        "internal_display",
+                        "backup_restore",
+                    }
+                ),
+                access_basis="open_data_terms",
+                license_id="OGDL-1.0",
+                terms_url="https://data.gov.tw/license",
+                terms_content_sha256="1" * 64,
+                attribution="政府資料開放授權條款－第1版（OGDL 1.0）",
+            ),
+        ),
+        source_entitlements=(
+            SourceEntitlement(
+                version_id="irrelevant-revoked-commercial-entitlement",
+                principal_id=identity.context.principal_id,
+                dataset_id="twse-open-data-current",
+                status="revoked",
+                allowed_actions=frozenset(),
+                purposes=frozenset(),
+                environments=frozenset(),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+    )
+
+    decision = policy.evaluate(
+        identity.context,
+        OperationIntent(
+            action="market_data.collect",
+            dataset_id="twse-open-data-current",
+            purpose="price_research",
+            environment="development",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-ticket-06-open-data",
+            correlation_id="trace-ticket-06-open-data",
+            required_uses=frozenset(
+                {
+                    "ingest",
+                    "retain_7_years",
+                    "transform",
+                    "model",
+                    "internal_display",
+                    "backup_restore",
+                }
+            ),
+        ),
+    )
+
+    assert decision.allowed is True
+    assert decision.reason_code == "authorized"
+    assert decision.source_policy_version_id == "policy-twse-ogdl-current-v1"
+    assert decision.source_entitlement_version_id is None
+    assert policy.publication_version_evidence(decision) == {
+        "action_grant": {
+            "actions": ["market_data.collect"],
+            "environment": "development",
+            "principal_id": identity.context.principal_id,
+            "valid_from": "2026-08-14T01:00:00Z",
+            "valid_to": "2026-08-16T01:00:00Z",
+            "version_id": "grant-ticket-06-open-data-v1",
+        },
+        "source_policy": {
+            "access_basis": "open_data_terms",
+            "allowed_actions": ["market_data.collect"],
+            "allowed_uses": [
+                "backup_restore",
+                "ingest",
+                "internal_display",
+                "model",
+                "retain_7_years",
+                "transform",
+            ],
+            "attribution": "政府資料開放授權條款－第1版（OGDL 1.0）",
+            "data_protection_class": "public_source",
+            "dataset_id": "twse-open-data-current",
+            "environments": ["development"],
+            "license_id": "OGDL-1.0",
+            "purposes": ["price_research"],
+            "resource_states": ["active"],
+            "terms_content_sha256": "1" * 64,
+            "terms_url": "https://data.gov.tw/license",
+            "valid_from": "0001-01-01T00:00:00Z",
+            "valid_to": "9999-12-31T23:59:59.999999Z",
+            "version_id": "policy-twse-ogdl-current-v1",
+        },
+    }
+    current_rights = policy.evaluate_current_source_rights(
+        {
+            **authorization_audit_payload(decision),
+            "outcome": "allowed",
+            "trace_id": decision.trace_id,
+        },
+        expected_dataset_id="twse-open-data-current",
+        expected_evaluation_id=decision.evaluation_id,
+        expected_decision_id=decision.decision_id,
+        expected_trace_id="trace-ticket-06-open-data",
+        expected_correlation_id="trace-ticket-06-open-data",
+        current_runtime_environment="development",
+        current_subject=CurrentSourcePrincipalAttributes.from_verified_security_context(
+            identity.context
+        ),
+        evaluated_at=now + timedelta(minutes=1),
+        trace_id="trace-ticket-06-open-data-current-rights",
+        correlation_id="trace-ticket-06-open-data-current-rights",
+        required_uses=frozenset(
+            {
+                "ingest",
+                "retain_7_years",
+                "transform",
+                "model",
+                "internal_display",
+                "backup_restore",
+            }
+        ),
+    )
+    assert current_rights.allowed is True
+    assert current_rights.reason_code == "authorized"
+    assert current_rights.source_policy_version_id == "policy-twse-ogdl-current-v1"
+    assert current_rights.source_entitlement_version_id is None
+
+
 def test_conflicting_entitlement_versions_fail_closed_instead_of_using_tuple_order() -> None:
     now = datetime(2026, 8, 14, 1, 0, tzinfo=UTC)
     credential, verifier = LocalApiKeyVerifier.issue(

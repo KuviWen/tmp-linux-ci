@@ -1,5 +1,7 @@
 # 美國與全球市場資料來源盤點
 
+> **2026-08-15 product decision:** ADR 0017 排除部署者自備付費行情／新聞 adapter、個別申請與 external entitlement。SEC／官方總體等零成本來源只在其實際範圍內啟用；找不到完整官方零成本 EOD 時，美股價格模態保持 unavailable，而不是等待契約。
+
 查核日期：2026-08-13
 
 ## 結論

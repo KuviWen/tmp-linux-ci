@@ -1,5 +1,7 @@
 # 深模組、REST、事件與排程契約
 
+> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文任何必須連接商業 provider、外部 entitlement service、Kubernetes 或固定規模的部署假設；深模組與 REST 必須以官方零成本來源及 stable unavailable／excluded outcomes 表達缺口。本文其餘 module／event／workflow seam 契約仍有效。
+
 ## 狀態與範圍
 
 本文件固定生產導向 MVP 的 application module、穩定 interface、REST adapter、Dagster asset、不可變 artifact、outbox event 及工作狀態語意。它延伸既有的[資料平台架構](data-platform-architecture.md)、[多模態模型設計](multimodal-trend-model.md)、[模型生命週期](model-lifecycle-and-promotion.md)與[研究介面](research-experience.md)，但不取代各文件已固定的領域契約；module的分期深度與垂直tracer bullets由[分階段架構交接契約](phased-architecture-and-spec-handoff.md)固定。

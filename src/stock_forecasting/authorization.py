@@ -33,6 +33,7 @@ SourceUseRight = Literal[
     "internal_display",
     "backup_restore",
 ]
+SourceAccessBasis = Literal["principal_entitlement", "open_data_terms"]
 
 _LOCAL_KEY_ENVIRONMENTS = frozenset({"local", "development"})
 _CONTEXT_ISSUER = object()
@@ -399,6 +400,38 @@ class SourcePolicyVersion:
     valid_from: datetime = _MIN_INSTANT
     valid_to: datetime = _MAX_INSTANT
     allowed_uses: frozenset[SourceUseRight] = frozenset()
+    access_basis: SourceAccessBasis = "principal_entitlement"
+    license_id: str | None = None
+    terms_url: str | None = None
+    terms_content_sha256: str | None = None
+    attribution: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.access_basis not in {"principal_entitlement", "open_data_terms"}:
+            raise ValueError("source_access_basis_invalid")
+        terms_fields = (
+            self.license_id,
+            self.terms_url,
+            self.terms_content_sha256,
+            self.attribution,
+        )
+        if self.access_basis == "open_data_terms":
+            if (
+                not isinstance(self.license_id, str)
+                or not self.license_id.strip()
+                or not isinstance(self.terms_url, str)
+                or not self.terms_url.startswith("https://")
+                or not isinstance(self.terms_content_sha256, str)
+                or len(self.terms_content_sha256) != 64
+                or any(
+                    character not in "0123456789abcdef" for character in self.terms_content_sha256
+                )
+                or not isinstance(self.attribution, str)
+                or not self.attribution.strip()
+            ):
+                raise ValueError("open_data_terms_evidence_invalid")
+        elif any(value is not None for value in terms_fields):
+            raise ValueError("entitlement_policy_cannot_assert_open_data_terms")
 
 
 @dataclass(frozen=True)
@@ -576,6 +609,16 @@ def source_policy_version_payload(policy: SourcePolicyVersion) -> dict[str, obje
     }
     if policy.allowed_uses:
         payload["allowed_uses"] = sorted(policy.allowed_uses)
+    if policy.access_basis == "open_data_terms":
+        payload.update(
+            {
+                "access_basis": policy.access_basis,
+                "license_id": policy.license_id,
+                "terms_url": policy.terms_url,
+                "terms_content_sha256": policy.terms_content_sha256,
+                "attribution": policy.attribution,
+            }
+        )
     return payload
 
 
@@ -705,7 +748,6 @@ class AuthorizationPolicy:
             not decision.allowed
             or decision.grant_version_id is None
             or decision.source_policy_version_id is None
-            or decision.source_entitlement_version_id is None
         ):
             raise ValueError("allowed_authorization_versions_required")
         grants = tuple(
@@ -716,18 +758,27 @@ class AuthorizationPolicy:
             for policy in self.source_policies
             if policy.version_id == decision.source_policy_version_id
         )
+        if len(grants) != 1 or len(policies) != 1:
+            raise ValueError("authorization_version_evidence_inconsistent")
+        evidence = {
+            "action_grant": action_grant_version_payload(grants[0]),
+            "source_policy": source_policy_version_payload(policies[0]),
+        }
+        if policies[0].access_basis == "open_data_terms":
+            if decision.source_entitlement_version_id is not None:
+                raise ValueError("authorization_version_evidence_inconsistent")
+            return evidence
+        if decision.source_entitlement_version_id is None:
+            raise ValueError("allowed_authorization_versions_required")
         entitlements = tuple(
             entitlement
             for entitlement in self.source_entitlements
             if entitlement.version_id == decision.source_entitlement_version_id
         )
-        if len(grants) != 1 or len(policies) != 1 or len(entitlements) != 1:
+        if len(entitlements) != 1:
             raise ValueError("authorization_version_evidence_inconsistent")
-        return {
-            "action_grant": action_grant_version_payload(grants[0]),
-            "source_policy": source_policy_version_payload(policies[0]),
-            "source_entitlement": source_entitlement_version_payload(entitlements[0]),
-        }
+        evidence["source_entitlement"] = source_entitlement_version_payload(entitlements[0])
+        return evidence
 
     def evaluate_current_source_rights(
         self,
@@ -802,19 +853,16 @@ class AuthorizationPolicy:
             reason_code = "source_workload_evidence_expired"
         allowed = reason_code == "authorized"
         valid_until = evaluated_at
-        if (
-            allowed
-            and rights.grant is not None
-            and rights.source_policy is not None
-            and rights.source_entitlement is not None
-        ):
-            valid_until = min(
+        if allowed and rights.grant is not None and rights.source_policy is not None:
+            validity_limits = [
                 prior_valid_until,
                 current_subject.valid_to,
                 rights.grant.valid_to,
                 rights.source_policy.valid_to,
-                rights.source_entitlement.valid_to,
-            )
+            ]
+            if rights.source_entitlement is not None:
+                validity_limits.append(rights.source_entitlement.valid_to)
+            valid_until = min(validity_limits)
         decision_identity = "/".join(
             (
                 principal_id,
@@ -903,6 +951,8 @@ class AuthorizationPolicy:
         grant = grant_candidates[0] if len(grant_candidates) == 1 else None
         source_policy = source_policy_candidates[0] if len(source_policy_candidates) == 1 else None
         entitlement = entitlement_candidates[0] if len(entitlement_candidates) == 1 else None
+        if source_policy is not None and source_policy.access_basis == "open_data_terms":
+            entitlement = None
         reason_code = "authorized"
         if len(grant_candidates) > 1:
             reason_code = "action_grant_conflict"
@@ -930,6 +980,8 @@ class AuthorizationPolicy:
             reason_code = "source_policy_use_denied"
         elif source_policy.data_protection_class not in data_protection_classes:
             reason_code = "data_protection_class_denied"
+        elif source_policy.access_basis == "open_data_terms":
+            pass
         elif len(entitlement_candidates) > 1:
             reason_code = "source_entitlement_conflict"
         elif entitlement is None and entitlement_history:
@@ -996,13 +1048,11 @@ class AuthorizationPolicy:
             decision_identity_parts.append(f"uses:{','.join(sorted(intent.required_uses))}")
         decision_identity = "/".join(decision_identity_parts)
         valid_until = intent.evaluated_at
-        if allowed and grant is not None and source_policy is not None and entitlement is not None:
-            valid_until = min(
-                context.expires_at,
-                grant.valid_to,
-                source_policy.valid_to,
-                entitlement.valid_to,
-            )
+        if allowed and grant is not None and source_policy is not None:
+            validity_limits = [context.expires_at, grant.valid_to, source_policy.valid_to]
+            if entitlement is not None:
+                validity_limits.append(entitlement.valid_to)
+            valid_until = min(validity_limits)
         return AuthorizationDecision(
             evaluation_id=str(uuid4()),
             decision_id=str(uuid5(NAMESPACE_URL, f"stock-forecasting/authz/{decision_identity}")),

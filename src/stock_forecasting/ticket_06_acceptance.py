@@ -63,7 +63,7 @@ def run_ticket_06_acceptance(
         security_context=identity.context,
         adapters={
             "twse-open-data-current": current_adapter,
-            "twse-contracted-history": historical_adapter,
+            "twse-open-data-observed-history": historical_adapter,
         },
         object_repository=FilesystemObjectRepository(object_root),
         state_store=state_store,
@@ -73,7 +73,7 @@ def run_ticket_06_acceptance(
     outcomes = []
     for source_id, mode in (
         ("twse-open-data-current", "current"),
-        ("twse-contracted-history", "historical"),
+        ("twse-open-data-observed-history", "historical"),
     ):
         outcomes.append(
             data_supply.materialize(
@@ -113,7 +113,7 @@ def run_ticket_06_acceptance(
         "provider_not_contacted": current_adapter.calls == historical_adapter.calls == 0,
         "research_rest": research_status == 200
         and research.get("status") == "policy_blocked"
-        and research.get("dependency_id") == "DEP-MKT-TW-01",
+        and research.get("source_basis_id") == "TWSE-OGDL-OPEN-DATA-01",
         "operations_rest": operations_status == 200 and len(operations.get("items", [])) == 2,
         "traditional_chinese_ui": ui_status == 200
         and "台股行情研究資格" in ui_text
@@ -127,7 +127,7 @@ def run_ticket_06_acceptance(
         "ticket": "06",
         "status": "passed" if all(checks.values()) else "failed",
         "formal_qualification": False,
-        "dependency_id": "DEP-MKT-TW-01",
+        "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",
         "listing_id": listing_id,
         "checks": checks,
         "trace_ids": [outcome.trace_id for outcome in outcomes],

@@ -284,6 +284,54 @@ components:
         core_projection_version: {type: integer, minimum: 0}
         evidence_projection_version: {type: integer, minimum: 0}
         stale: {type: boolean}
+    OpenDataSourceBasis:
+      type: object
+      additionalProperties: false
+      required:
+        - source_basis_id
+        - basis_type
+        - license_id
+        - terms_url
+        - attribution
+        - account_required
+        - application_required
+        - fee_required
+        - history_strategy
+        - qualification_status
+        - datasets
+      properties:
+        source_basis_id: {type: string, const: TWSE-OGDL-OPEN-DATA-01}
+        basis_type: {type: string, const: open_data_terms}
+        license_id: {type: string, const: OGDL-1.0}
+        terms_url: {type: string, format: uri}
+        attribution: {type: string, minLength: 1}
+        account_required: {type: boolean, const: false}
+        application_required: {type: boolean, const: false}
+        fee_required: {type: boolean, const: false}
+        history_strategy:
+          type: string
+          const: prospective_platform_observation
+        qualification_status:
+          type: string
+          const: documented_not_archived
+        datasets:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [dataset_id, dataset_url, qualification_scope]
+            properties:
+              dataset_id: {type: string}
+              dataset_url: {type: string, format: uri}
+              qualification_scope:
+                type: string
+                enum:
+                  - current_eod
+                  - current_corporate_action
+                  - current_dividend
+                  - current_listing_reference
+                  - selection_support
     PriceResearchEligibility:
       type: object
       additionalProperties: false
@@ -292,7 +340,8 @@ components:
         - market
         - status
         - reason_code
-        - dependency_id
+        - source_basis_id
+        - source_basis
         - formally_qualified
         - checks
         - sources
@@ -303,7 +352,9 @@ components:
           type: string
           enum: [qualified, policy_blocked, quarantined, deferred]
         reason_code: {type: string}
-        dependency_id: {type: string, const: DEP-MKT-TW-01}
+        source_basis_id: {type: string, const: TWSE-OGDL-OPEN-DATA-01}
+        source_basis:
+          $ref: '#/components/schemas/OpenDataSourceBasis'
         formally_qualified: {type: boolean}
         checks:
           $ref: '#/components/schemas/PriceQualificationChecks'
@@ -379,7 +430,7 @@ components:
         - status
         - reason_code
         - policy_reason_code
-        - dependency_id
+        - source_basis_id
         - source_id
         - source_mode
         - listing_ids
@@ -406,7 +457,7 @@ components:
         status: {type: string, enum: [published, policy_blocked, quarantined, deferred]}
         reason_code: {type: string}
         policy_reason_code: {type: string}
-        dependency_id: {type: string, const: DEP-MKT-TW-01}
+        source_basis_id: {type: string, const: TWSE-OGDL-OPEN-DATA-01}
         source_id: {type: string}
         source_mode: {type: string, enum: [current, historical]}
         listing_ids:

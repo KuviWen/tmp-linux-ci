@@ -1,5 +1,7 @@
 # 分階段架構核准與規格化交接契約
 
+> **2026-08-15 supersession:** ADR 0017 與主 spec 的 `COST-0-01` 正式取代本文 P2＋所有 `DEP-*` 採購／契約／entitlement gates、付費新聞／consensus、固定七年／八季深度、600＋1,400／2,000 listings，以及必要 Kubernetes／三 failure domains／跨區 DR。這些舊段落只保留決策歷史，不再形成 entry／exit 或 ticket requirement；實際階段契約以修訂後主 spec 與 tickets 06–39 為準。
+
 ## 狀態、權威與使用方式
 
 本文件是台美個股趨勢預測系統的整體分期、垂直 tracer bullet、entry／exit、外部依賴與 `/to-spec` 交接權威。它不重述各領域契約；身分與時間點、資料平台、文件、標籤與回測、模型、生命週期、研究介面、module interface、營運、安全及部署語意，仍分別由本文件的追溯矩陣所列設計契約與 ADR 決定。

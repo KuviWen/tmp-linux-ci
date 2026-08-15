@@ -82,7 +82,46 @@ def test_taiwan_segment_declares_versioned_ten_listing_qualification_contract() 
     assert manifest.market_calendar_cases == frozenset({"half_day_session"})
     assert manifest.evidence_status == "qualification_candidate"
     assert manifest.current_source_id == "twse-open-data-current"
-    assert manifest.historical_source_id == "twse-contracted-history"
+    assert manifest.historical_source_id == "twse-open-data-observed-history"
+    assert manifest.source_basis.as_payload() == {
+        "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",
+        "basis_type": "open_data_terms",
+        "license_id": "OGDL-1.0",
+        "terms_url": "https://data.gov.tw/license",
+        "attribution": "政府資料開放授權條款－第1版（OGDL 1.0）",
+        "account_required": False,
+        "application_required": False,
+        "fee_required": False,
+        "history_strategy": "prospective_platform_observation",
+        "qualification_status": "documented_not_archived",
+        "datasets": [
+            {
+                "dataset_id": "11549",
+                "dataset_url": "https://data.gov.tw/dataset/11549",
+                "qualification_scope": "current_eod",
+            },
+            {
+                "dataset_id": "89748",
+                "dataset_url": "https://data.gov.tw/dataset/89748",
+                "qualification_scope": "current_corporate_action",
+            },
+            {
+                "dataset_id": "31612",
+                "dataset_url": "https://data.gov.tw/dataset/31612",
+                "qualification_scope": "current_dividend",
+            },
+            {
+                "dataset_id": "18419",
+                "dataset_url": "https://data.gov.tw/dataset/18419",
+                "qualification_scope": "current_listing_reference",
+            },
+            {
+                "dataset_id": "11542",
+                "dataset_url": "https://data.gov.tw/dataset/11542",
+                "qualification_scope": "selection_support",
+            },
+        ],
+    }
     assert manifest.formal_qualification_artifact_id is None
     assert manifest.historical_availability_claim_id is None
     assert manifest.formally_qualified is False

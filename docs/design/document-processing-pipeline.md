@@ -1,5 +1,7 @@
 # 新聞、公告與財報處理管線
 
+> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 將 `official-documents-only` 定為完整產品範圍；本文任何付費／契約新聞、外部 entitlement 或新聞完整產品 gate 均不再是需求。官方文件的不可變身分、sandbox、時間點、政策與刪除契約仍有效。
+
 本文件記錄「定義新聞、公告與財報處理管線」的決策。管線將合法取得的台美新聞、公告、財報及機構報告轉成可追溯的標準文本、結構化事實、標的連結、文件群組、事件提及、市場事件與市場影響評估，同時保留來源版本、授權及資訊截止點語意；身分、來源使用資格、保存期限與政策性刪除遵守[安全與保存契約](security-identity-entitlement-and-retention.md)，來源與能力的分期entry gate遵守[分階段架構交接契約](phased-architecture-and-spec-handoff.md)。
 
 ## 設計原則

@@ -166,7 +166,7 @@ def test_blocked_taiwan_listing_is_traceable_in_research_operations_and_ui(
         security_context=workload_identity.context,
         adapters={
             "twse-open-data-current": current_adapter,
-            "twse-contracted-history": historical_adapter,
+            "twse-open-data-observed-history": historical_adapter,
         },
         object_repository=application.object_repository,
         state_store=application.state_store,
@@ -174,7 +174,7 @@ def test_blocked_taiwan_listing_is_traceable_in_research_operations_and_ui(
     )
     for source_id, mode in (
         ("twse-open-data-current", "current"),
-        ("twse-contracted-history", "historical"),
+        ("twse-open-data-observed-history", "historical"),
     ):
         data_supply.materialize(
             SourcePartitionRequest(
@@ -206,8 +206,47 @@ def test_blocked_taiwan_listing_is_traceable_in_research_operations_and_ui(
     assert research["listing_id"] == listing_id
     assert research["market"] == "XTAI"
     assert research["status"] == "policy_blocked"
-    assert research["reason_code"] == "dependency_evidence_unverified"
-    assert research["dependency_id"] == "DEP-MKT-TW-01"
+    assert research["reason_code"] == "source_basis_unverified"
+    assert research["source_basis_id"] == "TWSE-OGDL-OPEN-DATA-01"
+    assert research["source_basis"] == {
+        "account_required": False,
+        "application_required": False,
+        "attribution": "政府資料開放授權條款－第1版（OGDL 1.0）",
+        "basis_type": "open_data_terms",
+        "fee_required": False,
+        "history_strategy": "prospective_platform_observation",
+        "license_id": "OGDL-1.0",
+        "qualification_status": "documented_not_archived",
+        "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",
+        "terms_url": "https://data.gov.tw/license",
+        "datasets": [
+            {
+                "dataset_id": "11549",
+                "dataset_url": "https://data.gov.tw/dataset/11549",
+                "qualification_scope": "current_eod",
+            },
+            {
+                "dataset_id": "89748",
+                "dataset_url": "https://data.gov.tw/dataset/89748",
+                "qualification_scope": "current_corporate_action",
+            },
+            {
+                "dataset_id": "31612",
+                "dataset_url": "https://data.gov.tw/dataset/31612",
+                "qualification_scope": "current_dividend",
+            },
+            {
+                "dataset_id": "18419",
+                "dataset_url": "https://data.gov.tw/dataset/18419",
+                "qualification_scope": "current_listing_reference",
+            },
+            {
+                "dataset_id": "11542",
+                "dataset_url": "https://data.gov.tw/dataset/11542",
+                "qualification_scope": "selection_support",
+            },
+        ],
+    }
     assert research["formally_qualified"] is False
     assert research["checks"] == {
         "coverage": "not_evaluated",
@@ -229,17 +268,16 @@ def test_blocked_taiwan_listing_is_traceable_in_research_operations_and_ui(
     operations = operations_response.json()
     assert {item["source_id"] for item in operations["items"]} == {
         "twse-open-data-current",
-        "twse-contracted-history",
+        "twse-open-data-observed-history",
     }
     assert {item["status"] for item in operations["items"]} == {"policy_blocked"}
-    assert all(
-        item["reason_code"] == "dependency_evidence_unverified" for item in operations["items"]
-    )
+    assert all(item["reason_code"] == "source_basis_unverified" for item in operations["items"])
 
     assert ui_response.status_code == 200
     assert "台股行情研究資格" in ui_response.text
     assert "政策阻擋" in ui_response.text
-    assert "DEP-MKT-TW-01" in ui_response.text
+    assert "TWSE-OGDL-OPEN-DATA-01" in ui_response.text
+    assert "免帳號、免申請、免付費" in ui_response.text
     assert "未接觸來源" in ui_response.text
     assert "資料集版本：尚未建立" in ui_response.text
     assert "調整版本：尚未建立" in ui_response.text
@@ -806,7 +844,7 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
     ).json()
     allowed_operations = client.get("/api/v1/operations/sources", headers=headers).json()
 
-    assert allowed_rest["reason_code"] == "dependency_evidence_unverified"
+    assert allowed_rest["reason_code"] == "source_basis_unverified"
     assert allowed_rest["sources"][0]["status"] == "published"
     assert allowed_rest["sources"][0]["current_policy_decision"]["reason_code"] == "authorized"
     assert allowed_operations["items"][0]["status"] == "published"

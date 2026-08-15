@@ -1,5 +1,7 @@
 # 13 — SEC 文件到可追溯研究證據
 
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+
 **What to build:** 將 SEC 8-K、6-K、10-Q、10-K 與 company facts 經共同 DocumentPipeline 建立版本化美國文件證據、FinancialFact、confirmed 標的連結及 annotation，並一路呈現在特徵支援、繁中研究介面、來源健康與 audit 中。
 
 **Blocked by:** 11 — 發布 P2 正式價量 baseline acceptance bundle

@@ -1,5 +1,7 @@
 # 台灣市場資料來源與授權盤點
 
+> **2026-08-15 product decision:** ADR 0017 排除本文建議的付費歷史檔、主動派送與另購新聞；正式產品只使用逐一明示 OGDL 的 distributions 及自首次取得日起的 observed archive。本文的來源事實仍供研究，付費選項不再是 requirement 或 fallback；更新後工程政策見 `official-zero-cost-market-data-policy.md`。
+
 查證日期：2026-08-13
 
 ## 結論

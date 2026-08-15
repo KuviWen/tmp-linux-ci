@@ -71,7 +71,8 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert eligibility["additionalProperties"] is False
     assert set(eligibility["required"]) == {
         "checks",
-        "dependency_id",
+        "source_basis_id",
+        "source_basis",
         "formally_qualified",
         "listing_id",
         "market",

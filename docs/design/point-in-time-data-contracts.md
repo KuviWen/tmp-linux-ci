@@ -1,5 +1,7 @@
 # 標的身分、交易日曆與時間點資料契約
 
+> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文對付費／契約 backfill 與固定七年來源深度的必要假設；只有 platform-observed 或官方零成本 archive-attested evidence 可用，實際深度不足即 fail closed。本文的 first-observed time、business-valid time、revision 與不可回寫原則仍有效。
+
 本文件記錄「定義標的身分、交易日曆與時間點資料契約」的決策。它規定所有來源 adapter 與下游資料處理都必須遵守的身分、時間、版本及完整性語意；來源特有欄位可以擴充，但不得削弱這些共同不變量。實作次序、歷史證據 entry gate 與 tracer bullet 由[分階段架構交接契約](phased-architecture-and-spec-handoff.md)固定。
 
 ## 身分模型

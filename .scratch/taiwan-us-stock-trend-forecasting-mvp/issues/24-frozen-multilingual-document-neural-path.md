@@ -1,6 +1,8 @@
 # 24 — 凍結多語文件表示 neural 路徑
 
-**What to build:** 將 DocumentIntelligence 產生的授權、凍結、版本化繁中／英文 segment embeddings 與事件／市場影響特徵，經決定性挑選後加入 neural candidate；TrendForecaster 不讀原文、不微調大型 encoder，shadow 預測及研究頁能回到實際文件片段與政策證據。
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+
+**What to build:** 將 DocumentIntelligence 以本機可執行、open-license、凍結、版本化 encoder 產生的繁中／英文 segment embeddings 與事件／市場影響特徵，經決定性挑選後加入 neural candidate；TrendForecaster 不讀原文、不微調大型 encoder、不呼叫付費／需帳號 API，shadow 預測及研究頁能回到實際文件片段與政策證據。
 
 **Blocked by:** 22 — Neural price-only TrendForecaster 路徑
 
@@ -8,7 +10,7 @@
 
 Status: ready-for-agent
 
-- [ ] DocumentIntelligence 使用核准、凍結、版本化多語 encoder／tokenizer／pooling 產生 segment embeddings，保存 license、training cutoff、bundle、checksum 及 source-policy lineage。
+- [ ] DocumentIntelligence 使用核准、凍結、本機執行且具 open-source model license 的版本化 encoder／tokenizer／pooling 產生 segment embeddings，保存 license、training cutoff、bundle、checksum 及 source-policy lineage。
 - [ ] 每掛牌只選 cutoff 前 20 sessions 內、confirmed subject 或明確 market／sector scope、權利合格且處理完成的最多 64 個 segments。
 - [ ] Segment selection 先按 DocumentCluster 去重，再依版本化 source authority、processing quality、role 與 recency 決定性排序，不使用未來 labels 或測試 relevance。
 - [ ] TrendForecaster request 只收到 embeddings、event／impact features、source、role、age、quality、availability 與 evidence pointers，不接收原文、URL fetch 或 encoder update 能力。

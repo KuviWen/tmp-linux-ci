@@ -611,6 +611,7 @@ class StateStore:
         authorizations: list[dict[str, object]],
     ) -> str:
         if artifact_kind not in {
+            "open_data_qualification_evidence",
             "historical_availability_claim",
             "taiwan_price_qualification_gate",
         }:
@@ -642,6 +643,7 @@ class StateStore:
             set(payload) != {"operation", "reason_code"}
             or payload.get("operation")
             not in {
+                "register_open_data_qualification_evidence",
                 "register_historical_availability_claim",
                 "register_formal_qualification_gate",
             }

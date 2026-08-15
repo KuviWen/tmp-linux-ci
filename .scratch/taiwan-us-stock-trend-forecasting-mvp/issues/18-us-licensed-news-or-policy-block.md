@@ -1,19 +1,19 @@
-# 18 — 美國授權新聞或明確阻斷路徑
+# 18 — 美國官方文件完整範圍與商業新聞排除路徑
 
-**What to build:** 為美國新聞建立與台灣相同的 contract-required adapter，使合格授權內容能走過文件情報、特徵及研究證據，或在權利不足時端到端維持 `official-documents-only`／`policy_blocked`，而不使用免費網站行情或新聞替代。
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+
+**What to build:** 將 `official-documents-only` 固定為美國文字模態的完整產品範圍，以 SEC 官方文件為正式來源並排除商業新聞；來源、FeatureSnapshot、研究頁、健康與 audit 使用與台灣相同的 excluded／not-applicable 語意。
 
 **Blocked by:** 11 — 發布 P2 正式價量 baseline acceptance bundle
 
-**External gate:** `DEP-NEWS-US-01`
+**Excluded modality:** commercial news；不存在 external gate
 
 **Trace IDs:** `P3-ENTRY-02`, `P3-TRACE-NEWS-01`
 
 Status: ready-for-agent
 
-- [ ] 美國新聞資料集的來源政策逐項記錄內容模式、保存、NLP／embedding、模型、展示、顯名、匯出及刪除權利。
-- [ ] 合格來源從擷取、文件版本、first-observed time、CoverageReport、去重、confirmed 標的連結到 FeatureSnapshot 保持完整 source-policy lineage。
-- [ ] 研究頁只顯示允許內容及衍生物，metadata-link-only 不產生全文 embedding／事件，summary-only 只使用實際授權摘要。
-- [ ] 缺失或失效的 `DEP-NEWS-US-01` 讓 source、feature、prediction support 與產品範圍一致 policy blocked，不以其他網站、測試帳號或任意 provider fallback。
-- [ ] 美國新聞與 SEC 官方文件的角色、權威與 Document identity 分開保存，近似轉載不合併來源時間、授權、更正或撤回鏈。
-- [ ] Entitlement 撤回與 policy deletion 能阻止新用途、影響下游 artifact／assignment 並產生刪除證明，不改寫既有授權決策。
-- [ ] 與票 17 的 provider／module／REST／policy contract tests 證明兩市場具有相同 allow／deny、支援、顯示與刪除語意。
+- [ ] 版本化產品範圍政策將商業新聞標為 `excluded`，不建立 collector、credential、content mode 或 source entitlement。
+- [ ] FeatureSnapshot、prediction support、研究頁與 bundle 將新聞模態標為 `not_applicable`，不建立 full-product blocker。
+- [ ] SEC 官方文件保持完整 source-policy lineage、內容模式、修訂與刪除語意；商業新聞排除不改變 SEC 文件身分或使用依據。
+- [ ] 免費新聞網站、測試帳號、人工複製或任意 provider 不得 fallback，嘗試會產生 audit／health evidence。
+- [ ] 與票 17 的 module／REST／policy interface contract tests 證明兩市場具有相同 excluded-news、支援、顯示與 audit 語意。

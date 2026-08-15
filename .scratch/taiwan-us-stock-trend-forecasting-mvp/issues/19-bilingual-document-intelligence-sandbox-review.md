@@ -1,5 +1,7 @@
 # 19 — 雙語文件情報、sandbox 與 review 路徑
 
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+
 **What to build:** 讓台灣及美國一手文件經無網路、無 secret 的安全解析，形成可回到原始座標的標準文本、雙語結構、去重、confirmed 標的連結、taxonomy、事件提及、凍結 embedding、市場影響及版本化 review 決策，並以 golden corpus、研究頁與營運證據驗證品質及 abstention。
 
 **Blocked by:** 12 — 台灣官方文件到可追溯研究證據, 13 — SEC 文件到可追溯研究證據

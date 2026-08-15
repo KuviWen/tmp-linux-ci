@@ -1,5 +1,7 @@
 # 趨勢標籤與防洩漏回測契約
 
+> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文固定七年 training、一年 validation 與最新八季為必要資料量的段落。每個 fold 的實際 spans／數量由合格歷史固定在 manifest；標籤、realized-session endpoint、20-session purge、20-session embargo、once-only test 與禁止隨機切分仍有效，支援不足不得建立正式模型。
+
 本文件固定台灣與美國個股 1／5／20 交易日三分類標籤，以及用這些標籤訓練、校準、選模與測試時必須遵守的時間點契約。目標不是讓三類樣本恰好等量，而是保留可解釋的經濟門檻，同時確保任何特徵、標籤、處理結果或模型選擇都沒有使用當時尚不可知的資料。分期股票池、baseline與正式歷史entry gate由[分階段架構交接契約](phased-architecture-and-spec-handoff.md)固定。
 
 ## 已驗證範圍與限制

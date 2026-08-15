@@ -59,6 +59,125 @@ def test_historical_claim_cannot_be_minted_without_qualification_authorization()
         state_store.get_trace_evidence("trace-unauthorized-candidate-claim")
 
 
+def test_open_data_qualification_evidence_is_derived_from_the_authorized_policy(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    terms_content = b"OGDL 1.0 terms captured from the qualified official distribution"
+    terms_sha256 = hashlib.sha256(terms_content).hexdigest()
+    manifest = load_taiwan_stock_pool_manifest()
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-open-data-governor",
+        environment="development",
+        scopes={"price_qualification.govern"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"public_source"},
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-open-data-qualification-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"price_qualification.govern"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=(
+            SourcePolicyVersion(
+                version_id="policy-open-data-history-v1",
+                dataset_id=manifest.historical_source_id,
+                allowed_actions=frozenset({"price_qualification.govern"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="public_source",
+                resource_states=frozenset({"active"}),
+                allowed_uses=frozenset(
+                    {
+                        "ingest",
+                        "retain_7_years",
+                        "transform",
+                        "model",
+                        "internal_display",
+                        "backup_restore",
+                    }
+                ),
+                access_basis="open_data_terms",
+                license_id="OGDL-1.0",
+                terms_url="https://data.gov.tw/license",
+                terms_content_sha256=terms_sha256,
+                attribution="政府資料開放授權條款－第1版（OGDL 1.0）",
+            ),
+        ),
+        source_entitlements=(),
+    )
+    state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
+    repository = FilesystemObjectRepository(tmp_path / "objects")
+    workflow = TaiwanPriceQualificationWorkflow(
+        state_store,
+        authorization_policy=policy,
+        security_context=identity.context,
+        clock=lambda: now,
+        object_repository=repository,
+    )
+
+    evidence_id = workflow.register_open_data_qualification_evidence(
+        source_id=manifest.historical_source_id,
+        evidence_level="platform_observed",
+        terms_content=terms_content,
+        trace_id="trace-open-data-evidence",
+    )
+
+    assert state_store.get_verified_governance_artifact(
+        artifact_id=evidence_id,
+        artifact_kind="open_data_qualification_evidence",
+    ) == {
+        "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",
+        "source_id": manifest.historical_source_id,
+        "evidence_level": "platform_observed",
+        "evidence_status": "qualified",
+        "license_id": "OGDL-1.0",
+        "terms_url": "https://data.gov.tw/license",
+        "terms_content_sha256": terms_sha256,
+        "terms_object_id": f"sha256:{terms_sha256}",
+        "attribution": "政府資料開放授權條款－第1版（OGDL 1.0）",
+        "source_policy_version_id": "policy-open-data-history-v1",
+    }
+    claim = HistoricalAvailabilityClaim(
+        source_id=manifest.historical_source_id,
+        evidence_level="platform_observed",
+        evidence_status="qualified",
+        observed_start=date(2026, 8, 14),
+        observed_end=date(2026, 8, 15),
+        schema_version="taiwan-unadjusted-eod-v1",
+        exact_sessions_verified=True,
+        integrity_verified=True,
+        company_actions_verified=True,
+        listing_lifecycle_verified=True,
+        qualification_artifact_id=evidence_id,
+    )
+    claim_id = workflow.register_historical_availability_claim(
+        claim,
+        trace_id="trace-open-data-qualified-history",
+    )
+    assert (
+        state_store.get_verified_governance_artifact(
+            artifact_id=claim_id,
+            artifact_kind="historical_availability_claim",
+        )
+        == claim.as_payload()
+    )
+    with pytest.raises(ValueError, match="open_data_qualification_evidence_invalid"):
+        workflow.register_open_data_qualification_evidence(
+            source_id=manifest.historical_source_id,
+            evidence_level="invented",  # type: ignore[arg-type]
+            terms_content=terms_content,
+            trace_id="trace-open-data-invalid-level",
+        )
+
+
 def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contract(
     tmp_path: Path,
 ) -> None:

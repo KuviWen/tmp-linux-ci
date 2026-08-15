@@ -92,14 +92,14 @@ class PriceEligibilityQuery:
             reason_code = (
                 "source_rights_not_effective"
                 if any(source["reason_code"] == "source_rights_not_effective" for source in sources)
-                else "dependency_evidence_unverified"
+                else "source_basis_unverified"
             )
         elif "deferred" in statuses:
             status = "deferred"
             reason_code = "source_collection_deferred"
         elif not required_modes_present:
             status = "policy_blocked"
-            reason_code = "dependency_evidence_unverified"
+            reason_code = "source_basis_unverified"
         elif "quarantined" in statuses:
             status = "quarantined"
             reason_code = next(
@@ -121,7 +121,8 @@ class PriceEligibilityQuery:
             "market": "XTAI",
             "status": status,
             "reason_code": reason_code,
-            "dependency_id": "DEP-MKT-TW-01",
+            "source_basis_id": manifest.source_basis.source_basis_id,
+            "source_basis": manifest.source_basis.as_payload(),
             "formally_qualified": status == "qualified",
             "checks": checks,
             "sources": sources,

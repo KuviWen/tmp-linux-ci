@@ -119,28 +119,14 @@ def _qualified_price_policy(
                 data_protection_class="licensed",
                 resource_states=frozenset({"active"}),
                 allowed_uses=allowed_uses,
+                access_basis="open_data_terms",
+                license_id="OGDL-1.0",
+                terms_url="https://data.gov.tw/license",
+                terms_content_sha256="1" * 64,
+                attribution="政府資料開放授權條款－第1版（OGDL 1.0）",
             ),
         ),
-        source_entitlements=(
-            SourceEntitlement(
-                version_id="entitlement-tw-price-v1",
-                principal_id=identity.context.principal_id,
-                dataset_id="twse-current-qualified-price",
-                status="active",
-                allowed_actions=frozenset(
-                    {
-                        "market_data.collect",
-                        "price_qualification.govern",
-                        "price_research_eligibility.read",
-                    }
-                ),
-                purposes=frozenset({"price_research"}),
-                environments=frozenset({"development"}),
-                valid_from=now - timedelta(days=1),
-                valid_to=now + timedelta(days=1),
-                allowed_uses=allowed_uses,
-            ),
-        ),
+        source_entitlements=(),
     )
 
 
@@ -322,9 +308,9 @@ def test_unverified_taiwan_market_dependency_blocks_before_provider_access(
 
     assert outcome.as_payload() == {
         "status": "policy_blocked",
-        "reason_code": "dependency_evidence_unverified",
+        "reason_code": "source_basis_unverified",
         "policy_reason_code": "source_policy_unknown",
-        "dependency_id": "DEP-MKT-TW-01",
+        "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",
         "source_id": "twse-current-qualified-price",
         "source_mode": "current",
         "listing_ids": ["10000000-0000-4000-8000-000000000001"],
@@ -677,17 +663,17 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
 
     current_source_policy[0] = AuthorizationPolicy(
         action_grants=current_source_policy[0].action_grants,
-        source_policies=current_source_policy[0].source_policies,
-        source_entitlements=tuple(
+        source_policies=tuple(
             replace(
-                entitlement,
-                version_id=f"{entitlement.version_id}-revoked",
-                status="revoked",
+                source_policy,
+                version_id=f"{source_policy.version_id}-withdrawn",
+                valid_to=now,
             )
-            if entitlement.dataset_id == current.collection.source_id
-            else entitlement
-            for entitlement in current_source_policy[0].source_entitlements
+            if source_policy.dataset_id == current.collection.source_id
+            else source_policy
+            for source_policy in current_source_policy[0].source_policies
         ),
+        source_entitlements=current_source_policy[0].source_entitlements,
     )
     revoked_result = query.get_listing(
         listing_id=listing_id,

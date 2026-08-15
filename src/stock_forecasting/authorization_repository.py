@@ -13,6 +13,7 @@ from stock_forecasting.authorization import (
     EntitlementStatus,
     RuntimeEnvironment,
     SecurityContext,
+    SourceAccessBasis,
     SourceEntitlement,
     SourcePolicyVersion,
     SourceUseRight,
@@ -128,6 +129,17 @@ def _policy_from_payload(payload: dict[str, Any]) -> AuthorizationPolicy:
                             ),
                         )
                     ),
+                    access_basis=cast(
+                        SourceAccessBasis,
+                        item.get("access_basis", "principal_entitlement"),
+                    ),
+                    license_id=cast(str | None, item.get("license_id")),
+                    terms_url=cast(str | None, item.get("terms_url")),
+                    terms_content_sha256=cast(
+                        str | None,
+                        item.get("terms_content_sha256"),
+                    ),
+                    attribution=cast(str | None, item.get("attribution")),
                 )
                 for item in policies_payload
             ),

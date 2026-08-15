@@ -577,7 +577,8 @@ def create_web_app(application: Application) -> FastAPI:
             f'<p class="badge">{state_text}</p>'
             f"<p>{provider_text}</p></header>"
             '<section class="panel"><h2>資格依賴</h2><dl>'
-            f"<dt>外部依賴</dt><dd>{escape(str(outcome['dependency_id']))}</dd>"
+            f"<dt>官方公開資料使用依據</dt><dd>{escape(str(outcome['source_basis_id']))}</dd>"
+            "<dt>成本邊界</dt><dd>免帳號、免申請、免付費；須保留 OGDL 顯名</dd>"
             f"<dt>原因</dt><dd>{escape(str(outcome['reason_code']))}</dd>"
             f"<dt>資料集版本</dt><dd>{escape(str(dataset_id)) if dataset_id else '尚未建立'}</dd>"
             "<dt>調整版本</dt>"

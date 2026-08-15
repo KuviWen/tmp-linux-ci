@@ -1,5 +1,7 @@
 # 模型生命週期、升版與復現契約
 
+> **2026-08-15 product boundary:** ADR 0017 與主 spec 的 `COST-0-01` 取代本文對固定七年／八季資料深度、外部簽章服務與付費來源的必要假設；fold 數與期間由實際合格歷史固定進 TrainingIntent，支援不足不得形成正式候選。本文其餘 append-only governance、approval、shadow、assignment、rollback 與 reproduction 契約仍有效。
+
 本文件定義模型家族從訓練意圖、訓練嘗試、模型成品、回測評估、升版閘門、人工核准、shadow、服務指派、回退、漂移觸發到退役的權威流程。核心目標是讓任何現行模型都能回答「用什麼資料與程式產生、通過哪版規則、由誰核准、何時被指派、如何復現與回退」，而不把可變的 registry alias 當作歷史真相。
 
 模型架構遵守 [`multimodal-trend-model.md`](multimodal-trend-model.md)，標籤與回測遵守 [`trend-label-and-backtest-contract.md`](trend-label-and-backtest-contract.md)，核准身分、來源使用資格、成品簽章、保存及政策性刪除遵守[安全與保存契約](security-identity-entitlement-and-retention.md)。本文件固定首版升版門檻；分期啟動、首個baseline entry gate與垂直驗收遵守[分階段架構交接契約](phased-architecture-and-spec-handoff.md)，監控呈現與告警路由另由觀測性設計負責。

@@ -1,19 +1,21 @@
 # 36 — 正式安全、供應鏈與政策性刪除路徑
 
-**What to build:** 在完整台美產品資料路徑上實施 production OIDC AAL2／WebAuthn、工作負載身分、單一授權交集、SecretProvider、default-deny network、簽章供應鏈、append-only audit 與 policy deletion，從登入／workflow 到資料、模型、PredictionRecord、研究展示及刪除證明完整驗收。
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
 
-**Blocked by:** 31 — 台灣 600 掛牌完整產品資料資格路徑, 32 — 美國 1,400 掛牌完整產品資料資格路徑, 33 — 國際預測與公司級法人 consensus 路徑
+**What to build:** 在完整零成本台美資料路徑上實施本機可信身份、工作負載 action grants、單一授權交集、本機 secret handling、可行的 default-deny／egress allowlist、內容定址供應鏈、append-only audit 與 policy deletion，從登入／workflow 到資料、模型、PredictionRecord、研究展示及刪除證明完整驗收。
+
+**Blocked by:** 31 — 台灣零成本完整支援池資料資格路徑, 32 — 美國零成本完整支援池資料資格路徑, 33 — 官方機構預測 optional 路徑與 consensus 排除
 
 **Trace IDs:** `P5-TRACE-SEC-01`, `GATE-POLICY-01`, `GATE-SEC-01`
 
 Status: ready-for-agent
 
-- [ ] 正式互動式登入使用核准 OIDC Authorization Code＋PKCE、AAL2、server-side session；高風險 grant／policy／approval／promotion／export／deletion 要求 15 分鐘內 WebAuthn step-up。
+- [ ] 互動式登入使用僅限 loopback／內網的本機可信身份與 server-side session；高風險 grant／policy／approval／promotion／export／deletion 要求重新驗證及獨立 action grant，不要求外部 OIDC／WebAuthn 服務。
 - [ ] REST、Dagster、source、document sandbox、feature、training、inference、governance、relay 使用獨立短效 workload identities、database roles、object prefixes 及最小 ActionGrants。
-- [ ] AuthorizationPolicy 對 action grant、source entitlement、source policy、purpose、environment、DataProtectionClass 及 resource state 取交集，未知／到期／conflict fail closed；完整 decision matrix 通過。
+- [ ] AuthorizationPolicy 對 action grant、公開資料 SourcePolicyVersion、purpose、environment、DataProtectionClass 及 resource state 取交集；`open_data_terms` 不要求 principal entitlement，未知／到期／conflict 仍 fail closed。
 - [ ] Secret values 不進 repository、configuration、database、work command、artifact、REST、outbox、logs／traces；rotation、revocation、provider outage 及 redaction 具端到端 evidence。
-- [ ] Production network default deny；source／notification／OIDC／KMS／secret／time egress 分離 allowlist，training／inference／document sandbox 無網路，SSRF／redirect／DNS-rebinding scenarios 被拒。
-- [ ] Application、UI、model 及 deployment artifacts 以 digest pin、signature、SBOM、provenance、dependency／base locks、CVE／license evidence 驗證；unsafe model format、unsigned artifact、Critical／High finding 是 veto。
-- [ ] SecurityAudit 對 authentication、authorization、secret checkout metadata、restricted read、governance、export、deletion、deployment 100% 記錄，transactional append-only sequence／hash chain／daily signature 可驗證。
+- [ ] 本機 runtime 在可支援範圍 default deny；source／notification／time egress 分離 allowlist，training／inference／document sandbox 無網路，SSRF／redirect／DNS-rebinding scenarios 被拒，不要求 OIDC／KMS egress。
+- [ ] Application、UI、model 及 deployment artifacts 以 digest pin、SBOM、provenance、dependency／base locks、免費 CVE／license evidence 驗證；optional local signature 不成為外部依賴，unsafe format 與 Critical／High finding 是 veto。
+- [ ] SecurityAudit 對 authentication、authorization、secret metadata、restricted read、governance、export、deletion、deployment 100% 記錄，transactional append-only sequence／hash chain 可驗證；外部簽章服務非必要。
 - [ ] Policy deletion 從 verify、tombstone／block、lineage impact、dual approval、primary／replica／cache／index／derived／model deletion、backup replay 到 DeletionCertificate 完成；沒有合格 rollback model 時停止 formal prediction。
-- [ ] 獨立 penetration assessment 覆蓋 authentication、authorization、IDOR、CSRF、SSRF、injection、malicious file、model artifact、network、supply chain、audit 與 deletion；Critical／High 修復並重測前不得通過。
+- [ ] 免費 open-source static／dependency／container／dynamic scanners 加內部手動 abuse-case assessment 覆蓋 authentication、authorization、IDOR、CSRF、SSRF、injection、malicious file、model artifact、network、supply chain、audit 與 deletion；Critical／High 修復並重測前不得通過，不要求付費獨立滲透測試。

@@ -1,5 +1,7 @@
 # 10 — 正式 EOD 服務指派與預測發布
 
+**Zero-cost boundary:** 只接受官方明示的免帳號、免申請、免另行書面契約、免付費公開來源與本機開源運行；缺少資料時縮小支援或 fail closed，不建立採購／entitlement 待辦。
+
 **What to build:** 讓一個經 bootstrap 治理核准的 logistic ModelArtifact 透過原子 production 服務指派進入正式日終 workflow；每個市場在 T+90 固定資料選擇、FeatureSnapshot 與 assignment，於 T+120 前交易發布 10＋10 每掛牌三期間結果或機器原因，並在研究、營運與 audit 中完整可追溯。
 
 **Blocked by:** 09 — Class-prior 與 logistic bootstrap 治理路徑
@@ -16,4 +18,4 @@ Status: ready-for-agent
 - [ ] REST／繁中矩陣與標的頁顯示 formal cutoff、prediction history、ModelArtifact、FeatureSnapshot、dataset、assignment、calibration、support 及政策允許的證據，且不混入 shadow／fixture／replay。
 - [ ] OperationsControl 保存 T+90 readiness、T+105 feature、T+115 forecast validation、T+120 breach、source health、incident、notification delivery 與 audit，遲到正式批次仍計 SLO breach。
 - [ ] Promotion／rollback 不重算或覆寫既有 PredictionRecord；下一個未開始批次才使用新 assignment，歷史查詢保持原 artifact 與 assignment。
-- [ ] 端到端測試涵蓋 assignment compare-and-swap race、rollback-target 失格、late data、schema mismatch、invalid probability、來源 entitlement 到期與 projection lag。
+- [ ] 端到端測試涵蓋 assignment compare-and-swap race、rollback-target 失格、late data、schema mismatch、invalid probability、公開來源條款撤回／更換與 projection lag。
