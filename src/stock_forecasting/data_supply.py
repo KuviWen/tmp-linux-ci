@@ -257,6 +257,7 @@ class PriceMaterializationOutcome:
     trace_id: str
     policy_decision_id: str
     policy_evaluation_id: str
+    policy_correlation_id: str
     policy_valid_until: datetime
     evaluated_at: datetime
     raw_object_id: str | None = None
@@ -283,6 +284,7 @@ class PriceMaterializationOutcome:
             "trace_id": self.trace_id,
             "policy_decision_id": self.policy_decision_id,
             "policy_evaluation_id": self.policy_evaluation_id,
+            "policy_correlation_id": self.policy_correlation_id,
             "policy_valid_until": _instant(self.policy_valid_until),
             "evaluated_at": _instant(self.evaluated_at),
             "raw_object_id": self.raw_object_id,
@@ -361,6 +363,7 @@ class DataSupply:
             trace_id=request.trace_id,
             policy_decision_id=decision.decision_id,
             policy_evaluation_id=decision.evaluation_id,
+            policy_correlation_id=decision.correlation_id,
             policy_valid_until=decision.valid_until,
             evaluated_at=decision.evaluated_at,
         )
@@ -403,6 +406,7 @@ class DataSupply:
                 trace_id=request.trace_id,
                 policy_decision_id=decision.decision_id,
                 policy_evaluation_id=decision.evaluation_id,
+                policy_correlation_id=decision.correlation_id,
                 policy_valid_until=decision.valid_until,
                 evaluated_at=decision.evaluated_at,
                 historical_availability_claim_id=request.historical_availability_claim_id,
@@ -473,6 +477,7 @@ class DataSupply:
                 trace_id=request.trace_id,
                 policy_decision_id=decision.decision_id,
                 policy_evaluation_id=decision.evaluation_id,
+                policy_correlation_id=decision.correlation_id,
                 policy_valid_until=decision.valid_until,
                 evaluated_at=decision.evaluated_at,
                 raw_object_id=raw_object.object_id,
@@ -575,6 +580,7 @@ class DataSupply:
             trace_id=request.trace_id,
             policy_decision_id=decision.decision_id,
             policy_evaluation_id=decision.evaluation_id,
+            policy_correlation_id=decision.correlation_id,
             policy_valid_until=decision.valid_until,
             evaluated_at=decision.evaluated_at,
             raw_object_id=raw_object.object_id,

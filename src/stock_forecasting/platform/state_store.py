@@ -446,6 +446,7 @@ class StateStore:
                 connection.execute(
                     select(
                         security_audit_events.c.outcome,
+                        security_audit_events.c.trace_id,
                         security_audit_events.c.authorization,
                     ).where(security_audit_events.c.event_id == evaluation_id)
                 )
@@ -456,6 +457,7 @@ class StateStore:
             raise KeyError(evaluation_id)
         authorization = deepcopy(cast(dict[str, object], row["authorization"]))
         authorization["outcome"] = row["outcome"]
+        authorization["trace_id"] = row["trace_id"]
         return authorization
 
     def get_price_research_eligibility(self, *, listing_id: str) -> dict[str, Any]:
@@ -621,8 +623,9 @@ class StateStore:
                 or authorization.get("reason_code") != "authorized"
             ):
                 raise ValueError("qualification_authorization_invalid")
-        return self._publish_governance_record(
+        return self._publish_trace_artifact(
             artifact_kind=artifact_kind,
+            execution_purpose="governance",
             payload=payload,
             trace_id=trace_id,
             authorization_outcomes=[(authorization, "allowed") for authorization in authorizations],
@@ -651,8 +654,9 @@ class StateStore:
             )
         ):
             raise ValueError("qualification_governance_rejection_invalid")
-        return self._publish_governance_record(
+        return self._publish_trace_artifact(
             artifact_kind="qualification_governance_rejection",
+            execution_purpose="governance",
             payload=payload,
             trace_id=trace_id,
             authorization_outcomes=[
@@ -664,10 +668,44 @@ class StateStore:
             ],
         )
 
-    def _publish_governance_record(
+    def publish_current_source_rights_resolution(
+        self,
+        *,
+        payload: dict[str, object],
+        trace_id: str,
+    ) -> str:
+        required = {
+            "evaluation_id",
+            "decision_id",
+            "outcome",
+            "reason_code",
+            "subject_principal_id",
+            "dataset_id",
+            "prior_evaluation_id",
+            "prior_decision_id",
+            "prior_trace_id",
+            "prior_correlation_id",
+            "evaluated_at",
+            "valid_until",
+            "grant_version_id",
+            "source_policy_version_id",
+            "source_entitlement_version_id",
+        }
+        if set(payload) != required or payload.get("outcome") not in {"allowed", "denied"}:
+            raise ValueError("current_source_rights_resolution_invalid")
+        return self._publish_trace_artifact(
+            artifact_kind="current_source_rights_resolution",
+            execution_purpose="price_research",
+            payload=payload,
+            trace_id=trace_id,
+            authorization_outcomes=[],
+        )
+
+    def _publish_trace_artifact(
         self,
         *,
         artifact_kind: str,
+        execution_purpose: str,
         payload: dict[str, object],
         trace_id: str,
         authorization_outcomes: list[tuple[dict[str, object], str]],
@@ -697,13 +735,13 @@ class StateStore:
                     canonical_artifacts.insert().values(
                         artifact_id=artifact_id,
                         artifact_kind=artifact_kind,
-                        execution_purpose="governance",
+                        execution_purpose=execution_purpose,
                         payload=payload,
                     )
                 )
             elif (
                 existing["artifact_kind"] != artifact_kind
-                or existing["execution_purpose"] != "governance"
+                or existing["execution_purpose"] != execution_purpose
                 or existing["payload"] != payload
             ):
                 raise ImmutableStateConflict("immutable_artifact_conflict")

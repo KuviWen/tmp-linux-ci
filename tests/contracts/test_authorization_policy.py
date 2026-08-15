@@ -15,6 +15,7 @@ from stock_forecasting.authorization import (
     OperationIntent,
     SourceEntitlement,
     SourcePolicyVersion,
+    SourceRightsEvidenceError,
     SourceUseRight,
     authorization_audit_payload,
 )
@@ -790,3 +791,100 @@ def test_price_source_rights_allow_collection_only_when_all_required_uses_are_ef
     assert decision.reason_code == "authorized"
     assert decision.required_uses == required_uses
     assert authorization_audit_payload(decision)["required_uses"] == sorted(required_uses)
+
+
+def test_current_source_rights_reject_prior_authorization_bound_to_another_source() -> None:
+    now = datetime(2026, 8, 15, 1, 0, tzinfo=UTC)
+    source_id = "twse-rights-binding-contract"
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-source-workload",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    required_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_7_years",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-rights-binding-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"market_data.collect"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=(
+            SourcePolicyVersion(
+                version_id="policy-rights-binding-v1",
+                dataset_id=source_id,
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                allowed_uses=required_uses,
+            ),
+        ),
+        source_entitlements=(
+            SourceEntitlement(
+                version_id="entitlement-rights-binding-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id=source_id,
+                status="active",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+                allowed_uses=required_uses,
+            ),
+        ),
+    )
+    prior = policy.evaluate(
+        identity.context,
+        OperationIntent(
+            action="market_data.collect",
+            dataset_id=source_id,
+            purpose="price_research",
+            environment="development",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-rights-binding-materialization",
+            correlation_id="request-rights-binding",
+            required_uses=required_uses,
+        ),
+    )
+    prior_evidence = {
+        **authorization_audit_payload(prior),
+        "outcome": "allowed",
+        "trace_id": prior.trace_id,
+    }
+
+    with pytest.raises(
+        SourceRightsEvidenceError,
+        match="source_rights_prior_evidence_mismatch",
+    ):
+        policy.evaluate_current_source_rights(
+            prior_evidence,
+            expected_dataset_id="tpex-rights-binding-contract",
+            expected_evaluation_id=prior.evaluation_id,
+            expected_decision_id=prior.decision_id,
+            expected_trace_id=prior.trace_id,
+            expected_correlation_id=prior.correlation_id,
+            evaluated_at=now + timedelta(minutes=1),
+            trace_id="trace-rights-binding-query",
+            correlation_id="request-rights-binding-query",
+            required_uses=required_uses,
+        )

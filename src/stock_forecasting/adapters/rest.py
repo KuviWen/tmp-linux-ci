@@ -521,13 +521,29 @@ def create_web_app(application: Application) -> FastAPI:
             state_text = "來源延後"
             provider_text = "來源限流，尚未取得資料；checkpoint 未前進"
         elif status == "policy_blocked":
+            current_policy_reasons = {
+                str(decision["reason_code"])
+                for source in sources
+                if isinstance((decision := source.get("current_policy_decision")), dict)
+                and decision.get("outcome") == "denied"
+            }
+            source_was_deferred = any(source["status"] == "deferred" for source in sources)
             source_contacted = outcome["reason_code"] == "source_rights_not_effective" or any(
                 source["status"] != "policy_blocked" for source in sources
             )
-            state_text = "資格阻擋" if source_contacted else "政策阻擋"
-            provider_text = (
-                "來源候選資料已保存；不具正式研究資格" if source_contacted else "未接觸來源"
-            )
+            if current_policy_reasons and source_was_deferred:
+                state_text = "政策阻擋"
+                rights_text = (
+                    "來源權利已撤銷"
+                    if "source_entitlement_revoked" in current_policy_reasons
+                    else "來源權利已失效"
+                )
+                provider_text = f"{rights_text}；先前來源限流，checkpoint 未前進"
+            else:
+                state_text = "資格阻擋" if source_contacted else "政策阻擋"
+                provider_text = (
+                    "來源候選資料已保存；不具正式研究資格" if source_contacted else "未接觸來源"
+                )
         else:
             state_text = "已具研究資格"
             provider_text = "來源資料已保存"

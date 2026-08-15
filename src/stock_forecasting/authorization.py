@@ -420,6 +420,58 @@ class AuthorizationDecision:
 
 
 @dataclass(frozen=True)
+class SourceRightsDecision:
+    evaluation_id: str
+    decision_id: str
+    allowed: bool
+    reason_code: str
+    subject_principal_id: str | None
+    dataset_id: str
+    prior_evaluation_id: str
+    prior_decision_id: str | None
+    prior_trace_id: str | None
+    prior_correlation_id: str | None
+    evaluated_at: datetime
+    valid_until: datetime
+    grant_version_id: str | None
+    source_policy_version_id: str | None
+    source_entitlement_version_id: str | None
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "evaluation_id": self.evaluation_id,
+            "decision_id": self.decision_id,
+            "outcome": "allowed" if self.allowed else "denied",
+            "reason_code": self.reason_code,
+            "subject_principal_id": self.subject_principal_id,
+            "dataset_id": self.dataset_id,
+            "prior_evaluation_id": self.prior_evaluation_id,
+            "prior_decision_id": self.prior_decision_id,
+            "prior_trace_id": self.prior_trace_id,
+            "prior_correlation_id": self.prior_correlation_id,
+            "evaluated_at": _instant(self.evaluated_at),
+            "valid_until": _instant(self.valid_until),
+            "grant_version_id": self.grant_version_id,
+            "source_policy_version_id": self.source_policy_version_id,
+            "source_entitlement_version_id": self.source_entitlement_version_id,
+        }
+
+
+@dataclass(frozen=True)
+class _PolicyRightsResolution:
+    reason_code: str
+    grant: ActionGrant | None
+    source_policy: SourcePolicyVersion | None
+    source_entitlement: SourceEntitlement | None
+
+
+class SourceRightsEvidenceError(ValueError):
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
+@dataclass(frozen=True)
 class PolicyDeniedOutcome:
     decision_id: str
     correlation_id: str
@@ -522,6 +574,47 @@ def authorization_audit_payload(decision: AuthorizationDecision) -> dict[str, ob
     return payload
 
 
+def source_rights_resolution_failure(
+    *,
+    dataset_id: str,
+    prior_evaluation_id: str,
+    prior_decision_id: str | None,
+    prior_trace_id: str | None,
+    prior_correlation_id: str | None,
+    evaluated_at: datetime,
+    trace_id: str,
+    reason_code: str,
+) -> SourceRightsDecision:
+    identity = "/".join(
+        (
+            dataset_id,
+            prior_evaluation_id,
+            prior_decision_id or "no-prior-decision",
+            reason_code,
+            trace_id,
+        )
+    )
+    return SourceRightsDecision(
+        evaluation_id=str(uuid4()),
+        decision_id=str(
+            uuid5(NAMESPACE_URL, f"stock-forecasting/source-rights-failure/{identity}")
+        ),
+        allowed=False,
+        reason_code=reason_code,
+        subject_principal_id=None,
+        dataset_id=dataset_id,
+        prior_evaluation_id=prior_evaluation_id,
+        prior_decision_id=prior_decision_id,
+        prior_trace_id=prior_trace_id,
+        prior_correlation_id=prior_correlation_id,
+        evaluated_at=evaluated_at,
+        valid_until=evaluated_at,
+        grant_version_id=None,
+        source_policy_version_id=None,
+        source_entitlement_version_id=None,
+    )
+
+
 @dataclass(frozen=True)
 class AuthorizationPolicy:
     action_grants: tuple[ActionGrant, ...]
@@ -560,74 +653,134 @@ class AuthorizationPolicy:
             "source_entitlement": source_entitlement_version_payload(entitlements[0]),
         }
 
-    def reevaluate_source_workload(
+    def evaluate_current_source_rights(
         self,
         prior_authorization: Mapping[str, object],
         *,
+        expected_dataset_id: str,
+        expected_evaluation_id: str,
+        expected_decision_id: str,
+        expected_trace_id: str,
+        expected_correlation_id: str,
         evaluated_at: datetime,
         trace_id: str,
         correlation_id: str,
         required_uses: frozenset[SourceUseRight],
-    ) -> AuthorizationDecision:
+    ) -> SourceRightsDecision:
         prior_required_uses = prior_authorization.get("required_uses")
         protection_class = prior_authorization.get("data_protection_class")
         environment = prior_authorization.get("environment")
-        authentication_method = prior_authorization.get("authentication_method")
+        principal_id = prior_authorization.get("principal_id")
         if (
             prior_authorization.get("outcome") != "allowed"
             or prior_authorization.get("reason_code") != "authorized"
             or prior_authorization.get("action") != "market_data.collect"
-            or not isinstance(prior_authorization.get("principal_id"), str)
-            or not isinstance(prior_authorization.get("credential_id"), str)
-            or authentication_method != "local_api_key"
-            or not isinstance(prior_authorization.get("dataset_id"), str)
+            or prior_authorization.get("purpose") != "price_research"
+            or prior_authorization.get("evaluation_id") != expected_evaluation_id
+            or prior_authorization.get("decision_id") != expected_decision_id
+            or prior_authorization.get("dataset_id") != expected_dataset_id
+            or prior_authorization.get("trace_id") != expected_trace_id
+            or prior_authorization.get("correlation_id") != expected_correlation_id
+            or not isinstance(principal_id, str)
             or environment not in {"local", "development", "test", "staging", "production"}
             or protection_class
             not in {"public_source", "internal", "licensed", "restricted", "secret"}
             or not isinstance(prior_required_uses, list)
-            or not required_uses <= set(prior_required_uses)
+            or required_uses != set(prior_required_uses)
         ):
-            raise ValueError("source_workload_authorization_evidence_invalid")
-        prior_evaluated_at = _parse_instant(prior_authorization.get("evaluated_at"))
-        prior_valid_until = _parse_instant(prior_authorization.get("valid_until"))
+            raise SourceRightsEvidenceError("source_rights_prior_evidence_mismatch")
+        try:
+            prior_evaluated_at = _parse_instant(prior_authorization.get("evaluated_at"))
+            prior_valid_until = _parse_instant(prior_authorization.get("valid_until"))
+        except ValueError as error:
+            raise SourceRightsEvidenceError("source_rights_prior_evidence_invalid") from error
         if prior_valid_until <= prior_evaluated_at:
-            raise ValueError("source_workload_authorization_evidence_invalid")
-        context = SecurityContext(
-            principal_id=cast(str, prior_authorization["principal_id"]),
-            credential_id=cast(str, prior_authorization["credential_id"]),
-            owner="persisted-source-workload",
+            raise SourceRightsEvidenceError("source_rights_prior_evidence_invalid")
+        intent = OperationIntent(
+            action="market_data.collect",
+            dataset_id=expected_dataset_id,
+            purpose="price_research",
             environment=cast(RuntimeEnvironment, environment),
-            scopes=frozenset({"market_data.collect"}),
-            data_protection_classes=frozenset({cast(DataProtectionClass, protection_class)}),
-            issued_at=prior_evaluated_at,
-            expires_at=prior_valid_until,
-            authentication_method="local_api_key",
-            _issuer=_CONTEXT_ISSUER,
+            resource_state="active",
+            evaluated_at=evaluated_at,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+            required_uses=required_uses,
         )
-        return self.evaluate(
-            context,
-            OperationIntent(
-                action="market_data.collect",
-                dataset_id=cast(str, prior_authorization["dataset_id"]),
-                purpose="price_research",
-                environment=cast(RuntimeEnvironment, environment),
-                resource_state="active",
-                evaluated_at=evaluated_at,
-                trace_id=trace_id,
-                correlation_id=correlation_id,
-                required_uses=required_uses,
+        rights = self._resolve_rights(
+            principal_id=principal_id,
+            intent=intent,
+            data_protection_classes=frozenset({cast(DataProtectionClass, protection_class)}),
+        )
+        reason_code = rights.reason_code
+        if evaluated_at >= prior_valid_until:
+            reason_code = "source_workload_evidence_expired"
+        allowed = reason_code == "authorized"
+        valid_until = evaluated_at
+        if (
+            allowed
+            and rights.grant is not None
+            and rights.source_policy is not None
+            and rights.source_entitlement is not None
+        ):
+            valid_until = min(
+                prior_valid_until,
+                rights.grant.valid_to,
+                rights.source_policy.valid_to,
+                rights.source_entitlement.valid_to,
+            )
+        decision_identity = "/".join(
+            (
+                principal_id,
+                expected_dataset_id,
+                rights.grant.version_id if rights.grant is not None else "no-grant",
+                rights.source_policy.version_id
+                if rights.source_policy is not None
+                else "no-policy",
+                rights.source_entitlement.version_id
+                if rights.source_entitlement is not None
+                else "no-entitlement",
+                reason_code,
+                trace_id,
+                correlation_id,
+                f"uses:{','.join(sorted(required_uses))}",
+            )
+        )
+        return SourceRightsDecision(
+            evaluation_id=str(uuid4()),
+            decision_id=str(
+                uuid5(NAMESPACE_URL, f"stock-forecasting/source-rights/{decision_identity}")
+            ),
+            allowed=allowed,
+            reason_code=reason_code,
+            subject_principal_id=principal_id,
+            dataset_id=expected_dataset_id,
+            prior_evaluation_id=expected_evaluation_id,
+            prior_decision_id=expected_decision_id,
+            prior_trace_id=expected_trace_id,
+            prior_correlation_id=expected_correlation_id,
+            evaluated_at=evaluated_at,
+            valid_until=valid_until,
+            grant_version_id=rights.grant.version_id if rights.grant is not None else None,
+            source_policy_version_id=(
+                rights.source_policy.version_id if rights.source_policy is not None else None
+            ),
+            source_entitlement_version_id=(
+                rights.source_entitlement.version_id
+                if rights.source_entitlement is not None
+                else None
             ),
         )
 
-    def evaluate(
+    def _resolve_rights(
         self,
-        context: SecurityContext,
+        *,
+        principal_id: str,
         intent: OperationIntent,
-    ) -> AuthorizationDecision:
+        data_protection_classes: frozenset[DataProtectionClass],
+    ) -> _PolicyRightsResolution:
         grant_history = tuple(
-            candidate
-            for candidate in self.action_grants
-            if candidate.principal_id == context.principal_id
+            candidate for candidate in self.action_grants if candidate.principal_id == principal_id
         )
         grant_candidates = tuple(
             candidate
@@ -647,8 +800,7 @@ class AuthorizationPolicy:
         entitlement_history = tuple(
             candidate
             for candidate in self.source_entitlements
-            if candidate.principal_id == context.principal_id
-            and candidate.dataset_id == intent.dataset_id
+            if candidate.principal_id == principal_id and candidate.dataset_id == intent.dataset_id
         )
         entitlement_candidates = tuple(
             candidate
@@ -659,15 +811,7 @@ class AuthorizationPolicy:
         source_policy = source_policy_candidates[0] if len(source_policy_candidates) == 1 else None
         entitlement = entitlement_candidates[0] if len(entitlement_candidates) == 1 else None
         reason_code = "authorized"
-        if not context.trusted:
-            reason_code = "identity_untrusted"
-        elif not (context.issued_at <= intent.evaluated_at < context.expires_at):
-            reason_code = "identity_expired"
-        elif context.environment != intent.environment:
-            reason_code = "identity_environment_mismatch"
-        elif intent.action not in context.scopes:
-            reason_code = "identity_scope_missing"
-        elif len(grant_candidates) > 1:
+        if len(grant_candidates) > 1:
             reason_code = "action_grant_conflict"
         elif grant is None and grant_history:
             reason_code = "action_grant_expired"
@@ -691,7 +835,7 @@ class AuthorizationPolicy:
             reason_code = "source_policy_resource_state_denied"
         elif not intent.required_uses <= source_policy.allowed_uses:
             reason_code = "source_policy_use_denied"
-        elif source_policy.data_protection_class not in context.data_protection_classes:
+        elif source_policy.data_protection_class not in data_protection_classes:
             reason_code = "data_protection_class_denied"
         elif len(entitlement_candidates) > 1:
             reason_code = "source_entitlement_conflict"
@@ -709,6 +853,37 @@ class AuthorizationPolicy:
             reason_code = "source_entitlement_environment_denied"
         elif not intent.required_uses <= entitlement.allowed_uses:
             reason_code = "source_entitlement_use_denied"
+        return _PolicyRightsResolution(
+            reason_code=reason_code,
+            grant=grant,
+            source_policy=source_policy,
+            source_entitlement=entitlement,
+        )
+
+    def evaluate(
+        self,
+        context: SecurityContext,
+        intent: OperationIntent,
+    ) -> AuthorizationDecision:
+        rights = self._resolve_rights(
+            principal_id=context.principal_id,
+            intent=intent,
+            data_protection_classes=context.data_protection_classes,
+        )
+        grant = rights.grant
+        source_policy = rights.source_policy
+        entitlement = rights.source_entitlement
+        reason_code = "authorized"
+        if not context.trusted:
+            reason_code = "identity_untrusted"
+        elif not (context.issued_at <= intent.evaluated_at < context.expires_at):
+            reason_code = "identity_expired"
+        elif context.environment != intent.environment:
+            reason_code = "identity_environment_mismatch"
+        elif intent.action not in context.scopes:
+            reason_code = "identity_scope_missing"
+        else:
+            reason_code = rights.reason_code
         allowed = reason_code == "authorized"
         decision_identity_parts = [
             context.principal_id,

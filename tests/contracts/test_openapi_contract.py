@@ -109,6 +109,7 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "type": "string",
         "format": "uuid",
     }
+    assert source["properties"]["policy_correlation_id"] == {"type": "string"}
     assert "current_policy_decision" in source["required"]
     assert source["properties"]["current_policy_decision"] == {
         "oneOf": [
@@ -121,10 +122,18 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert set(current_decision["required"]) == {
         "evaluation_id",
         "decision_id",
+        "outcome",
         "reason_code",
+        "subject_principal_id",
+        "dataset_id",
+        "prior_evaluation_id",
+        "prior_decision_id",
+        "prior_trace_id",
+        "prior_correlation_id",
         "evaluated_at",
         "valid_until",
         "grant_version_id",
         "source_policy_version_id",
         "source_entitlement_version_id",
+        "evidence_artifact_id",
     }

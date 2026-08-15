@@ -327,21 +327,37 @@ components:
       required:
         - evaluation_id
         - decision_id
+        - outcome
         - reason_code
+        - subject_principal_id
+        - dataset_id
+        - prior_evaluation_id
+        - prior_decision_id
+        - prior_trace_id
+        - prior_correlation_id
         - evaluated_at
         - valid_until
         - grant_version_id
         - source_policy_version_id
         - source_entitlement_version_id
+        - evidence_artifact_id
       properties:
         evaluation_id: {type: string, format: uuid}
         decision_id: {type: string, format: uuid}
+        outcome: {type: string, enum: [allowed, denied]}
         reason_code: {type: string}
+        subject_principal_id: {type: [string, 'null'], format: uuid}
+        dataset_id: {type: string}
+        prior_evaluation_id: {type: string, format: uuid}
+        prior_decision_id: {type: [string, 'null'], format: uuid}
+        prior_trace_id: {type: [string, 'null']}
+        prior_correlation_id: {type: [string, 'null']}
         evaluated_at: {type: string, format: date-time}
         valid_until: {type: string, format: date-time}
         grant_version_id: {type: [string, 'null']}
         source_policy_version_id: {type: [string, 'null']}
         source_entitlement_version_id: {type: [string, 'null']}
+        evidence_artifact_id: {type: string}
     PriceSourceEligibility:
       type: object
       additionalProperties: false
@@ -356,6 +372,7 @@ components:
         - trace_id
         - policy_decision_id
         - policy_evaluation_id
+        - policy_correlation_id
         - policy_valid_until
         - evaluated_at
         - raw_object_id
@@ -384,6 +401,7 @@ components:
         trace_id: {type: string}
         policy_decision_id: {type: string, format: uuid}
         policy_evaluation_id: {type: string, format: uuid}
+        policy_correlation_id: {type: string}
         policy_valid_until: {type: string, format: date-time}
         evaluated_at: {type: string, format: date-time}
         raw_object_id:

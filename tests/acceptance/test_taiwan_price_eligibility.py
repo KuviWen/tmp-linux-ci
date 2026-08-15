@@ -331,6 +331,7 @@ def test_unverified_taiwan_market_dependency_blocks_before_provider_access(
         "trace_id": "trace-p2-trace-tw-01-blocked",
         "policy_decision_id": outcome.policy_decision_id,
         "policy_evaluation_id": outcome.policy_evaluation_id,
+        "policy_correlation_id": "request-ticket-06-blocked",
         "policy_valid_until": "2026-08-15T01:00:00Z",
         "evaluated_at": "2026-08-15T01:00:00Z",
         "raw_object_id": None,

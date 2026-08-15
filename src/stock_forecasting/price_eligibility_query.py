@@ -4,12 +4,14 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from stock_forecasting.authorization import (
-    AuthorizationDecision,
     AuthorizationPolicy,
     OperationIntent,
     PolicyDeniedOutcome,
     SecurityContext,
+    SourceRightsDecision,
+    SourceRightsEvidenceError,
     authorization_audit_payload,
+    source_rights_resolution_failure,
 )
 from stock_forecasting.data_supply import (
     PRICE_RESEARCH_REQUIRED_USES,
@@ -64,7 +66,15 @@ class PriceEligibilityQuery:
             manifest,
             sources,
         )
-        if "policy_blocked" in statuses:
+        current_source_rights_denied = any(
+            isinstance((current := source.get("current_policy_decision")), dict)
+            and current.get("outcome") == "denied"
+            for source in sources
+        )
+        if current_source_rights_denied:
+            status = "policy_blocked"
+            reason_code = "source_rights_not_effective"
+        elif "policy_blocked" in statuses:
             status = "policy_blocked"
             reason_code = (
                 "source_rights_not_effective"
@@ -126,7 +136,7 @@ class PriceEligibilityQuery:
         evaluated_at: datetime,
         trace_id: str,
     ) -> list[dict[str, object]]:
-        decisions: dict[str, AuthorizationDecision] = {}
+        decisions: dict[tuple[str, ...], tuple[SourceRightsDecision, str]] = {}
         projected_sources: list[dict[str, object]] = []
         for source in sources:
             projected = dict(source)
@@ -135,40 +145,83 @@ class PriceEligibilityQuery:
                 projected_sources.append(projected)
                 continue
             evaluation_id = str(source["policy_evaluation_id"])
+            decision_id = str(source["policy_decision_id"])
+            source_id = str(source["source_id"])
+            source_trace_id = str(source["trace_id"])
+            source_correlation_id = str(source.get("policy_correlation_id", ""))
+            decision_key = (
+                evaluation_id,
+                decision_id,
+                source_id,
+                source_trace_id,
+                source_correlation_id,
+            )
+            decision_and_artifact = decisions.get(decision_key)
+            failure_reason = "source_rights_prior_evidence_missing"
             try:
-                decision = decisions.get(evaluation_id)
-                if decision is None:
+                if decision_and_artifact is None:
                     prior_authorization = self._state_store.get_authorization_decision(
                         evaluation_id=evaluation_id
                     )
                     principal_id = prior_authorization.get("principal_id")
                     if not isinstance(principal_id, str):
-                        raise ValueError("source_workload_principal_missing")
-                    decision = self._source_authorization_policy(
-                        principal_id
-                    ).reevaluate_source_workload(
+                        raise SourceRightsEvidenceError("source_rights_prior_evidence_invalid")
+                    failure_reason = "source_rights_policy_unavailable"
+                    policy = self._source_authorization_policy(principal_id)
+                    failure_reason = "source_rights_prior_evidence_invalid"
+                    decision = policy.evaluate_current_source_rights(
                         prior_authorization,
+                        expected_dataset_id=source_id,
+                        expected_evaluation_id=evaluation_id,
+                        expected_decision_id=decision_id,
+                        expected_trace_id=source_trace_id,
+                        expected_correlation_id=source_correlation_id,
                         evaluated_at=evaluated_at,
                         trace_id=trace_id,
                         correlation_id=(
-                            f"{trace_id}:{source['source_id']}:{source['source_mode']}:"
-                            "current-source-rights"
+                            f"{trace_id}:{source_id}:{source['source_mode']}:current-source-rights"
                         ),
                         required_uses=PRICE_RESEARCH_REQUIRED_USES,
                     )
-                    self._state_store.record_authorization_decision(
-                        authorization=authorization_audit_payload(decision),
-                        outcome="allowed" if decision.allowed else "denied",
-                        trace_id=trace_id,
+                    payload = decision.as_payload()
+                    evidence_artifact_id = (
+                        self._state_store.publish_current_source_rights_resolution(
+                            payload=payload,
+                            trace_id=trace_id,
+                        )
                     )
-                    decisions[evaluation_id] = decision
-                projected["current_policy_decision"] = _current_policy_decision_payload(decision)
-                source_rights_allowed = decision.allowed
+                    decision_and_artifact = (decision, evidence_artifact_id)
+                    decisions[decision_key] = decision_and_artifact
+            except SourceRightsEvidenceError as error:
+                failure_reason = error.reason_code
             except (KeyError, ValueError):
-                source_rights_allowed = False
+                pass
+            if decision_and_artifact is None:
+                decision = source_rights_resolution_failure(
+                    dataset_id=source_id,
+                    prior_evaluation_id=evaluation_id,
+                    prior_decision_id=decision_id or None,
+                    prior_trace_id=source_trace_id or None,
+                    prior_correlation_id=source_correlation_id or None,
+                    evaluated_at=evaluated_at,
+                    trace_id=trace_id,
+                    reason_code=failure_reason,
+                )
+                payload = decision.as_payload()
+                evidence_artifact_id = self._state_store.publish_current_source_rights_resolution(
+                    payload=payload,
+                    trace_id=trace_id,
+                )
+                decision_and_artifact = (decision, evidence_artifact_id)
+                decisions[decision_key] = decision_and_artifact
+            decision, evidence_artifact_id = decision_and_artifact
+            projected["current_policy_decision"] = _current_policy_decision_payload(
+                decision,
+                evidence_artifact_id=evidence_artifact_id,
+            )
             source_checks = projected.get("checks")
             checks = dict(source_checks) if isinstance(source_checks, dict) else {}
-            if not source_rights_allowed:
+            if not decision.allowed:
                 checks["policy"] = "blocked"
                 if source["status"] != "deferred":
                     projected["status"] = "policy_blocked"
@@ -222,18 +275,9 @@ def _aggregate_qualification_checks(sources: list[dict[str, object]]) -> dict[st
     return aggregated
 
 
-def _current_policy_decision_payload(decision: AuthorizationDecision) -> dict[str, object]:
-    authorization = authorization_audit_payload(decision)
-    return {
-        field: authorization[field]
-        for field in (
-            "evaluation_id",
-            "decision_id",
-            "reason_code",
-            "evaluated_at",
-            "valid_until",
-            "grant_version_id",
-            "source_policy_version_id",
-            "source_entitlement_version_id",
-        )
-    }
+def _current_policy_decision_payload(
+    decision: SourceRightsDecision,
+    *,
+    evidence_artifact_id: str,
+) -> dict[str, object]:
+    return {**decision.as_payload(), "evidence_artifact_id": evidence_artifact_id}

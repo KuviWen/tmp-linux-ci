@@ -555,6 +555,19 @@ def test_rate_limited_listing_is_deferred_without_claiming_saved_candidate_data(
     assert revoked["reason_code"] == "source_rate_limited"
     assert revoked["checks"]["policy"] == "blocked"
     assert revoked["current_policy_decision"]["reason_code"] == "source_entitlement_revoked"
+    revoked_listing = client.get(
+        f"/api/v1/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    ).json()
+    revoked_ui = client.get(
+        f"/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+    assert revoked_listing["status"] == "policy_blocked"
+    assert revoked_listing["reason_code"] == "source_rights_not_effective"
+    assert revoked_listing["sources"][0]["status"] == "deferred"
+    assert "來源權利已撤銷" in revoked_ui.text
+    assert "先前來源限流" in revoked_ui.text
 
 
 def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
@@ -708,6 +721,38 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
     assert allowed_rest["sources"][0]["current_policy_decision"]["reason_code"] == "authorized"
     assert allowed_operations["items"][0]["status"] == "published"
     assert allowed_operations["items"][0]["current_policy_decision"]["reason_code"] == "authorized"
+
+    def unavailable_source_policy(_principal_id: str) -> AuthorizationPolicy:
+        raise KeyError("current source policy unavailable")
+
+    application.price_eligibility_query = PriceEligibilityQuery(
+        application.state_store,
+        authorization_policy=application.authorization_policy,
+        authorization_time=now,
+        source_authorization_policy=unavailable_source_policy,
+    )
+    unavailable_trace_id = "trace-current-rights-policy-unavailable"
+    unavailable_response = client.get(
+        "/api/v1/operations/sources",
+        headers={**headers, "X-Trace-Id": unavailable_trace_id},
+    )
+
+    assert unavailable_response.status_code == 200
+    unavailable = unavailable_response.json()["items"][0]
+    assert unavailable["status"] == "policy_blocked"
+    assert unavailable["reason_code"] == "source_rights_not_effective"
+    assert (
+        unavailable["current_policy_decision"]["reason_code"] == "source_rights_policy_unavailable"
+    )
+    unavailable_trace = application.state_store.get_trace_evidence(unavailable_trace_id)
+    assert "current_source_rights_resolution" in unavailable_trace["artifact_kinds"]
+    assert (
+        unavailable["current_policy_decision"]["evidence_artifact_id"]
+        in unavailable_trace["artifact_ids"]
+    )
+    unavailable_audit = application.state_store.list_audit_events(trace_id=unavailable_trace_id)
+    assert {event["action"] for event in unavailable_audit} == {"price_research_eligibility.read"}
+
     revoked_policy = AuthorizationPolicy(
         action_grants=collect_policy.action_grants,
         source_policies=(
@@ -754,12 +799,13 @@ def test_current_source_use_revocation_blocks_rest_and_ui_before_policy_expiry(
         operations["items"][0]["current_policy_decision"]["reason_code"]
         == "source_policy_use_denied"
     )
-    current_evaluation_id = operations["items"][0]["current_policy_decision"]["evaluation_id"]
+    current_decision = operations["items"][0]["current_policy_decision"]
+    assert current_decision["dataset_id"] == source_id
     operations_audit = application.state_store.list_audit_events(trace_id=operations_trace_id)
-    assert any(
-        event["evaluation_id"] == current_evaluation_id and event["outcome"] == "denied"
-        for event in operations_audit
-    )
+    assert {event["action"] for event in operations_audit} == {"price_research_eligibility.read"}
+    resolution_trace = application.state_store.get_trace_evidence(operations_trace_id)
+    assert "current_source_rights_resolution" in resolution_trace["artifact_kinds"]
+    assert current_decision["evidence_artifact_id"] in resolution_trace["artifact_ids"]
     assert ui_response.status_code == 200
     assert "資格阻擋" in ui_response.text
     assert "已具研究資格" not in ui_response.text
