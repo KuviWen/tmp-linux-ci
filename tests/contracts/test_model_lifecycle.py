@@ -1,9 +1,11 @@
+import hashlib
 from datetime import UTC, date, datetime
 
 import pytest
 from sqlalchemy import create_engine, func, select
 
 from stock_forecasting.model_governance import (
+    BOOTSTRAP_GATE_POLICY_V1,
     DecideApproval,
     EvaluateBootstrapCandidate,
     GateMeasurement,
@@ -18,7 +20,18 @@ from stock_forecasting.model_governance import (
 )
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import metadata
-from tests.modeling_support import passing_hard_gate_evidence
+from tests.modeling_support import GATE_REPORT_REF, passing_hard_gate_evidence
+
+
+class _VerifiedEvidenceRepository:
+    def is_verified(self, artifact_id: str) -> bool:
+        return artifact_id == GATE_REPORT_REF
+
+
+def _verified_lifecycle(
+    store: InMemoryLifecycleStore | SqlAlchemyLifecycleStore,
+) -> ModelLifecycle:
+    return ModelLifecycle(store, evidence_repository=_VerifiedEvidenceRepository())
 
 
 def _hard_gates(
@@ -62,7 +75,7 @@ def test_bootstrap_gate_rejects_unqualified_candidate_and_tampered_metric_eviden
     )
     evidence = HardGateEvidence.create(
         evidence_kind="formal_evidence",
-        policy_version_id="bootstrap-gate-policy-v1",
+        policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
         evaluation_report_id="sha256:evaluation-candidate-unqualified-evidence",
         evidence_refs=("sha256:gate-report",),
         measurements=(GateMeasurement("qualification.manifest_fraction", 1.0),),
@@ -73,7 +86,7 @@ def test_bootstrap_gate_rejects_unqualified_candidate_and_tampered_metric_eviden
             command_id="gate-unqualified-evidence",
             model_family_id="family-unqualified-evidence",
             candidate_id="candidate-unqualified-evidence",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=evidence,
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
@@ -84,6 +97,39 @@ def test_bootstrap_gate_rejects_unqualified_candidate_and_tampered_metric_eviden
     assert result.gate_decision is not None
     assert "qualification" in result.gate_decision.failed_gates
     assert "hard_gate_evidence" in result.gate_decision.failed_gates
+
+
+def test_bootstrap_policy_is_an_immutable_content_addressed_artifact() -> None:
+    assert BOOTSTRAP_GATE_POLICY_V1.policy_version_id == (
+        f"sha256:{hashlib.sha256(BOOTSTRAP_GATE_POLICY_V1.serialized).hexdigest()}"
+    )
+    assert BOOTSTRAP_GATE_POLICY_V1.thresholds
+
+
+def test_bootstrap_gate_rejects_unresolved_artifact_references() -> None:
+    lifecycle = ModelLifecycle(InMemoryLifecycleStore())
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-unresolved-evidence",
+        model_family_id="family-unresolved-evidence",
+        improvement=12.0,
+    )
+
+    result = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-unresolved-evidence",
+            model_family_id="family-unresolved-evidence",
+            candidate_id="candidate-unresolved-evidence",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates("candidate-unresolved-evidence"),
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "gate_failed"
+    assert result.gate_decision is not None
+    assert result.gate_decision.failed_gates == ("hard_gate_evidence",)
 
 
 def test_in_memory_store_matches_sql_command_replay_and_conflict_contract() -> None:
@@ -144,7 +190,7 @@ def _record_candidate(
 
 def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> None:
     store = InMemoryLifecycleStore()
-    lifecycle = ModelLifecycle(store)
+    lifecycle = _verified_lifecycle(store)
     _record_candidate(
         lifecycle,
         candidate_id="candidate-pass",
@@ -157,7 +203,7 @@ def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> Non
             command_id="gate-pass",
             model_family_id="family-pass",
             candidate_id="candidate-pass",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_hard_gates("candidate-pass"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
@@ -180,7 +226,7 @@ def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> Non
             command_id="gate-fail",
             model_family_id="family-fail",
             candidate_id="candidate-fail",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_hard_gates(
                 "candidate-fail",
                 overrides={"security.critical_finding_count": 1.0},
@@ -206,7 +252,7 @@ def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> Non
 
 
 def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
-    lifecycle = ModelLifecycle(InMemoryLifecycleStore())
+    lifecycle = _verified_lifecycle(InMemoryLifecycleStore())
     _record_candidate(
         lifecycle,
         candidate_id="candidate-approval-conflict",
@@ -218,7 +264,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             command_id="gate-approval-conflict",
             model_family_id="family-approval-conflict",
             candidate_id="candidate-approval-conflict",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_hard_gates("candidate-approval-conflict"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
@@ -232,7 +278,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             candidate_id="candidate-approval-conflict",
             artifact_id="sha256:artifact-candidate-approval-conflict",
             evaluation_report_id="sha256:evaluation-candidate-approval-conflict",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-operator-a",
             decision="approved",
             reason="ready for controlled shadow",
@@ -246,7 +292,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
     assert rejected.approval_decision is not None
     assert rejected.approval_decision.invalidated_reason == ("duty_separation_violation")
 
-    lifecycle = ModelLifecycle(InMemoryLifecycleStore())
+    lifecycle = _verified_lifecycle(InMemoryLifecycleStore())
     _record_candidate(
         lifecycle,
         candidate_id="candidate-approved",
@@ -258,7 +304,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             command_id="gate-approved",
             model_family_id="family-approved",
             candidate_id="candidate-approved",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_hard_gates("candidate-approved"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
@@ -271,7 +317,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             candidate_id="candidate-approved",
             artifact_id="sha256:artifact-candidate-approved",
             evaluation_report_id="sha256:evaluation-candidate-approved",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-approver-c",
             decision="approved",
             reason="exact evidence reviewed for shadow only",
@@ -285,7 +331,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
     assert approved.approval_decision is not None
     assert approved.approval_decision.artifact_id == ("sha256:artifact-candidate-approved")
     assert approved.approval_decision.expected_assignment == ("unassigned")
-    assert approved.approval_decision.expires_at == datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
+    assert approved.approval_decision.expires_at == datetime(2026, 8, 25, 2, 0, tzinfo=UTC)
     assert approved.approval_decision.invalidated_reason is None
 
     stale_assignment = lifecycle.execute(
@@ -295,7 +341,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             candidate_id="candidate-approved",
             artifact_id="sha256:artifact-candidate-approved",
             evaluation_report_id="sha256:evaluation-candidate-approved",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-approver-d",
             decision="approved",
             reason="reviewed against a stale assignment",
@@ -310,9 +356,69 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
     assert stale_assignment.approval_decision.invalidated_reason == ("expected_assignment_changed")
 
 
+def test_rejection_of_exact_evidence_cannot_be_reversed_by_a_later_approval() -> None:
+    lifecycle = _verified_lifecycle(InMemoryLifecycleStore())
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-rejected",
+        model_family_id="family-rejected",
+        improvement=12.0,
+    )
+    lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-rejected",
+            model_family_id="family-rejected",
+            candidate_id="candidate-rejected",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates("candidate-rejected"),
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+    first = lifecycle.execute(
+        DecideApproval(
+            command_id="reject-exact-evidence",
+            model_family_id="family-rejected",
+            candidate_id="candidate-rejected",
+            artifact_id="sha256:artifact-candidate-rejected",
+            evaluation_report_id="sha256:evaluation-candidate-rejected",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            approver_id="model-approver-c",
+            decision="rejected",
+            reason="evidence is not acceptable",
+            expected_assignment="unassigned",
+            expected_version=2,
+            occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+        )
+    )
+    reversal = lifecycle.execute(
+        DecideApproval(
+            command_id="attempt-reversal",
+            model_family_id="family-rejected",
+            candidate_id="candidate-rejected",
+            artifact_id="sha256:artifact-candidate-rejected",
+            evaluation_report_id="sha256:evaluation-candidate-rejected",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            approver_id="model-approver-d",
+            decision="approved",
+            reason="attempting to reverse the same decision",
+            expected_assignment="unassigned",
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 19, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert first.status == "approval_rejected"
+    assert first.approval_decision is not None
+    assert first.approval_decision.invalidated_reason == "approver_rejected"
+    assert reversal.status == "approval_rejected"
+    assert reversal.approval_decision is not None
+    assert reversal.approval_decision.invalidated_reason == "prior_rejection_irreversible"
+
+
 def _approved_lifecycle() -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
     store = InMemoryLifecycleStore()
-    lifecycle = ModelLifecycle(store)
+    lifecycle = _verified_lifecycle(store)
     _record_candidate(
         lifecycle,
         candidate_id="candidate-shadow",
@@ -324,7 +430,7 @@ def _approved_lifecycle() -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
             command_id="gate-shadow",
             model_family_id="family-shadow",
             candidate_id="candidate-shadow",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_hard_gates("candidate-shadow"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
@@ -337,7 +443,7 @@ def _approved_lifecycle() -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
             candidate_id="candidate-shadow",
             artifact_id="sha256:artifact-candidate-shadow",
             evaluation_report_id="sha256:evaluation-candidate-shadow",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-approver-c",
             decision="approved",
             reason="approved for five controlled shadow cycles",
@@ -429,7 +535,7 @@ def test_bootstrap_policy_is_permanently_disabled_after_first_assignment() -> No
             "family-ever-assigned": ("assignment-created-by-ticket-10",)
         }
     )
-    lifecycle = ModelLifecycle(store)
+    lifecycle = _verified_lifecycle(store)
     _record_candidate(
         lifecycle,
         candidate_id="candidate-after-assignment",
@@ -442,7 +548,7 @@ def test_bootstrap_policy_is_permanently_disabled_after_first_assignment() -> No
             command_id="gate-after-assignment",
             model_family_id="family-ever-assigned",
             candidate_id="candidate-after-assignment",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_hard_gates("candidate-after-assignment"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
@@ -459,7 +565,7 @@ def test_bootstrap_policy_is_permanently_disabled_after_first_assignment() -> No
 def test_sql_lifecycle_store_preserves_append_only_state_across_instances() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     metadata.create_all(engine)
-    first_lifecycle = ModelLifecycle(SqlAlchemyLifecycleStore(engine))
+    first_lifecycle = _verified_lifecycle(SqlAlchemyLifecycleStore(engine))
     _record_candidate(
         first_lifecycle,
         candidate_id="candidate-sql",
@@ -468,13 +574,13 @@ def test_sql_lifecycle_store_preserves_append_only_state_across_instances() -> N
     )
 
     second_store = SqlAlchemyLifecycleStore(engine)
-    second_lifecycle = ModelLifecycle(second_store)
+    second_lifecycle = _verified_lifecycle(second_store)
     result = second_lifecycle.execute(
         EvaluateBootstrapCandidate(
             command_id="gate-sql",
             model_family_id="family-sql",
             candidate_id="candidate-sql",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_hard_gates("candidate-sql"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),

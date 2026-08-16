@@ -1,14 +1,14 @@
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
-from stock_forecasting.data_supply import HistoricalAvailabilityClaim
 from stock_forecasting.forecast_lab import (
     ForecastLab,
     HistoricalClaimRef,
     Market,
     TrainingIntentRef,
 )
-from stock_forecasting.forecasting import FeatureBatch, FeatureRow
+from stock_forecasting.forecasting import FeatureBatch, FeatureRow, HistoricalTrainingLineage
 from tests.modeling_support import engineering_model_history
 
 
@@ -121,6 +121,18 @@ def test_forecast_lab_builds_reproducible_dual_market_bootstrap_evidence() -> No
     assert bundle.primary_artifact.evaluation_report_id == (
         bundle.evaluation_report.evaluation_report_id
     )
+    all_artifacts = bundle.logistic_artifacts + bundle.class_prior_artifacts
+    assert all(len(artifact.calibrator_ids) == 6 for artifact in all_artifacts)
+    for artifact in all_artifacts:
+        serialized_calibrator_ids = tuple(
+            item["calibrator_id"] for item in json.loads(artifact.serialized)["calibrators"]
+        )
+        assert serialized_calibrator_ids == artifact.calibrator_ids
+    assert (
+        bundle.class_prior_artifacts[0].calibrator_ids
+        != bundle.logistic_artifacts[0].calibrator_ids
+    )
+    assert len({artifact.calibrator_ids for artifact in bundle.logistic_artifacts}) == 3
     assert bundle.evaluation_report.logistic_equal_cell_macro_f1 >= 0.99
     assert bundle.evaluation_report.class_prior_equal_cell_macro_f1 < 0.50
     assert bundle.evaluation_report.improvement_percentage_points >= 1.0
@@ -219,33 +231,47 @@ def test_formal_candidate_requires_verified_ticket_08_historical_claim_chain() -
 
 
 def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> None:
-    verified_claim_ids: list[str] = []
+    verified_lineages: list[HistoricalTrainingLineage] = []
 
     class VerifiedClaimBoundary:
-        def is_formally_reconstructable(
-            self, *, claim_id: str, claim: HistoricalAvailabilityClaim
+        def verify_training_lineage(
+            self,
+            *,
+            lineage: HistoricalTrainingLineage,
+            feature_batch: FeatureBatch,
         ) -> bool:
-            verified_claim_ids.append(claim_id)
-            return claim.evidence_status == "qualified"
+            verified_lineages.append(lineage)
+            return (
+                lineage.feature_batch_id == feature_batch.feature_batch_id
+                and lineage.source_policy_manifest_id == feature_batch.source_policy_manifest_id
+                and lineage.label_manifest_id == feature_batch.label_manifest_id
+                and lineage.fold_manifest_id == feature_batch.fold_manifest_id
+            )
 
-    def claim_ref(market: Market) -> HistoricalClaimRef:
-        claim = HistoricalAvailabilityClaim(
-            source_id=f"source-{market.lower()}",
-            evidence_level="platform_observed",
-            evidence_status="qualified",
-            observed_start=date(2023, 1, 2),
-            observed_end=date(2025, 12, 31),
-            schema_version="1.0.0",
-            exact_sessions_verified=True,
-            integrity_verified=True,
-            company_actions_verified=True,
-            listing_lifecycle_verified=True,
-            qualification_artifact_id=f"sha256:qualification-{market.lower()}",
-        )
-        return HistoricalClaimRef(
+    batch = engineering_model_history()
+
+    def lineage(market: Market) -> HistoricalTrainingLineage:
+        return HistoricalTrainingLineage(
             market=market,
             claim_id=f"sha256:claim-{market.lower()}",
-            claim=claim,
+            dataset_version_id=f"sha256:dataset-{market.lower()}",
+            adjustment_version_id=f"sha256:adjustment-{market.lower()}",
+            mature_labels_id=f"sha256:labels-{market.lower()}",
+            feature_snapshot_id=f"sha256:snapshot-{market.lower()}",
+            qualification_fold_manifest_id=f"sha256:qualification-fold-{market.lower()}",
+            source_policy_id=f"sha256:source-policy-{market.lower()}",
+            feature_batch_id=batch.feature_batch_id,
+            source_policy_manifest_id=batch.source_policy_manifest_id,
+            label_manifest_id=batch.label_manifest_id,
+            fold_manifest_id=batch.fold_manifest_id,
+        )
+
+    lineages = (lineage("XTAI"), lineage("XNAS"))
+
+    def claim_ref(item: HistoricalTrainingLineage) -> HistoricalClaimRef:
+        return HistoricalClaimRef(
+            market=item.market,
+            claim_id=item.claim_id,
         )
 
     intent = TrainingIntentRef(
@@ -254,9 +280,9 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
         initiated_by="model-operator-a",
         executed_by="model-operator-b",
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
-        feature_batch=engineering_model_history(),
+        feature_batch=replace(batch, historical_lineage=lineages),
         preregistered_seeds=(17, 29, 43),
-        historical_claims=(claim_ref("XTAI"), claim_ref("XNAS")),
+        historical_claims=tuple(claim_ref(item) for item in lineages),
     )
 
     outcome = ForecastLab(historical_claim_verifier=VerifiedClaimBoundary()).develop(intent)
@@ -264,4 +290,34 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
     assert outcome.status == "developed"
     assert outcome.candidate_bundle is not None
     assert outcome.candidate_bundle.formal_qualification is True
-    assert verified_claim_ids == ["sha256:claim-xtai", "sha256:claim-xnas"]
+    assert verified_lineages == list(lineages)
+
+
+def test_verified_claim_ids_cannot_qualify_an_unrelated_feature_batch() -> None:
+    class PermissiveClaimBoundary:
+        def verify_training_lineage(
+            self,
+            *,
+            lineage: HistoricalTrainingLineage,
+            feature_batch: FeatureBatch,
+        ) -> bool:
+            return True
+
+    intent = TrainingIntentRef(
+        training_intent_id="intent-unbound-formal-history",
+        model_family_id="dual-market-price-baseline-v1",
+        initiated_by="model-operator-a",
+        executed_by="model-operator-b",
+        created_at=datetime(2026, 8, 17, tzinfo=UTC),
+        feature_batch=engineering_model_history(),
+        preregistered_seeds=(17, 29, 43),
+        historical_claims=(
+            HistoricalClaimRef("XTAI", "sha256:claim-xtai"),
+            HistoricalClaimRef("XNAS", "sha256:claim-xnas"),
+        ),
+    )
+
+    outcome = ForecastLab(historical_claim_verifier=PermissiveClaimBoundary()).develop(intent)
+
+    assert outcome.status == "blocked"
+    assert outcome.blocked_reasons == ("unverified_source_basis",)

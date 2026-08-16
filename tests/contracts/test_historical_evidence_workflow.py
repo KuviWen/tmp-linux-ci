@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -21,6 +22,7 @@ from stock_forecasting.authorization import (
     SourceUseRight,
 )
 from stock_forecasting.data_supply import HistoricalAvailabilityClaim
+from stock_forecasting.forecasting import FeatureBatch, HistoricalTrainingLineage
 from stock_forecasting.historical_evidence import (
     HistoricalEvidenceAttestationCommand,
     HistoricalEvidenceAttestationIssuer,
@@ -996,6 +998,34 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
     assert report["display_mode"] == "historical_reconstruction"
     assert report["production_prediction"] is False
     assert report["exclusion_reasons"] == []
+    batch = FeatureBatch(
+        feature_batch_id="sha256:formal-feature-batch",
+        source_policy_manifest_id="sha256:formal-source-policy-manifest",
+        label_manifest_id="sha256:formal-label-manifest",
+        fold_manifest_id="sha256:formal-fold-basis-manifest",
+        cost_manifest_id="sha256:formal-cost-manifest",
+        rows=(),
+    )
+    lineage = HistoricalTrainingLineage(
+        market="XNAS",
+        claim_id=str(outcome.claim_id),
+        dataset_version_id=outcome.artifact_ids["dataset"],
+        adjustment_version_id=outcome.artifact_ids["adjustment_version"],
+        mature_labels_id=outcome.artifact_ids["mature_labels"],
+        feature_snapshot_id=outcome.artifact_ids["feature_snapshot"],
+        qualification_fold_manifest_id=outcome.artifact_ids["fold_manifest"],
+        source_policy_id="ticket-08/official-us-archive-policy-v1",
+        feature_batch_id=batch.feature_batch_id,
+        source_policy_manifest_id=batch.source_policy_manifest_id,
+        label_manifest_id=batch.label_manifest_id,
+        fold_manifest_id=batch.fold_manifest_id,
+    )
+    verifier = QualifiedHistoricalAvailabilityClaimVerifier(state_store, evaluated_at=now)
+    assert verifier.verify_training_lineage(lineage=lineage, feature_batch=batch)
+    assert not verifier.verify_training_lineage(
+        lineage=replace(lineage, dataset_version_id="sha256:unrelated-dataset"),
+        feature_batch=batch,
+    )
     dataset_lineage = state_store.get_canonical_artifact(outcome.artifact_ids["dataset"])["payload"]
     assert isinstance(dataset_lineage, dict)
     dataset_object_id = str(dataset_lineage["dataset_object_id"])

@@ -132,7 +132,7 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
         TrainingRequest(
             feature_batch=batch,
             training_row_ids=tuple(row.row_id for row in rows[:-1]),
-            validation_row_ids=("validation-flat",),
+            validation_row_ids=(),
             seed=17,
         )
     )

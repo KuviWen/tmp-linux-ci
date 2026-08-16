@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 
 from fastapi.testclient import TestClient
 
@@ -11,7 +12,13 @@ from stock_forecasting.bootstrap_workflow import (
     BootstrapGovernanceWorkflow,
 )
 from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
-from tests.modeling_support import engineering_model_history, passing_hard_gate_evidence
+from stock_forecasting.model_governance import BOOTSTRAP_GATE_POLICY_V1
+from tests.modeling_support import (
+    GATE_REPORT_CONTENT,
+    GATE_REPORT_REF,
+    engineering_model_history,
+    passing_hard_gate_evidence,
+)
 
 
 def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -> None:
@@ -24,6 +31,11 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
         expires_at=now + timedelta(hours=2),
     )
     application = build_test_application(observed_at=now, local_identity=approver)
+    application.governance_object_repository.put_verified(
+        BytesIO(GATE_REPORT_CONTENT),
+        expected_checksum=GATE_REPORT_REF.removeprefix("sha256:"),
+        metadata={"content_type": "application/json", "object_kind": "gate_report"},
+    )
     intent = TrainingIntentRef(
         training_intent_id="intent-ticket-09-engineering",
         model_family_id="dual-market-price-baseline-v1",
@@ -42,7 +54,7 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
         BootstrapGovernanceCommand(
             command_id_prefix="ticket-09-engineering",
             intent=intent,
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=passing_hard_gate_evidence(preview.evaluation_report.evaluation_report_id),
             expected_version=0,
             occurred_at=now - timedelta(hours=1),
@@ -84,7 +96,7 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
                 model_family_id="dual-market-price-baseline-formal-v1",
                 execution_purpose="formal_candidate",
             ),
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=passing_hard_gate_evidence(preview.evaluation_report.evaluation_report_id),
             expected_version=0,
             occurred_at=now,
@@ -106,7 +118,7 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
                 model_family_id="dual-market-price-baseline-model-failure-v1",
                 feature_batch=replace(intent.feature_batch, rows=malformed_rows),
             ),
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=passing_hard_gate_evidence(preview.evaluation_report.evaluation_report_id),
             expected_version=0,
             occurred_at=now,

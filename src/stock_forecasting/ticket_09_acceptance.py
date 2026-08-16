@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -14,11 +15,15 @@ from stock_forecasting.bootstrap_workflow import (
 from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
 from stock_forecasting.forecasting import FeatureBatch, FeatureRow, TrendLabel
 from stock_forecasting.model_governance import (
+    BOOTSTRAP_GATE_POLICY_V1,
     GateMeasurement,
     HardGateEvidence,
     ModelLifecycle,
+    ObjectGateEvidenceRepository,
+    ObjectGatePolicyRepository,
     SqlAlchemyLifecycleStore,
 )
+from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 
 
@@ -94,7 +99,7 @@ def _engineering_hard_gate_evidence(evaluation_report_id: str) -> HardGateEviden
     }
     return HardGateEvidence.create(
         evidence_kind="engineering_example",
-        policy_version_id="bootstrap-gate-policy-v1",
+        policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
         evaluation_report_id=evaluation_report_id,
         evidence_refs=("sha256:engineering-only-gate-report",),
         measurements=tuple(GateMeasurement(name, value) for name, value in measurements.items()),
@@ -136,11 +141,23 @@ def run_ticket_09_acceptance(
     base_url: str,
     key_file: Path,
 ) -> dict[str, object]:
-    del object_root
     identity = LocalApiKeyIdentity.load(key_file)
     store = StateStore(database_url, create_schema=False)
     lifecycle_store = SqlAlchemyLifecycleStore(store.engine)
-    lifecycle = ModelLifecycle(lifecycle_store)
+    governance_object_repository = FilesystemObjectRepository(object_root / "mg")
+    governance_object_repository.put_verified(
+        BytesIO(BOOTSTRAP_GATE_POLICY_V1.serialized),
+        expected_checksum=BOOTSTRAP_GATE_POLICY_V1.policy_version_id.removeprefix("sha256:"),
+        metadata={
+            "content_type": "application/json",
+            "object_kind": "bootstrap_gate_policy_version",
+        },
+    )
+    lifecycle = ModelLifecycle(
+        lifecycle_store,
+        policy_repository=ObjectGatePolicyRepository(governance_object_repository),
+        evidence_repository=ObjectGateEvidenceRepository(governance_object_repository),
+    )
     workflow = BootstrapGovernanceWorkflow(ForecastLab(), lifecycle)
     governance_time = datetime.now(UTC)
     intent = TrainingIntentRef(
@@ -160,7 +177,7 @@ def run_ticket_09_acceptance(
         BootstrapGovernanceCommand(
             command_id_prefix="ticket-09-engineering-v1",
             intent=intent,
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_engineering_hard_gate_evidence(
                 preview.evaluation_report.evaluation_report_id
             ),
@@ -195,7 +212,7 @@ def run_ticket_09_acceptance(
                 model_family_id="dual-market-price-baseline-formal-v1",
                 execution_purpose="formal_candidate",
             ),
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_engineering_hard_gate_evidence(
                 preview.evaluation_report.evaluation_report_id
             ),

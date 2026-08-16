@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Literal, Protocol, cast
+from types import MappingProxyType
+from typing import BinaryIO, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import func, select
@@ -76,7 +78,7 @@ class HardGateEvidence:
 
 
 @dataclass(frozen=True)
-class _GateThreshold:
+class GateThreshold:
     category: str
     comparison: Literal["at_least", "at_most"]
     limit: float
@@ -87,41 +89,167 @@ class _GateThreshold:
         return value <= self.limit
 
 
-_BOOTSTRAP_GATE_POLICY_V1: dict[str, _GateThreshold] = {
-    "qualification.manifest_fraction": _GateThreshold("qualification", "at_least", 1.0),
-    "point_in_time.contract_fraction": _GateThreshold("point_in_time", "at_least", 1.0),
-    "leakage.contract_fraction": _GateThreshold("leakage", "at_least", 1.0),
-    "calibration.equal_cell_ece": _GateThreshold("calibration", "at_most", 0.05),
-    "calibration.max_full_support_cell_ece": _GateThreshold("calibration", "at_most", 0.08),
-    "calibration.max_degraded_support_cell_ece": _GateThreshold("calibration", "at_most", 0.10),
-    "calibration.sufficient_calibrator_count": _GateThreshold("calibration", "at_least", 6.0),
-    "calibration.identity_fallback_count": _GateThreshold("calibration", "at_most", 0.0),
-    "calibration.nll_degradation_fraction": _GateThreshold("calibration", "at_most", 0.0),
-    "calibration.brier_degradation_fraction": _GateThreshold("calibration", "at_most", 0.0),
-    "economics.positive_market_rank_ic_count": _GateThreshold("economics", "at_least", 2.0),
-    "economics.positive_cell_rank_ic_count": _GateThreshold("economics", "at_least", 4.0),
-    "economics.ic_information_ratio": _GateThreshold("economics", "at_least", 0.30),
-    "economics.nonnegative_market_excess_count": _GateThreshold("economics", "at_least", 2.0),
-    "economics.nonnegative_cell_excess_count": _GateThreshold("economics", "at_least", 4.0),
-    "economics.drawdown_worsening_points": _GateThreshold("economics", "at_most", 2.0),
-    "stability.noninferior_quarter_count": _GateThreshold("stability", "at_least", 6.0),
-    "stability.max_consecutive_lagging_quarters": _GateThreshold("stability", "at_most", 2.0),
-    "stability.seed_macro_f1_std_points": _GateThreshold("stability", "at_most", 1.0),
-    "stability.worst_seed_delta_points": _GateThreshold("stability", "at_least", 0.0),
-    "coverage.large_slice_max_decline_points": _GateThreshold("coverage", "at_most", 2.0),
-    "coverage.degraded_coverage_decline_points": _GateThreshold("coverage", "at_most", 5.0),
-    "coverage.degraded_macro_f1_decline_points": _GateThreshold("coverage", "at_most", 2.0),
-    "operational.trainable_parameter_count": _GateThreshold("operational", "at_most", 15_000_000.0),
-    "operational.cpu_prediction_minutes": _GateThreshold("operational", "at_most", 10.0),
-    "operational.daily_pipeline_minutes": _GateThreshold("operational", "at_most", 120.0),
-    "security.safe_artifact_fraction": _GateThreshold("security", "at_least", 1.0),
-    "security.critical_finding_count": _GateThreshold("security", "at_most", 0.0),
-    "security.artifact_corruption_count": _GateThreshold("security", "at_most", 0.0),
-    "reproducibility.sample_replay_fraction": _GateThreshold("reproducibility", "at_least", 1.0),
-    "reproducibility.cpu_probability_max_delta": _GateThreshold(
-        "reproducibility", "at_most", 0.000001
-    ),
-}
+@dataclass(frozen=True)
+class BootstrapGatePolicyVersion:
+    policy_version_id: str
+    policy_name: str
+    thresholds: tuple[tuple[str, GateThreshold], ...]
+    serialized: bytes
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        policy_name: str,
+        thresholds: Mapping[str, GateThreshold],
+    ) -> BootstrapGatePolicyVersion:
+        ordered = tuple(sorted(thresholds.items()))
+        payload = {
+            "policy_name": policy_name,
+            "thresholds": [
+                {
+                    "name": name,
+                    "category": threshold.category,
+                    "comparison": threshold.comparison,
+                    "limit": threshold.limit,
+                }
+                for name, threshold in ordered
+            ],
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return cls(
+            policy_version_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
+            policy_name=policy_name,
+            thresholds=ordered,
+            serialized=serialized,
+        )
+
+    @classmethod
+    def from_serialized(
+        cls, policy_version_id: str, serialized: bytes
+    ) -> BootstrapGatePolicyVersion:
+        payload = cast(dict[str, object], json.loads(serialized))
+        raw_thresholds = cast(list[dict[str, object]], payload["thresholds"])
+        policy = cls.create(
+            policy_name=str(payload["policy_name"]),
+            thresholds={
+                str(item["name"]): GateThreshold(
+                    category=str(item["category"]),
+                    comparison=cast(Literal["at_least", "at_most"], item["comparison"]),
+                    limit=float(cast(float, item["limit"])),
+                )
+                for item in raw_thresholds
+            },
+        )
+        if policy.policy_version_id != policy_version_id or policy.serialized != serialized:
+            raise ValueError("gate_policy_checksum_mismatch")
+        return policy
+
+
+_BOOTSTRAP_THRESHOLDS_V1: Mapping[str, GateThreshold] = MappingProxyType(
+    {
+        "qualification.manifest_fraction": GateThreshold("qualification", "at_least", 1.0),
+        "point_in_time.contract_fraction": GateThreshold("point_in_time", "at_least", 1.0),
+        "leakage.contract_fraction": GateThreshold("leakage", "at_least", 1.0),
+        "calibration.equal_cell_ece": GateThreshold("calibration", "at_most", 0.05),
+        "calibration.max_full_support_cell_ece": GateThreshold("calibration", "at_most", 0.08),
+        "calibration.max_degraded_support_cell_ece": GateThreshold("calibration", "at_most", 0.10),
+        "calibration.sufficient_calibrator_count": GateThreshold("calibration", "at_least", 6.0),
+        "calibration.identity_fallback_count": GateThreshold("calibration", "at_most", 0.0),
+        "calibration.nll_degradation_fraction": GateThreshold("calibration", "at_most", 0.0),
+        "calibration.brier_degradation_fraction": GateThreshold("calibration", "at_most", 0.0),
+        "economics.positive_market_rank_ic_count": GateThreshold("economics", "at_least", 2.0),
+        "economics.positive_cell_rank_ic_count": GateThreshold("economics", "at_least", 4.0),
+        "economics.ic_information_ratio": GateThreshold("economics", "at_least", 0.30),
+        "economics.nonnegative_market_excess_count": GateThreshold("economics", "at_least", 2.0),
+        "economics.nonnegative_cell_excess_count": GateThreshold("economics", "at_least", 4.0),
+        "economics.drawdown_worsening_points": GateThreshold("economics", "at_most", 2.0),
+        "stability.noninferior_quarter_count": GateThreshold("stability", "at_least", 6.0),
+        "stability.max_consecutive_lagging_quarters": GateThreshold("stability", "at_most", 2.0),
+        "stability.seed_macro_f1_std_points": GateThreshold("stability", "at_most", 1.0),
+        "stability.worst_seed_delta_points": GateThreshold("stability", "at_least", 0.0),
+        "coverage.large_slice_max_decline_points": GateThreshold("coverage", "at_most", 2.0),
+        "coverage.degraded_coverage_decline_points": GateThreshold("coverage", "at_most", 5.0),
+        "coverage.degraded_macro_f1_decline_points": GateThreshold("coverage", "at_most", 2.0),
+        "operational.trainable_parameter_count": GateThreshold(
+            "operational", "at_most", 15_000_000.0
+        ),
+        "operational.cpu_prediction_minutes": GateThreshold("operational", "at_most", 10.0),
+        "operational.daily_pipeline_minutes": GateThreshold("operational", "at_most", 120.0),
+        "security.safe_artifact_fraction": GateThreshold("security", "at_least", 1.0),
+        "security.critical_finding_count": GateThreshold("security", "at_most", 0.0),
+        "security.artifact_corruption_count": GateThreshold("security", "at_most", 0.0),
+        "reproducibility.sample_replay_fraction": GateThreshold("reproducibility", "at_least", 1.0),
+        "reproducibility.cpu_probability_max_delta": GateThreshold(
+            "reproducibility", "at_most", 0.000001
+        ),
+    }
+)
+
+BOOTSTRAP_GATE_POLICY_V1 = BootstrapGatePolicyVersion.create(
+    policy_name="bootstrap-gate-policy-v1",
+    thresholds=_BOOTSTRAP_THRESHOLDS_V1,
+)
+
+
+class GatePolicyRepository(Protocol):
+    def get(self, policy_version_id: str) -> BootstrapGatePolicyVersion: ...
+
+
+class GateEvidenceRepository(Protocol):
+    def is_verified(self, artifact_id: str) -> bool: ...
+
+
+class ContentAddressedObjectRepository(Protocol):
+    def open_by_id(self, object_id: str) -> BinaryIO: ...
+
+
+class InMemoryGatePolicyRepository:
+    def __init__(self, policies: tuple[BootstrapGatePolicyVersion, ...]) -> None:
+        self._policies = {policy.policy_version_id: policy for policy in policies}
+
+    def get(self, policy_version_id: str) -> BootstrapGatePolicyVersion:
+        try:
+            return self._policies[policy_version_id]
+        except KeyError as error:
+            raise KeyError(policy_version_id) from error
+
+
+class ObjectGatePolicyRepository:
+    def __init__(
+        self,
+        objects: ContentAddressedObjectRepository | Callable[[], ContentAddressedObjectRepository],
+    ) -> None:
+        self._objects = objects
+
+    def get(self, policy_version_id: str) -> BootstrapGatePolicyVersion:
+        try:
+            objects = self._objects() if callable(self._objects) else self._objects
+            serialized = objects.open_by_id(policy_version_id).read()
+            return BootstrapGatePolicyVersion.from_serialized(policy_version_id, serialized)
+        except (FileNotFoundError, OSError, ValueError) as error:
+            raise KeyError(policy_version_id) from error
+
+
+class ObjectGateEvidenceRepository:
+    def __init__(
+        self,
+        objects: ContentAddressedObjectRepository | Callable[[], ContentAddressedObjectRepository],
+    ) -> None:
+        self._objects = objects
+
+    def is_verified(self, artifact_id: str) -> bool:
+        try:
+            objects = self._objects() if callable(self._objects) else self._objects
+            objects.open_by_id(artifact_id).read()
+        except (FileNotFoundError, OSError, ValueError):
+            return False
+        return True
+
+
+class UnavailableGateEvidenceRepository:
+    def is_verified(self, artifact_id: str) -> bool:
+        return False
 
 
 @dataclass(frozen=True)
@@ -599,8 +727,18 @@ class ModelLifecycle:
         "reproducibility",
     )
 
-    def __init__(self, store: LifecycleStore) -> None:
+    def __init__(
+        self,
+        store: LifecycleStore,
+        *,
+        policy_repository: GatePolicyRepository | None = None,
+        evidence_repository: GateEvidenceRepository | None = None,
+    ) -> None:
         self._store = store
+        self._policy_repository = policy_repository or InMemoryGatePolicyRepository(
+            (BOOTSTRAP_GATE_POLICY_V1,)
+        )
+        self._evidence_repository = evidence_repository or UnavailableGateEvidenceRepository()
 
     def execute(self, command: LifecycleCommand) -> LifecycleResult:
         if isinstance(command, RecordCandidate):
@@ -655,24 +793,31 @@ class ModelLifecycle:
         ):
             failed_gates.append("calibration_support")
         evidence = command.hard_gates
+        try:
+            policy = self._policy_repository.get(command.policy_version_id)
+        except KeyError:
+            policy = None
+        thresholds = dict(policy.thresholds) if policy is not None else {}
         evidence_is_valid = (
-            evidence.evidence_kind == "formal_evidence"
+            policy is not None
+            and evidence.evidence_kind == "formal_evidence"
             and evidence.policy_version_id == command.policy_version_id
             and evidence.evaluation_report_id == candidate["evaluation_report_id"]
             and evidence.is_content_addressed()
             and bool(evidence.evidence_refs)
-            and all(reference.startswith("sha256:") for reference in evidence.evidence_refs)
-            and {item.name for item in evidence.measurements} == set(_BOOTSTRAP_GATE_POLICY_V1)
+            and all(
+                self._evidence_repository.is_verified(reference)
+                for reference in evidence.evidence_refs
+            )
+            and {item.name for item in evidence.measurements} == set(thresholds)
         )
-        if command.policy_version_id != "bootstrap-gate-policy-v1" or not evidence_is_valid:
+        if not evidence_is_valid:
             failed_gates.append("hard_gate_evidence")
         else:
             failed_categories = {
                 threshold.category
                 for measurement in evidence.measurements
-                if not (threshold := _BOOTSTRAP_GATE_POLICY_V1[measurement.name]).passes(
-                    measurement.value
-                )
+                if not (threshold := thresholds[measurement.name]).passes(measurement.value)
             }
             failed_gates.extend(
                 category for category in self._gate_names if category in failed_categories
@@ -724,8 +869,8 @@ class ModelLifecycle:
 
     def _decide_approval(self, command: DecideApproval) -> LifecycleResult:
         candidate = self._candidate(command.model_family_id, command.candidate_id)
-        gate_event, gate = self._passed_gate(command.model_family_id, command.candidate_id)
-        expires_at = gate_event.occurred_at + timedelta(days=7)
+        _, gate = self._passed_gate(command.model_family_id, command.candidate_id)
+        expires_at = command.occurred_at + timedelta(days=7)
         invalidated_reason: str | None = None
         if command.approver_id in {
             candidate["intent_initiator"],
@@ -740,8 +885,8 @@ class ModelLifecycle:
             invalidated_reason = "evidence_reference_mismatch"
         elif command.expected_assignment != self._current_assignment(command.model_family_id):
             invalidated_reason = "expected_assignment_changed"
-        elif command.occurred_at > expires_at:
-            invalidated_reason = "approval_expired"
+        elif self._has_irreversible_rejection(command):
+            invalidated_reason = "prior_rejection_irreversible"
         elif not command.reason.strip():
             invalidated_reason = "reason_required"
         elif command.decision == "rejected":
@@ -755,6 +900,7 @@ class ModelLifecycle:
             "evaluation_report_id": command.evaluation_report_id,
             "policy_version_id": command.policy_version_id,
             "approver_id": command.approver_id,
+            "requested_decision": command.decision,
             "decision": effective_decision,
             "reason": command.reason,
             "expected_assignment": command.expected_assignment,
@@ -791,6 +937,22 @@ class ModelLifecycle:
             approval_decision=decision,
         )
 
+    def _has_irreversible_rejection(self, command: DecideApproval) -> bool:
+        for event in self._store.events(command.model_family_id):
+            if event.event_kind != "ApprovalDecisionRecorded":
+                continue
+            payload = json.loads(event.payload_json)
+            if (
+                payload.get("candidate_id") == command.candidate_id
+                and payload.get("artifact_id") == command.artifact_id
+                and payload.get("evaluation_report_id") == command.evaluation_report_id
+                and payload.get("policy_version_id") == command.policy_version_id
+                and payload.get("requested_decision") == "rejected"
+                and payload.get("invalidated_reason") == "approver_rejected"
+            ):
+                return True
+        return False
+
     def _current_assignment(self, model_family_id: str) -> str:
         assignments = self._store.production_assignments(model_family_id)
         return assignments[-1] if assignments else "unassigned"
@@ -824,7 +986,7 @@ class ModelLifecycle:
         blocked_reason: str | None = None
         if approval["decision"] != "approved" or approval["invalidated_reason"] is not None:
             blocked_reason = "approval_not_valid"
-        elif command.occurred_at > expires_at:
+        elif command.occurred_at >= expires_at:
             blocked_reason = "approval_expired"
         elif approval["expected_assignment"] != self._current_assignment(command.model_family_id):
             blocked_reason = "expected_assignment_changed"

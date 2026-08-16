@@ -5,16 +5,15 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime
-from math import log
 from typing import Literal, Protocol, cast
 
-from stock_forecasting.contracts import ProbabilityVector
-from stock_forecasting.data_supply import HistoricalAvailabilityClaim
 from stock_forecasting.forecasting import (
+    CalibrationEvidence,
     ClassPriorTrendForecaster,
     FeatureBatch,
     FeatureRow,
     ForecastPrediction,
+    HistoricalTrainingLineage,
     ModelArtifact,
     PredictionRequest,
     RegularizedMultinomialLogisticTrendForecaster,
@@ -41,24 +40,23 @@ def _content_id(kind: str, payload: object) -> str:
 class HistoricalClaimRef:
     market: Market
     claim_id: str
-    claim: HistoricalAvailabilityClaim
 
 
 class FormalHistoricalClaimVerifier(Protocol):
-    def is_formally_reconstructable(
+    def verify_training_lineage(
         self,
         *,
-        claim_id: str,
-        claim: HistoricalAvailabilityClaim,
+        lineage: HistoricalTrainingLineage,
+        feature_batch: FeatureBatch,
     ) -> bool: ...
 
 
 class _UnavailableHistoricalClaimVerifier:
-    def is_formally_reconstructable(
+    def verify_training_lineage(
         self,
         *,
-        claim_id: str,
-        claim: HistoricalAvailabilityClaim,
+        lineage: HistoricalTrainingLineage,
+        feature_batch: FeatureBatch,
     ) -> bool:
         return False
 
@@ -96,20 +94,6 @@ class FoldManifest:
     actual_history_end: date
     purge_sessions: int = 20
     embargo_sessions: int = 20
-
-
-@dataclass(frozen=True)
-class CalibrationEvidence:
-    calibrator_id: str
-    market: Market
-    horizon_sessions: Horizon
-    status: Literal["sufficient_data", "insufficient_data"]
-    sample_count: int
-    class_counts: tuple[int, ...]
-    temperature: float
-    fit_method: Literal["temperature_scaling"]
-    pre_nll: float
-    post_nll: float
 
 
 @dataclass(frozen=True)
@@ -153,9 +137,15 @@ class ForecastLab:
         self,
         *,
         historical_claim_verifier: FormalHistoricalClaimVerifier | None = None,
+        class_prior_forecaster: TrendForecaster | None = None,
+        logistic_forecaster: TrendForecaster | None = None,
     ) -> None:
         self._historical_claim_verifier = (
             historical_claim_verifier or _UnavailableHistoricalClaimVerifier()
+        )
+        self._class_prior_forecaster = class_prior_forecaster or ClassPriorTrendForecaster()
+        self._logistic_forecaster = (
+            logistic_forecaster or RegularizedMultinomialLogisticTrendForecaster()
         )
 
     def develop(self, intent: TrainingIntentRef) -> ForecastLabOutcome:
@@ -178,9 +168,8 @@ class ForecastLab:
                 intent.preregistered_seeds,
             )
             training_ids, validation_ids = self._latest_joint_split(fold_manifest)
-            logistic_forecaster: TrendForecaster = RegularizedMultinomialLogisticTrendForecaster()
             logistic_artifacts = tuple(
-                logistic_forecaster.train(
+                self._logistic_forecaster.train(
                     TrainingRequest(
                         feature_batch=feature_batch,
                         training_row_ids=training_ids,
@@ -190,16 +179,9 @@ class ForecastLab:
                 )
                 for seed in intent.preregistered_seeds
             )
-            calibrators = self._build_calibrators(
-                feature_batch,
-                fold_manifest,
-                logistic_artifacts[0],
-            )
-            if any(item.status == "insufficient_data" for item in calibrators):
-                return self._blocked("insufficient_calibration_support")
-            prior_forecaster: TrendForecaster = ClassPriorTrendForecaster()
+            calibrators = logistic_artifacts[0].calibrators
             prior_artifacts = tuple(
-                prior_forecaster.train(
+                self._class_prior_forecaster.train(
                     TrainingRequest(
                         feature_batch=feature_batch,
                         training_row_ids=training_ids,
@@ -216,19 +198,11 @@ class ForecastLab:
         except ArithmeticError:
             return self._blocked("logistic_training_failed")
         logistic_artifacts = tuple(
-            self._bind_candidate_evidence(
-                artifact,
-                calibrators=calibrators,
-                evaluation_report_id=evaluation.evaluation_report_id,
-            )
+            artifact.bind_evaluation_report(evaluation.evaluation_report_id)
             for artifact in logistic_artifacts
         )
         prior_artifacts = tuple(
-            self._bind_candidate_evidence(
-                artifact,
-                calibrators=calibrators,
-                evaluation_report_id=evaluation.evaluation_report_id,
-            )
+            artifact.bind_evaluation_report(evaluation.evaluation_report_id)
             for artifact in prior_artifacts
         )
         candidate_id = _content_id(
@@ -264,11 +238,19 @@ class ForecastLab:
             return False
         if {item.market for item in intent.historical_claims} != set(self._markets):
             return False
+        lineages = intent.feature_batch.historical_lineage
+        if len(lineages) != len(self._markets):
+            return False
+        if {item.market for item in lineages} != set(self._markets):
+            return False
+        lineage_by_market = {item.market: item for item in lineages}
         try:
             return all(
-                self._historical_claim_verifier.is_formally_reconstructable(
-                    claim_id=item.claim_id,
-                    claim=item.claim,
+                (lineage := lineage_by_market[item.market]).claim_id == item.claim_id
+                and lineage.is_bound_to(intent.feature_batch)
+                and self._historical_claim_verifier.verify_training_lineage(
+                    lineage=lineage,
+                    feature_batch=intent.feature_batch,
                 )
                 for item in intent.historical_claims
             )
@@ -281,43 +263,6 @@ class ForecastLab:
             status="blocked",
             blocked_reasons=(reason,),
             candidate_bundle=None,
-        )
-
-    @staticmethod
-    def _bind_candidate_evidence(
-        artifact: ModelArtifact,
-        *,
-        calibrators: tuple[CalibrationEvidence, ...],
-        evaluation_report_id: str | None,
-    ) -> ModelArtifact:
-        payload = json.loads(artifact.serialized)
-        calibrator_ids = tuple(item.calibrator_id for item in calibrators)
-        payload["calibrator_ids"] = calibrator_ids
-        payload["calibrators"] = [
-            {
-                "calibrator_id": item.calibrator_id,
-                "market": item.market,
-                "horizon_sessions": item.horizon_sessions,
-                "temperature": item.temperature,
-                "fit_method": item.fit_method,
-            }
-            for item in calibrators
-        ]
-        if evaluation_report_id is not None:
-            payload["evaluation_report_id"] = evaluation_report_id
-        payload["artifact_format"] = "safe-json-v1"
-        serialized = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return replace(
-            artifact,
-            artifact_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
-            serialized=serialized,
-            calibrator_ids=calibrator_ids,
-            evaluation_report_id=evaluation_report_id,
         )
 
     def _has_class_support(self, rows: tuple[FeatureRow, ...]) -> bool:
@@ -406,118 +351,6 @@ class ForecastLab:
             row.row_id for row in rows if row.session_date is not None and row.session_date in dates
         )
 
-    def _build_calibrators(
-        self,
-        batch: FeatureBatch,
-        fold_manifest: FoldManifest,
-        artifact: ModelArtifact,
-    ) -> tuple[CalibrationEvidence, ...]:
-        _, validation_ids = self._latest_joint_split(fold_manifest)
-        return self._build_calibrators_for_ids(batch, validation_ids, artifact)
-
-    def _build_calibrators_for_ids(
-        self,
-        batch: FeatureBatch,
-        validation_ids: tuple[str, ...],
-        artifact: ModelArtifact,
-    ) -> tuple[CalibrationEvidence, ...]:
-        validation_id_set = set(validation_ids)
-        validation_rows = tuple(row for row in batch.rows if row.row_id in validation_id_set)
-        forecaster: TrendForecaster
-        if artifact.model_family == "regularized_multinomial_logistic":
-            forecaster = RegularizedMultinomialLogisticTrendForecaster.load(artifact.serialized)
-        elif artifact.model_family == "class_prior":
-            forecaster = ClassPriorTrendForecaster.load(artifact.serialized)
-        else:
-            raise ValueError("unsupported_calibration_model_family")
-        forecast = forecaster.predict(PredictionRequest(artifact, validation_rows))
-        probabilities_by_id = {
-            prediction.row_id: prediction.probabilities for prediction in forecast.predictions
-        }
-        evidence: list[CalibrationEvidence] = []
-        for market in self._markets:
-            for horizon in self._horizons:
-                labels = [
-                    row.label
-                    for row in batch.rows
-                    if row.row_id in validation_id_set
-                    and row.market == market
-                    and row.horizon_sessions == horizon
-                    and row.label is not None
-                ]
-                counts = tuple(labels.count(label) for label in self._labels)
-                sufficient = len(labels) >= 9 and all(count >= 2 for count in counts)
-                status: Literal["sufficient_data", "insufficient_data"] = (
-                    "sufficient_data" if sufficient else "insufficient_data"
-                )
-                cell_rows = tuple(
-                    row
-                    for row in validation_rows
-                    if row.market == market
-                    and row.horizon_sessions == horizon
-                    and row.label is not None
-                )
-                temperature, pre_nll, post_nll = self._fit_temperature(
-                    cell_rows,
-                    probabilities_by_id,
-                )
-                payload = {
-                    "market": market,
-                    "horizon_sessions": horizon,
-                    "sample_count": len(labels),
-                    "class_counts": counts,
-                    "temperature": temperature,
-                    "fit_method": "temperature_scaling",
-                    "pre_nll": pre_nll,
-                    "post_nll": post_nll,
-                    "status": status,
-                }
-                evidence.append(
-                    CalibrationEvidence(
-                        calibrator_id=_content_id("temperature_calibrator", payload),
-                        market=market,
-                        horizon_sessions=horizon,
-                        status=status,
-                        sample_count=len(labels),
-                        class_counts=counts,
-                        temperature=temperature,
-                        fit_method="temperature_scaling",
-                        pre_nll=pre_nll,
-                        post_nll=post_nll,
-                    )
-                )
-        return tuple(evidence)
-
-    def _fit_temperature(
-        self,
-        rows: tuple[FeatureRow, ...],
-        probabilities_by_id: dict[str, ProbabilityVector],
-    ) -> tuple[float, float, float]:
-        def nll(temperature: float) -> float:
-            if not rows:
-                return float("inf")
-            total = 0.0
-            for row in rows:
-                assert row.label is not None
-                calibrated = self._apply_temperature(probabilities_by_id[row.row_id], temperature)
-                total -= log(max(calibrated[row.label], 1e-15))
-            return total / len(rows)
-
-        pre_nll = nll(1.0)
-        candidates = tuple(0.5 + index * 0.05 for index in range(51))
-        temperature = min(candidates, key=lambda value: (nll(value), abs(value - 1.0)))
-        return temperature, pre_nll, nll(temperature)
-
-    @staticmethod
-    def _apply_temperature(
-        probabilities: ProbabilityVector, temperature: float
-    ) -> ProbabilityVector:
-        up = max(probabilities["up"], 1e-15) ** (1.0 / temperature)
-        flat = max(probabilities["flat"], 1e-15) ** (1.0 / temperature)
-        down = max(probabilities["down"], 1e-15) ** (1.0 / temperature)
-        total = up + flat + down
-        return {"up": up / total, "flat": flat / total, "down": down / total}
-
     def _evaluate(
         self,
         batch: FeatureBatch,
@@ -537,21 +370,11 @@ class ForecastLab:
             validation_ids = tuple(row_id for fold in folds for row_id in fold.validation_row_ids)
             test_ids = tuple(row_id for fold in folds for row_id in fold.test_row_ids)
             test_rows = tuple(rows_by_id[row_id] for row_id in test_ids)
-            prior_artifact = ClassPriorTrendForecaster().train(
+            prior_artifact = self._class_prior_forecaster.train(
                 TrainingRequest(batch, training_ids, validation_ids, seeds[0])
             )
-            prior_calibrators = self._build_calibrators_for_ids(
-                batch, validation_ids, prior_artifact
-            )
-            if any(item.status == "insufficient_data" for item in prior_calibrators):
-                raise ValueError("insufficient_calibration_support")
-            calibrated_prior = self._bind_candidate_evidence(
-                prior_artifact,
-                calibrators=prior_calibrators,
-                evaluation_report_id=None,
-            )
-            prior_forecast = ClassPriorTrendForecaster.load(calibrated_prior.serialized).predict(
-                PredictionRequest(calibrated_prior, test_rows)
+            prior_forecast = self._class_prior_forecaster.predict(
+                PredictionRequest(prior_artifact, test_rows)
             )
             self._collect_predictions(
                 test_rows,
@@ -560,20 +383,10 @@ class ForecastLab:
                 prior_predictions,
             )
             for seed_index, seed in enumerate(seeds):
-                artifact = RegularizedMultinomialLogisticTrendForecaster().train(
+                artifact = self._logistic_forecaster.train(
                     TrainingRequest(batch, training_ids, validation_ids, seed)
                 )
-                calibrators = self._build_calibrators_for_ids(batch, validation_ids, artifact)
-                if any(item.status == "insufficient_data" for item in calibrators):
-                    raise ValueError("insufficient_calibration_support")
-                calibrated_artifact = self._bind_candidate_evidence(
-                    artifact,
-                    calibrators=calibrators,
-                    evaluation_report_id=None,
-                )
-                forecast = RegularizedMultinomialLogisticTrendForecaster.load(
-                    calibrated_artifact.serialized
-                ).predict(PredictionRequest(calibrated_artifact, test_rows))
+                forecast = self._logistic_forecaster.predict(PredictionRequest(artifact, test_rows))
                 self._collect_predictions(
                     test_rows,
                     forecast.predictions,

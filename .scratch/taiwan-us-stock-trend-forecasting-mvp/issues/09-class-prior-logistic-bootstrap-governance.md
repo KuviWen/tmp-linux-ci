@@ -24,9 +24,10 @@ Status: ready-for-agent
 
 - 公共 seams：`TrendForecaster.train/predict`、`ForecastLab.develop`、`ModelLifecycle.execute`、`POST /api/v1/governance/approval-decisions`、`GET /api/v1/research/model-families/{model_family_id}/backtests` 與對應 research UI。
 - SQL authority 使用 append-only `model_lifecycle_events`，並與 lifecycle outbox 在同一 transaction 提交；memory／SQL adapters 共用 command replay／conflict 契約。
-- 六個 market × horizon calibrators 以 validation probabilities 真正擬合 temperature scaling；calibrator 內容寫入 safe JSON artifact，離線載入後依 market／horizon 套用。正式候選只接受 Ticket 08 `HistoricalAvailabilityClaim` 的雙市場 verifier 鏈，不再接受 caller boolean。
-- `BootstrapGatePolicy` 以內容定址、綁定 policy／evaluation 的逐門檻 measurements 判定；approval 另驗證 current assignment CAS；shadow 證據需 checksum、cold-load、schema、機率、source policy、比較、CPU SLA、唯一日期及前一 run 鏈結。
+- 六個 market × horizon calibrators 由各 `TrendForecaster.train` adapter 以自身 validation probabilities 擬合 temperature scaling；每個模型／seed 的 calibrator 內容寫入自己的 safe JSON artifact，離線載入後依 market／horizon 套用。`ForecastLab` 只經注入的 `TrendForecaster` seam 訓練／預測，不再依 model family 組裝 calibrator。
+- 正式候選只接受 Ticket 08 雙市場 claim IDs，且 `HistoricalTrainingLineage` 必須把 FeatureBatch、source-policy、label、fold 及 dataset／adjustment／mature-label／FeatureSnapshot artifacts 綁到 verifier 解析出的同一 claim chain；無 lineage 或無關 claim 無法替任意 rows 取得資格。
+- `BootstrapGatePolicyVersion` payload 不可變、內容定址並由專用 object repository 解析；hard-gate evidence refs 必須由同一 repository 完成 checksum 驗證。Approval 另驗證 current assignment CAS，從實際核准時間起七日到期，且同一 exact evidence 的有效拒絕不可翻轉；shadow 證據需 checksum、cold-load、schema、機率、source policy、比較、CPU SLA、唯一日期及前一 run 鏈結。
 - 工程 tracer 明確標記 `engineering_acceptance`／`engineering_example`，因此 GateDecision 失敗於 `qualification` 與 `hard_gate_evidence`，不嘗試人工核准，shadow 保持 `0 / 5`，serving blocked，且沒有 production assignment/history；`formal_model_qualification=not_claimed`。
 - 未勾選 criteria：目前沒有正式來源資格／全套 hard-gate reports，故不能聲稱 hard gates 真正通過、人工核准完成或五次 eligible EOD shadow 完成。相應 policy、REST approval、CAS、期限及 shadow state-machine 行為只有 contract-test evidence，不冒充正式簽核／shadow。
-- 驗證：focused ticket tests `31 passed`、完整非 PostgreSQL suite `391 passed, 1 skipped`、PostgreSQL opt-in `1 passed`、`mypy src tests`、`ruff check .`、`ruff format --check .`、wheel build 與 Compose acceptance。
+- 驗證：focused／affected tests `30 passed`，Ticket 08 lineage adapter integration `1 passed`，完整非 PostgreSQL suite `395 passed, 1 skipped`，PostgreSQL opt-in `1 passed`，`mypy src tests`、`ruff check .`、`ruff format --check .`、wheel build 與 Compose acceptance。
 - 部署驗收：`docker compose -p stock-forecasting-ticket-09-review -f compose.yaml --profile ticket-09-acceptance run --rm ticket-09-acceptance` 輸出 `status=passed`，八個 deployed fail-closed checks 全為 `true`；專用 containers／volumes 已在驗收後移除。

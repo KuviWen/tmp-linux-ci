@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 
 from fastapi.testclient import TestClient
 
@@ -9,10 +10,15 @@ from stock_forecasting.authorization import (
     build_fixture_authorization_policy,
 )
 from stock_forecasting.model_governance import (
+    BOOTSTRAP_GATE_POLICY_V1,
     EvaluateBootstrapCandidate,
     RecordCandidate,
 )
-from tests.modeling_support import passing_hard_gate_evidence
+from tests.modeling_support import (
+    GATE_REPORT_CONTENT,
+    GATE_REPORT_REF,
+    passing_hard_gate_evidence,
+)
 
 
 def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
@@ -27,6 +33,11 @@ def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
     application = build_test_application(
         observed_at=now,
         local_identity=identity,
+    )
+    application.governance_object_repository.put_verified(
+        BytesIO(GATE_REPORT_CONTENT),
+        expected_checksum=GATE_REPORT_REF.removeprefix("sha256:"),
+        metadata={"content_type": "application/json", "object_kind": "gate_report"},
     )
     application.model_lifecycle.execute(
         RecordCandidate(
@@ -54,7 +65,7 @@ def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
             command_id="gate-research-candidate",
             model_family_id="dual-market-price-baseline-v1",
             candidate_id="candidate-research",
-            policy_version_id="bootstrap-gate-policy-v1",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=passing_hard_gate_evidence("sha256:research-evaluation"),
             expected_version=1,
             occurred_at=now,
@@ -102,12 +113,12 @@ def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> Non
         "support": {"fold_count": 16},
         "gate": {
             "status": "passed",
-            "policy_version_id": "bootstrap-gate-policy-v1",
+            "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             "failed_gates": [],
             "hard_gate_evidence_id": passing_hard_gate_evidence(
                 "sha256:research-evaluation"
             ).evidence_id,
-            "hard_gate_evidence_refs": ["sha256:worked-example-gate-report"],
+            "hard_gate_evidence_refs": [GATE_REPORT_REF],
         },
         "approval": {"status": "awaiting_approval"},
         "shadow": {"eligible_cycle_count": 0, "required": 5},
@@ -143,7 +154,7 @@ def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> Non
         "candidate_id": "candidate-research",
         "artifact_id": "sha256:research-artifact",
         "evaluation_report_id": "sha256:research-evaluation",
-        "policy_version_id": "bootstrap-gate-policy-v1",
+        "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
         "decision": "approved",
         "reason": "Exact bootstrap evidence reviewed for shadow only.",
         "expected_assignment": "unassigned",

@@ -1402,6 +1402,48 @@ class QualifiedHistoricalAvailabilityClaimVerifier:
         except KeyError:
             return False
 
+    def verify_training_lineage(
+        self,
+        *,
+        lineage: object,
+        feature_batch: object,
+    ) -> bool:
+        from stock_forecasting.forecasting import FeatureBatch, HistoricalTrainingLineage
+
+        if not isinstance(lineage, HistoricalTrainingLineage) or not isinstance(
+            feature_batch, FeatureBatch
+        ):
+            return False
+        if not lineage.is_bound_to(feature_batch):
+            return False
+        try:
+            claim_payload = self._state_store.get_verified_governance_artifact(
+                artifact_id=lineage.claim_id,
+                artifact_kind="historical_availability_claim",
+            )
+            claim = HistoricalAvailabilityClaim.from_payload(claim_payload)
+        except (KeyError, ValueError):
+            return False
+        if not self.is_formally_reconstructable(claim_id=lineage.claim_id, claim=claim):
+            return False
+        reports = [
+            report
+            for report in self._state_store.list_historical_qualification_reports()
+            if report.get("historical_availability_claim_id") == lineage.claim_id
+        ]
+        if len(reports) != 1:
+            return False
+        report = reports[0]
+        return (
+            report.get("market") == lineage.market
+            and report.get("dataset_version_ids") == [lineage.dataset_version_id]
+            and report.get("adjustment_version_id") == lineage.adjustment_version_id
+            and report.get("mature_labels_id") == lineage.mature_labels_id
+            and report.get("feature_snapshot_id") == lineage.feature_snapshot_id
+            and report.get("fold_manifest_id") == lineage.qualification_fold_manifest_id
+            and report.get("source_policy_id") == lineage.source_policy_id
+        )
+
 
 def historical_qualification_projections(
     state_store: StateStore,

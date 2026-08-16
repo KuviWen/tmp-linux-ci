@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import Literal
@@ -44,8 +45,11 @@ from stock_forecasting.finmind_provider_contract import (
     FINMIND_PROVIDER_ID,
 )
 from stock_forecasting.model_governance import (
+    BOOTSTRAP_GATE_POLICY_V1,
     ModelGovernanceQuery,
     ModelLifecycle,
+    ObjectGateEvidenceRepository,
+    ObjectGatePolicyRepository,
     SqlAlchemyLifecycleStore,
 )
 from stock_forecasting.operations_control import OperationsControl
@@ -100,8 +104,17 @@ class Application:
         source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
+        self.object_repository = FilesystemObjectRepository(object_root)
+        self._governance_object_root = object_root / "mg"
+        self._governance_object_repository: FilesystemObjectRepository | None = None
         self.model_lifecycle_store = SqlAlchemyLifecycleStore(self.state_store.engine)
-        self.model_lifecycle = ModelLifecycle(self.model_lifecycle_store)
+        self.model_lifecycle = ModelLifecycle(
+            self.model_lifecycle_store,
+            policy_repository=ObjectGatePolicyRepository(lambda: self.governance_object_repository),
+            evidence_repository=ObjectGateEvidenceRepository(
+                lambda: self.governance_object_repository
+            ),
+        )
         self.model_governance_query = ModelGovernanceQuery(self.model_lifecycle_store)
         self.local_identity = local_identity
         self.security_context: SecurityContext = local_identity.context
@@ -124,7 +137,6 @@ class Application:
             principal_id=self.security_context.principal_id,
         )
         self._fixed_security_time = fixed_security_time
-        self.object_repository = FilesystemObjectRepository(object_root)
         self.research_query = ResearchQuery(
             self.state_store,
             security_context=self.security_context,
@@ -215,6 +227,23 @@ class Application:
         self._fixture_use = FixtureUseWorkflow(
             state_store=self.state_store,
         )
+
+    @property
+    def governance_object_repository(self) -> FilesystemObjectRepository:
+        if self._governance_object_repository is None:
+            repository = FilesystemObjectRepository(self._governance_object_root)
+            repository.put_verified(
+                BytesIO(BOOTSTRAP_GATE_POLICY_V1.serialized),
+                expected_checksum=BOOTSTRAP_GATE_POLICY_V1.policy_version_id.removeprefix(
+                    "sha256:"
+                ),
+                metadata={
+                    "content_type": "application/json",
+                    "object_kind": "bootstrap_gate_policy_version",
+                },
+            )
+            self._governance_object_repository = repository
+        return self._governance_object_repository
 
     def run_fixture_eod(
         self, command: FixtureEodCommand

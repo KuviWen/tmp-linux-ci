@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from math import exp, log, sqrt
@@ -46,6 +47,30 @@ class FeatureRow:
 
 
 @dataclass(frozen=True)
+class HistoricalTrainingLineage:
+    market: Literal["XTAI", "XNAS"]
+    claim_id: str
+    dataset_version_id: str
+    adjustment_version_id: str
+    mature_labels_id: str
+    feature_snapshot_id: str
+    qualification_fold_manifest_id: str
+    source_policy_id: str
+    feature_batch_id: str
+    source_policy_manifest_id: str
+    label_manifest_id: str
+    fold_manifest_id: str
+
+    def is_bound_to(self, feature_batch: FeatureBatch) -> bool:
+        return (
+            self.feature_batch_id == feature_batch.feature_batch_id
+            and self.source_policy_manifest_id == feature_batch.source_policy_manifest_id
+            and self.label_manifest_id == feature_batch.label_manifest_id
+            and self.fold_manifest_id == feature_batch.fold_manifest_id
+        )
+
+
+@dataclass(frozen=True)
 class FeatureBatch:
     feature_batch_id: str
     source_policy_manifest_id: str
@@ -53,6 +78,7 @@ class FeatureBatch:
     fold_manifest_id: str
     cost_manifest_id: str
     rows: tuple[FeatureRow, ...]
+    historical_lineage: tuple[HistoricalTrainingLineage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,6 +87,20 @@ class TrainingRequest:
     training_row_ids: tuple[str, ...]
     validation_row_ids: tuple[str, ...]
     seed: int
+
+
+@dataclass(frozen=True)
+class CalibrationEvidence:
+    calibrator_id: str
+    market: Literal["XTAI", "XNAS"]
+    horizon_sessions: Literal[1, 5, 20]
+    status: Literal["sufficient_data", "insufficient_data"]
+    sample_count: int
+    class_counts: tuple[int, ...]
+    temperature: float
+    fit_method: Literal["temperature_scaling"]
+    pre_nll: float
+    post_nll: float
 
 
 @dataclass(frozen=True)
@@ -73,7 +113,25 @@ class ModelArtifact:
     model_parameters_id: str
     serialized: bytes
     calibrator_ids: tuple[str, ...] = ()
+    calibrators: tuple[CalibrationEvidence, ...] = ()
     evaluation_report_id: str | None = None
+
+    def bind_evaluation_report(self, evaluation_report_id: str) -> ModelArtifact:
+        payload = cast(dict[str, object], json.loads(self.serialized))
+        payload["evaluation_report_id"] = evaluation_report_id
+        serialized = _serialize_payload(payload)
+        return ModelArtifact(
+            artifact_id=_artifact_id(serialized),
+            model_family=self.model_family,
+            seed=self.seed,
+            manifest_ids=self.manifest_ids,
+            training_selection_id=self.training_selection_id,
+            model_parameters_id=self.model_parameters_id,
+            serialized=serialized,
+            calibrator_ids=self.calibrator_ids,
+            calibrators=self.calibrators,
+            evaluation_report_id=evaluation_report_id,
+        )
 
 
 @dataclass(frozen=True)
@@ -130,21 +188,28 @@ class ClassPriorTrendForecaster:
             "training_selection_id": training_selection_id,
             "probabilities": probabilities,
         }
-        serialized = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        artifact_id = f"sha256:{hashlib.sha256(serialized).hexdigest()}"
+        model_parameters_id = _artifact_id(_serialize_payload(payload))
+        calibrators = _fit_temperature_calibrators(
+            request,
+            lambda row: {
+                "up": probabilities["up"],
+                "flat": probabilities["flat"],
+                "down": probabilities["down"],
+            },
+        )
+        payload = _bind_calibrators(payload, calibrators)
+        serialized = _serialize_payload(payload)
+        artifact_id = _artifact_id(serialized)
         return ModelArtifact(
             artifact_id=artifact_id,
             model_family="class_prior",
             seed=request.seed,
             manifest_ids=manifest_ids,
             training_selection_id=training_selection_id,
-            model_parameters_id=artifact_id,
+            model_parameters_id=model_parameters_id,
             serialized=serialized,
+            calibrator_ids=tuple(item.calibrator_id for item in calibrators),
+            calibrators=calibrators,
         )
 
     @classmethod
@@ -288,21 +353,34 @@ class RegularizedMultinomialLogisticTrendForecaster:
             "regularization": regularization,
             "weights": weights,
         }
-        serialized = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        artifact_id = f"sha256:{hashlib.sha256(serialized).hexdigest()}"
+        model_parameters_id = _artifact_id(_serialize_payload(payload))
+
+        def raw_probabilities(row: FeatureRow) -> ProbabilityVector:
+            vector = [
+                (value - means[index]) / scales[index] for index, value in enumerate(row.values)
+            ] + [1.0]
+            values = self._softmax(
+                [
+                    sum(weight * value for weight, value in zip(label_weights, vector, strict=True))
+                    for label_weights in weights
+                ]
+            )
+            return {"up": values[0], "flat": values[1], "down": values[2]}
+
+        calibrators = _fit_temperature_calibrators(request, raw_probabilities)
+        payload = _bind_calibrators(payload, calibrators)
+        serialized = _serialize_payload(payload)
+        artifact_id = _artifact_id(serialized)
         return ModelArtifact(
             artifact_id=artifact_id,
             model_family="regularized_multinomial_logistic",
             seed=request.seed,
             manifest_ids=manifest_ids,
             training_selection_id=training_selection_id,
-            model_parameters_id=artifact_id,
+            model_parameters_id=model_parameters_id,
             serialized=serialized,
+            calibrator_ids=tuple(item.calibrator_id for item in calibrators),
+            calibrators=calibrators,
         )
 
     @classmethod
@@ -384,6 +462,130 @@ def _artifact_temperature(payload: dict[str, object] | None, row: FeatureRow) ->
     if not isinstance(temperature, (int, float)) or temperature <= 0:
         raise ValueError("artifact_calibrator_temperature_invalid")
     return float(temperature)
+
+
+def _fit_temperature_calibrators(
+    request: TrainingRequest,
+    predict_raw: Callable[[FeatureRow], ProbabilityVector],
+) -> tuple[CalibrationEvidence, ...]:
+    if not request.validation_row_ids:
+        return ()
+    rows_by_id = {row.row_id: row for row in request.feature_batch.rows}
+    validation_rows = tuple(rows_by_id[row_id] for row_id in request.validation_row_ids)
+    labels: tuple[TrendLabel, ...] = ("up", "flat", "down")
+    evidence: list[CalibrationEvidence] = []
+    for market in ("XTAI", "XNAS"):
+        for horizon in (1, 5, 20):
+            cell_rows = tuple(
+                row
+                for row in validation_rows
+                if row.market == market
+                and row.horizon_sessions == horizon
+                and row.label is not None
+            )
+            class_counts = tuple(sum(row.label == label for row in cell_rows) for label in labels)
+            if len(cell_rows) < 9 or any(count < 2 for count in class_counts):
+                raise ValueError("insufficient_calibration_support")
+            probabilities = {row.row_id: predict_raw(row) for row in cell_rows}
+
+            def nll(
+                temperature: float,
+                *,
+                rows: tuple[FeatureRow, ...] = cell_rows,
+                cell_probabilities: dict[str, ProbabilityVector] = probabilities,
+            ) -> float:
+                total = 0.0
+                for row in rows:
+                    assert row.label is not None
+                    calibrated = _apply_temperature(cell_probabilities[row.row_id], temperature)
+                    total -= log(max(calibrated[row.label], 1e-15))
+                return total / len(rows)
+
+            pre_nll = nll(1.0)
+            candidates = tuple(0.5 + index * 0.05 for index in range(51))
+            temperature = min(candidates, key=lambda value: (nll(value), abs(value - 1.0)))
+            post_nll = nll(temperature)
+            payload = {
+                "market": market,
+                "horizon_sessions": horizon,
+                "sample_count": len(cell_rows),
+                "class_counts": class_counts,
+                "temperature": temperature,
+                "fit_method": "temperature_scaling",
+                "pre_nll": pre_nll,
+                "post_nll": post_nll,
+                "status": "sufficient_data",
+            }
+            evidence.append(
+                CalibrationEvidence(
+                    calibrator_id=_content_id("temperature_calibrator", payload),
+                    market=market,
+                    horizon_sessions=horizon,
+                    status="sufficient_data",
+                    sample_count=len(cell_rows),
+                    class_counts=class_counts,
+                    temperature=temperature,
+                    fit_method="temperature_scaling",
+                    pre_nll=pre_nll,
+                    post_nll=post_nll,
+                )
+            )
+    return tuple(evidence)
+
+
+def _bind_calibrators(
+    payload: dict[str, object],
+    calibrators: tuple[CalibrationEvidence, ...],
+) -> dict[str, object]:
+    if not calibrators:
+        return payload
+    return {
+        **payload,
+        "artifact_format": "safe-json-v1",
+        "calibrator_ids": [item.calibrator_id for item in calibrators],
+        "calibrators": [
+            {
+                "calibrator_id": item.calibrator_id,
+                "market": item.market,
+                "horizon_sessions": item.horizon_sessions,
+                "temperature": item.temperature,
+                "fit_method": item.fit_method,
+                "sample_count": item.sample_count,
+                "class_counts": item.class_counts,
+                "pre_nll": item.pre_nll,
+                "post_nll": item.post_nll,
+                "status": item.status,
+            }
+            for item in calibrators
+        ],
+    }
+
+
+def _apply_temperature(probabilities: ProbabilityVector, temperature: float) -> ProbabilityVector:
+    values = [
+        max(probabilities["up"], 1e-15) ** (1.0 / temperature),
+        max(probabilities["flat"], 1e-15) ** (1.0 / temperature),
+        max(probabilities["down"], 1e-15) ** (1.0 / temperature),
+    ]
+    total = sum(values)
+    return {"up": values[0] / total, "flat": values[1] / total, "down": values[2] / total}
+
+
+def _serialize_payload(payload: object) -> bytes:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _artifact_id(serialized: bytes) -> str:
+    return f"sha256:{hashlib.sha256(serialized).hexdigest()}"
+
+
+def _content_id(kind: str, payload: object) -> str:
+    return _artifact_id(kind.encode() + _serialize_payload(payload))
 
 
 def _training_selection_id(request: TrainingRequest) -> str:

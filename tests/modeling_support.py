@@ -1,7 +1,15 @@
+import hashlib
 from datetime import date, timedelta
 
 from stock_forecasting.forecasting import FeatureBatch, FeatureRow, TrendLabel
-from stock_forecasting.model_governance import GateMeasurement, HardGateEvidence
+from stock_forecasting.model_governance import (
+    BOOTSTRAP_GATE_POLICY_V1,
+    GateMeasurement,
+    HardGateEvidence,
+)
+
+GATE_REPORT_CONTENT = b"ticket-09-worked-example-gate-report-v1"
+GATE_REPORT_REF = f"sha256:{hashlib.sha256(GATE_REPORT_CONTENT).hexdigest()}"
 
 
 def passing_hard_gate_evidence(
@@ -45,9 +53,9 @@ def passing_hard_gate_evidence(
     measurements.update(overrides or {})
     return HardGateEvidence.create(
         evidence_kind="formal_evidence",
-        policy_version_id="bootstrap-gate-policy-v1",
+        policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
         evaluation_report_id=evaluation_report_id,
-        evidence_refs=("sha256:worked-example-gate-report",),
+        evidence_refs=(GATE_REPORT_REF,),
         measurements=tuple(GateMeasurement(name, value) for name, value in measurements.items()),
     )
 
