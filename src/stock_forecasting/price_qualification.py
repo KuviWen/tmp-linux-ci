@@ -518,6 +518,18 @@ class TaiwanPriceQualificationWorkflow:
                 raise ValueError("formal_gate_requires_verified_source_basis")
         return evidence
 
+    @staticmethod
+    def _source_basis_policy_version_ids(evidence: Mapping[str, object]) -> frozenset[str]:
+        policy_version_id = evidence.get("source_policy_version_id")
+        if isinstance(policy_version_id, str):
+            return frozenset({policy_version_id})
+        policy_version_ids = evidence.get("source_policy_version_ids")
+        if isinstance(policy_version_ids, list) and all(
+            isinstance(item, str) for item in policy_version_ids
+        ):
+            return frozenset(cast(list[str], policy_version_ids))
+        raise ValueError("formal_gate_requires_verified_source_basis")
+
     def formal_qualification_available(
         self,
         manifest: TaiwanStockPoolManifest,
@@ -559,6 +571,10 @@ class TaiwanPriceQualificationWorkflow:
                 evidence_id=source_basis_evidence_id,
                 manifest=manifest,
             )
+            if claim_payload.get("source_policy_id") not in (
+                self._source_basis_policy_version_ids(source_basis_evidence)
+            ):
+                return False
         except (KeyError, ValueError):
             return False
         return gate_payload == {
@@ -642,6 +658,10 @@ class TaiwanPriceQualificationWorkflow:
                 manifest=manifest,
                 authorization=historical_authorization,
             )
+            if claim_payload.get("source_policy_id") not in (
+                self._source_basis_policy_version_ids(source_basis_evidence)
+            ):
+                raise ValueError("formal_gate_requires_verified_source_basis")
         except (KeyError, ValueError) as error:
             self._state_store._publish_governance_rejection(
                 payload={

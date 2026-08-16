@@ -5,6 +5,7 @@ import json
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,8 +19,14 @@ from stock_forecasting.authorization import (
     SourceEntitlement,
     SourcePolicyVersion,
 )
-from stock_forecasting.historical_evidence import HistoricalEvidenceCommand
+from stock_forecasting.historical_evidence import (
+    HistoricalEvidenceAttestationCommand,
+    HistoricalEvidenceAttestationIssuer,
+    HistoricalEvidenceCommand,
+    HistoricalEvidenceWorkflow,
+)
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
+from stock_forecasting.ticket_08_acceptance import build_ticket_08_engineering_governance
 
 
 def _realized_weekdays(*, start: date, count: int) -> list[str]:
@@ -175,26 +182,79 @@ def test_historical_reconstruction_is_visible_without_becoming_production_predic
         local_identity=identity,
         authorization_policy_override=_price_read_policy(identity, now),
     )
-    evidence_object_id = _put_evidence(
+    source_id = f"engineering-{market.lower()}-archive"
+    evidence = _archive_evidence(
+        listing_id=listing_id,
+        market=market,
+        security_id=security_id,
+        symbol=symbol,
+    )
+    evidence_object_id = _put_evidence(application.object_repository, evidence)
+    listing = cast(list[dict[str, object]], evidence["listings"])[0]
+    calendar_object_id = _put_evidence(
         application.object_repository,
-        _archive_evidence(
+        {
+            "schema_version": "historical-realized-calendar/v1",
+            "market": market,
+            "version": evidence["calendar_version"],
+            "sessions": listing["sessions"],
+        },
+    )
+    reference_object_id = _put_evidence(
+        application.object_repository,
+        {
+            "schema_version": "historical-listing-reference/v1",
+            "listing": {
+                key: listing[key]
+                for key in (
+                    "listing_id",
+                    "market",
+                    "security_id",
+                    "symbols",
+                    "lifecycle",
+                    "company_actions",
+                )
+            },
+        },
+    )
+    collector, governor, governance_policy = build_ticket_08_engineering_governance(
+        observed_at=now,
+        source_ids=(source_id,),
+    )
+    issuer = HistoricalEvidenceAttestationIssuer(
+        application.state_store,
+        object_repository=application.object_repository,
+        authorization_policy=governance_policy,
+        security_context=collector.context,
+        clock=lambda: now,
+    )
+    workflow = HistoricalEvidenceWorkflow(
+        application.state_store,
+        object_repository=application.object_repository,
+        observed_at=now,
+        authorization_policy=governance_policy,
+        security_context=governor.context,
+    )
+    attestation_id = issuer.issue(
+        HistoricalEvidenceAttestationCommand(
             listing_id=listing_id,
             market=market,
-            security_id=security_id,
-            symbol=symbol,
-        ),
+            source_id=source_id,
+            evidence_level="archive_attested",
+            evidence_object_id=evidence_object_id,
+            calendar_object_id=calendar_object_id,
+            reference_object_id=reference_object_id,
+            trace_id=f"trace-ticket-08-{market.lower()}-attestation",
+        )
     )
-    outcome = application.historical_evidence.execute(
+    outcome = workflow.execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id=listing_id,
             market=market,
-            source_id=f"engineering-{market.lower()}-archive",
-            evidence_level="archive_attested",
-            evidence_object_id=evidence_object_id,
-            source_policy_id=f"engineering-{market.lower()}-archive-policy-v1",
-            public_terms_url="https://archive.example.test/terms",
+            source_id=source_id,
             trace_id=f"trace-ticket-08-{market.lower()}-reconstruction",
+            attestation_id=attestation_id,
         )
     )
     assert outcome.claim_id is not None
@@ -237,16 +297,12 @@ def test_historical_reconstruction_is_visible_without_becoming_production_predic
     assert "不得視為 production prediction" in ui_response.text
     assert outcome.claim_id in ui_response.text
 
-    application.historical_evidence.execute(
+    workflow.execute(
         HistoricalEvidenceCommand(
             action="expire",
             listing_id=listing_id,
             market=market,
-            source_id=f"engineering-{market.lower()}-archive",
-            evidence_level="archive_attested",
-            evidence_object_id=evidence_object_id,
-            source_policy_id=f"engineering-{market.lower()}-archive-policy-v1",
-            public_terms_url="https://archive.example.test/terms",
+            source_id=source_id,
             trace_id=f"trace-ticket-08-{market.lower()}-expired",
             prior_claim_id=outcome.claim_id,
         )
@@ -270,3 +326,52 @@ def test_historical_reconstruction_is_visible_without_becoming_production_predic
         == "expired"
     )
     assert "expired" in expired_ui.text
+
+    quarantined = workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id=listing_id,
+            market=market,
+            source_id=source_id,
+            trace_id=f"trace-ticket-08-{market.lower()}-quarantined",
+            submitted_evidence_level="unknown",
+        )
+    )
+    quarantined_research_response = client.get(
+        f"/api/v1/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+    quarantined_operations_response = client.get(
+        "/api/v1/operations/sources",
+        headers=headers,
+    )
+    quarantined_ui = client.get(
+        f"/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+    assert quarantined_research_response.status_code == 200
+    assert quarantined_research_response.json()["historical_reconstruction"] == {
+        "listing_id": listing_id,
+        "market": market,
+        "source_id": source_id,
+        "source_mode": "historical_reconstruction",
+        "status": "quarantined",
+        "reason_code": "historical_evidence_unknown",
+        "historical_availability_claim_id": None,
+        "claim_id": None,
+        "evidence_level": "unknown",
+        "source_policy_id": f"ticket-08/{source_id}-engineering-policy-v1",
+        "qualification_report_id": quarantined.artifact_ids["qualification_report"],
+        "exclusion_reasons": ["historical_evidence_unknown"],
+        "display_mode": "historical_reconstruction",
+        "production_prediction": False,
+    }
+    assert quarantined_operations_response.status_code == 200
+    assert any(
+        item["status"] == "quarantined"
+        and item["qualification_report_id"] == quarantined.artifact_ids["qualification_report"]
+        for item in quarantined_operations_response.json()["items"]
+    )
+    assert quarantined_ui.status_code == 200
+    assert "quarantined" in quarantined_ui.text
+    assert "未建立" in quarantined_ui.text

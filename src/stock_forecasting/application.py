@@ -41,7 +41,6 @@ from stock_forecasting.finmind_provider_contract import (
     FINMIND_PRICE_DISTRIBUTION,
     FINMIND_PROVIDER_ID,
 )
-from stock_forecasting.historical_evidence import HistoricalEvidenceWorkflow
 from stock_forecasting.operations_control import OperationsControl
 from stock_forecasting.outbox import (
     EventCompatibility,
@@ -116,11 +115,6 @@ class Application:
         )
         self._fixed_security_time = fixed_security_time
         self.object_repository = FilesystemObjectRepository(object_root)
-        self.historical_evidence = HistoricalEvidenceWorkflow(
-            self.state_store,
-            object_repository=self.object_repository,
-            observed_at=observed_at or fixed_security_time or datetime.now(UTC),
-        )
         self.research_query = ResearchQuery(
             self.state_store,
             security_context=self.security_context,

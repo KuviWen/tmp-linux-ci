@@ -25,6 +25,11 @@ from stock_forecasting.platform.object_repository import (
     ObjectIntegrityError,
 )
 from stock_forecasting.platform.state_store import StateStore
+from stock_forecasting.price_adjustment import (
+    PriceAdjustmentAction,
+    UnadjustedClose,
+    derive_adjusted_closes,
+)
 from stock_forecasting.zero_fee_source import (
     ZeroFeeAuthenticatedSourceBasis,
     source_bundle_member_from_payload,
@@ -1259,24 +1264,33 @@ def _artifact_id(kind: str, payload: object) -> str:
 
 
 def _derive_adjusted_closes(decoded: DecodedSourcePartition) -> list[dict[str, str]]:
-    adjusted_rows: list[dict[str, str]] = []
-    for price in decoded.prices:
-        adjusted = price.close
-        for action in decoded.company_actions:
-            if action.listing_id != price.listing_id or price.session_date >= action.effective_date:
-                continue
-            if action.kind == "cash_dividend":
-                adjusted -= action.value
-            else:
-                adjusted /= action.value
-        adjusted_rows.append(
-            {
-                "listing_id": price.listing_id,
-                "session_date": price.session_date.isoformat(),
-                "adjusted_close": str(adjusted),
-            }
+    return [
+        {
+            "listing_id": row.listing_id,
+            "session_date": row.session_date.isoformat(),
+            "adjusted_close": str(row.adjusted_close),
+        }
+        for row in derive_adjusted_closes(
+            tuple(
+                UnadjustedClose(
+                    listing_id=price.listing_id,
+                    session_date=price.session_date,
+                    close=price.close,
+                )
+                for price in decoded.prices
+            ),
+            tuple(
+                PriceAdjustmentAction(
+                    listing_id=action.listing_id,
+                    effective_date=action.effective_date,
+                    kind=action.kind,
+                    value=action.value,
+                    source_action_id=action.source_action_id,
+                )
+                for action in decoded.company_actions
+            ),
         )
-    return adjusted_rows
+    ]
 
 
 def _raw_source_artifact(raw_object_id: str) -> dict[str, Any]:

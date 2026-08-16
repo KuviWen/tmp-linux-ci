@@ -10,12 +10,24 @@ from typing import cast
 
 import pytest
 
+from stock_forecasting.authorization import (
+    ActionGrant,
+    AuthorizationPolicy,
+    LocalApiKeyIdentity,
+    SourceDistribution,
+    SourceEntitlement,
+    SourcePolicyVersion,
+    SourceUseRight,
+)
 from stock_forecasting.data_supply import HistoricalAvailabilityClaim
 from stock_forecasting.historical_evidence import (
+    HistoricalEvidenceAttestationCommand,
+    HistoricalEvidenceAttestationIssuer,
     HistoricalEvidenceCommand,
     HistoricalEvidenceLevel,
     HistoricalEvidenceWorkflow,
     QualifiedHistoricalAvailabilityClaimVerifier,
+    SubmittedHistoricalEvidenceLevel,
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
@@ -49,11 +61,234 @@ def _put_evidence(
     ).object_id
 
 
+_HISTORICAL_REQUIRED_USES: frozenset[SourceUseRight] = frozenset(
+    {
+        "ingest",
+        "retain_observed_history",
+        "transform",
+        "model",
+        "internal_display",
+        "backup_restore",
+    }
+)
+
+
+def _authorized_workflow(
+    state_store: StateStore,
+    object_repository: FilesystemObjectRepository,
+    *,
+    source_id: str,
+    now: datetime,
+    separate_principals: bool = True,
+) -> tuple[HistoricalEvidenceWorkflow, HistoricalEvidenceAttestationIssuer]:
+    collector = LocalApiKeyIdentity.issue(
+        owner=f"{source_id}-collector",
+        environment="development",
+        scopes=(
+            {"market_data.collect"}
+            if separate_principals
+            else {"market_data.collect", "price_qualification.govern"}
+        ),
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    governor = (
+        LocalApiKeyIdentity.issue(
+            owner=f"{source_id}-governor",
+            environment="development",
+            scopes={"price_qualification.govern"},
+            issued_at=now - timedelta(hours=1),
+            expires_at=now + timedelta(hours=23),
+            data_protection_classes={"licensed"},
+        )
+        if separate_principals
+        else collector
+    )
+    policy_id = f"ticket-08/{source_id}-policy-v1"
+    action_grants = (
+        (
+            ActionGrant(
+                version_id=f"ticket-08/{source_id}-collector-grant-v1",
+                principal_id=collector.context.principal_id,
+                actions=frozenset({"market_data.collect"}),
+                environment="development",
+                valid_from=now - timedelta(hours=1),
+                valid_to=now + timedelta(hours=23),
+            ),
+            ActionGrant(
+                version_id=f"ticket-08/{source_id}-governor-grant-v1",
+                principal_id=governor.context.principal_id,
+                actions=frozenset({"price_qualification.govern"}),
+                environment="development",
+                valid_from=now - timedelta(hours=1),
+                valid_to=now + timedelta(hours=23),
+            ),
+        )
+        if separate_principals
+        else (
+            ActionGrant(
+                version_id=f"ticket-08/{source_id}-shared-grant-v1",
+                principal_id=collector.context.principal_id,
+                actions=frozenset({"market_data.collect", "price_qualification.govern"}),
+                environment="development",
+                valid_from=now - timedelta(hours=1),
+                valid_to=now + timedelta(hours=23),
+            ),
+        )
+    )
+    entitlements = (
+        (
+            SourceEntitlement(
+                version_id=f"ticket-08/{source_id}-collector-entitlement-v1",
+                principal_id=collector.context.principal_id,
+                dataset_id=source_id,
+                status="active",
+                allowed_actions=frozenset({"market_data.collect"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(hours=1),
+                valid_to=now + timedelta(hours=23),
+                allowed_uses=_HISTORICAL_REQUIRED_USES,
+            ),
+            SourceEntitlement(
+                version_id=f"ticket-08/{source_id}-governor-entitlement-v1",
+                principal_id=governor.context.principal_id,
+                dataset_id=source_id,
+                status="active",
+                allowed_actions=frozenset({"price_qualification.govern"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(hours=1),
+                valid_to=now + timedelta(hours=23),
+                allowed_uses=_HISTORICAL_REQUIRED_USES,
+            ),
+        )
+        if separate_principals
+        else (
+            SourceEntitlement(
+                version_id=f"ticket-08/{source_id}-shared-entitlement-v1",
+                principal_id=collector.context.principal_id,
+                dataset_id=source_id,
+                status="active",
+                allowed_actions=frozenset({"market_data.collect", "price_qualification.govern"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(hours=1),
+                valid_to=now + timedelta(hours=23),
+                allowed_uses=_HISTORICAL_REQUIRED_USES,
+            ),
+        )
+    )
+    policy = AuthorizationPolicy(
+        action_grants=action_grants,
+        source_policies=(
+            SourcePolicyVersion(
+                version_id=policy_id,
+                dataset_id=source_id,
+                allowed_actions=frozenset({"market_data.collect", "price_qualification.govern"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                valid_from=now - timedelta(hours=1),
+                valid_to=now + timedelta(hours=23),
+                allowed_uses=_HISTORICAL_REQUIRED_USES,
+                access_basis="engineering_contract",
+                source_basis_id="ENGINEERING-HISTORICAL-RECONSTRUCTION-01",
+                distributions=(
+                    SourceDistribution(
+                        dataset_id=f"{source_id}-archive",
+                        distribution_url=f"https://archive.example.test/{source_id}.json",
+                    ),
+                ),
+            ),
+        ),
+        source_entitlements=entitlements,
+    )
+    return (
+        HistoricalEvidenceWorkflow(
+            state_store,
+            object_repository=object_repository,
+            observed_at=now,
+            authorization_policy=policy,
+            security_context=governor.context,
+        ),
+        HistoricalEvidenceAttestationIssuer(
+            state_store,
+            object_repository=object_repository,
+            authorization_policy=policy,
+            security_context=collector.context,
+            clock=lambda: now,
+        ),
+    )
+
+
+def _attest(
+    issuer: HistoricalEvidenceAttestationIssuer,
+    object_repository: FilesystemObjectRepository,
+    evidence: dict[str, object],
+    *,
+    source_id: str,
+    listing_id: str,
+    market: str,
+    evidence_level: HistoricalEvidenceLevel,
+    trace_id: str,
+) -> str:
+    listing = next(
+        item
+        for item in cast(list[dict[str, object]], evidence["listings"])
+        if item["listing_id"] == listing_id and item["market"] == market
+    )
+    calendar_object_id = _put_evidence(
+        object_repository,
+        {
+            "schema_version": "historical-realized-calendar/v1",
+            "market": market,
+            "version": evidence["calendar_version"],
+            "sessions": listing["sessions"],
+        },
+    )
+    reference_object_id = _put_evidence(
+        object_repository,
+        {
+            "schema_version": "historical-listing-reference/v1",
+            "listing": {
+                key: listing[key]
+                for key in (
+                    "listing_id",
+                    "market",
+                    "security_id",
+                    "symbols",
+                    "lifecycle",
+                    "company_actions",
+                )
+            },
+        },
+    )
+    return issuer.issue(
+        HistoricalEvidenceAttestationCommand(
+            listing_id=listing_id,
+            market=market,
+            source_id=source_id,
+            evidence_level=evidence_level,
+            evidence_object_id=_put_evidence(object_repository, evidence),
+            calendar_object_id=calendar_object_id,
+            reference_object_id=reference_object_id,
+            trace_id=trace_id,
+        )
+    )
+
+
 def test_candidate_evidence_cannot_self_approve(tmp_path: Path) -> None:
-    workflow = HistoricalEvidenceWorkflow(
-        StateStore("sqlite+pysqlite:///:memory:", create_schema=True),
-        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
-        observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
+    now = datetime(2026, 8, 16, 2, 0, tzinfo=UTC)
+    state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
+    object_repository = FilesystemObjectRepository(tmp_path / "objects")
+    workflow, _ = _authorized_workflow(
+        state_store,
+        object_repository,
+        source_id="manual-upload",
+        now=now,
     )
 
     outcome = workflow.execute(
@@ -62,11 +297,8 @@ def test_candidate_evidence_cannot_self_approve(tmp_path: Path) -> None:
             listing_id="listing-us-xnas-meta",
             market="XNAS",
             source_id="manual-upload",
-            evidence_level="self_asserted",
-            evidence_object_id="sha256:" + ("0" * 64),
-            source_policy_id="policy-manual-v1",
-            public_terms_url="https://example.test/terms",
             trace_id="trace-ticket-08-self-asserted",
+            submitted_evidence_level="self_asserted",
         )
     )
 
@@ -84,13 +316,17 @@ def test_candidate_evidence_cannot_self_approve(tmp_path: Path) -> None:
 )
 def test_non_historical_evidence_is_quarantined_before_formal_use(
     tmp_path: Path,
-    evidence_level: HistoricalEvidenceLevel,
+    evidence_level: SubmittedHistoricalEvidenceLevel,
     reason_code: str,
 ) -> None:
-    workflow = HistoricalEvidenceWorkflow(
-        StateStore("sqlite+pysqlite:///:memory:", create_schema=True),
-        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
-        observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
+    now = datetime(2026, 8, 16, 2, 0, tzinfo=UTC)
+    state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
+    object_repository = FilesystemObjectRepository(tmp_path / "objects")
+    workflow, _ = _authorized_workflow(
+        state_store,
+        object_repository,
+        source_id="current-page",
+        now=now,
     )
 
     outcome = workflow.execute(
@@ -99,11 +335,8 @@ def test_non_historical_evidence_is_quarantined_before_formal_use(
             listing_id="listing-tw-2330-xtai",
             market="XTAI",
             source_id="current-page",
-            evidence_level=evidence_level,
-            evidence_object_id="sha256:" + ("0" * 64),
-            source_policy_id="policy-current-page-v1",
-            public_terms_url="https://example.test/current-terms",
             trace_id=f"trace-ticket-08-{evidence_level}",
+            submitted_evidence_level=evidence_level,
         )
     )
 
@@ -172,10 +405,22 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         expected_checksum=checksum,
         metadata={"content_type": "application/json"},
     )
-    workflow = HistoricalEvidenceWorkflow(
+    now = datetime(2026, 8, 16, 2, 0, tzinfo=UTC)
+    workflow, issuer = _authorized_workflow(
         state_store,
-        object_repository=object_repository,
-        observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
+        object_repository,
+        source_id="platform-us-prices",
+        now=now,
+    )
+    attestation_id = _attest(
+        issuer,
+        object_repository,
+        evidence,
+        source_id="platform-us-prices",
+        listing_id="listing-us-xnas-meta",
+        market="XNAS",
+        evidence_level="platform_observed",
+        trace_id="trace-ticket-08-platform-attestation",
     )
 
     outcome = workflow.execute(
@@ -184,11 +429,8 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
             listing_id="listing-us-xnas-meta",
             market="XNAS",
             source_id="platform-us-prices",
-            evidence_level="platform_observed",
-            evidence_object_id=evidence_ref.object_id,
-            source_policy_id="policy-us-price-v1",
-            public_terms_url="https://example.test/platform-terms",
             trace_id="trace-ticket-08-platform-observed",
+            attestation_id=attestation_id,
         )
     )
 
@@ -208,6 +450,7 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         "source_id": "platform-us-prices",
         "evidence_level": "platform_observed",
         "evidence_status": "qualified",
+        "attestation_id": attestation_id,
         "evidence_object_id": evidence_ref.object_id,
         "evidence_checksum": checksum,
         "evidence_version": "platform-observation-2026-08-15",
@@ -217,7 +460,8 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         "evidence_observed_at": "2026-08-15T22:00:00+00:00",
         "observed_start": "2026-08-14",
         "observed_end": "2026-08-15",
-        "source_policy_id": "policy-us-price-v1",
+        "source_policy_id": "ticket-08/platform-us-prices-policy-v1",
+        "source_basis_id": "ENGINEERING-HISTORICAL-RECONSTRUCTION-01",
         "public_terms_url": "https://example.test/platform-terms",
         "valid_from": "2026-08-15T22:00:00+00:00",
         "valid_until": "2026-09-15T22:00:00+00:00",
@@ -235,21 +479,79 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         state_store,
         evaluated_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
     ).is_usable(claim_id=outcome.claim_id, claim=parsed_claim)
+    attestation_trace = state_store.get_trace_evidence("trace-ticket-08-platform-attestation")
+    assert attestation_trace["artifact_kinds"] == ["historical_evidence_attestation"]
+    assert {event["action"] for event in attestation_trace["audit_events"]} == {
+        "market_data.collect"
+    }
+    qualification_trace = state_store.get_trace_evidence("trace-ticket-08-platform-observed")
+    assert {event["action"] for event in qualification_trace["audit_events"]} == {
+        "price_qualification.govern"
+    }
+
+    missing_attestation = workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="platform-us-prices",
+            trace_id="trace-ticket-08-attestation-required",
+        )
+    )
+    assert missing_attestation.status == "quarantined"
+    assert missing_attestation.reason_code == "historical_evidence_attestation_required"
+    assert missing_attestation.claim_id is None
+
+    shared_workflow, shared_issuer = _authorized_workflow(
+        state_store,
+        object_repository,
+        source_id="platform-us-shared-principal",
+        now=now,
+        separate_principals=False,
+    )
+    shared_principal = shared_workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="platform-us-shared-principal",
+            trace_id="trace-ticket-08-shared-principal-qualification",
+            attestation_id=_attest(
+                shared_issuer,
+                object_repository,
+                evidence,
+                source_id="platform-us-shared-principal",
+                listing_id="listing-us-xnas-meta",
+                market="XNAS",
+                evidence_level="platform_observed",
+                trace_id="trace-ticket-08-shared-principal-attestation",
+            ),
+        )
+    )
+    assert shared_principal.status == "quarantined"
+    assert shared_principal.reason_code == "historical_evidence_separation_of_duties_required"
 
     incomplete_evidence = deepcopy(evidence)
     incomplete_listing = cast(list[dict[str, object]], incomplete_evidence["listings"])[0]
     incomplete_listing["company_actions_status"] = "unknown"
+    incomplete_attestation = _attest(
+        issuer,
+        object_repository,
+        incomplete_evidence,
+        source_id="platform-us-prices",
+        listing_id="listing-us-xnas-meta",
+        market="XNAS",
+        evidence_level="platform_observed",
+        trace_id="trace-ticket-08-missing-actions-attestation",
+    )
     incomplete = workflow.execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id="listing-us-xnas-meta",
             market="XNAS",
-            source_id="platform-us-prices-incomplete-actions",
-            evidence_level="platform_observed",
-            evidence_object_id=_put_evidence(object_repository, incomplete_evidence),
-            source_policy_id="policy-us-price-v1",
-            public_terms_url="https://example.test/platform-terms",
+            source_id="platform-us-prices",
             trace_id="trace-ticket-08-missing-actions",
+            attestation_id=incomplete_attestation,
         )
     )
     assert incomplete.status == "quarantined"
@@ -258,6 +560,127 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
     report = state_store.get_canonical_artifact(incomplete.artifact_ids["qualification_report"])
     report_payload = cast(dict[str, object], report["payload"])
     assert report_payload["status"] == "quarantined"
+
+    listing = cast(list[dict[str, object]], evidence["listings"])[0]
+    mismatched_calendar_attestation = issuer.issue(
+        HistoricalEvidenceAttestationCommand(
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="platform-us-prices",
+            evidence_level="platform_observed",
+            evidence_object_id=evidence_ref.object_id,
+            calendar_object_id=_put_evidence(
+                object_repository,
+                {
+                    "schema_version": "historical-realized-calendar/v1",
+                    "market": "XNAS",
+                    "version": evidence["calendar_version"],
+                    "sessions": ["2026-08-14"],
+                },
+            ),
+            reference_object_id=_put_evidence(
+                object_repository,
+                {
+                    "schema_version": "historical-listing-reference/v1",
+                    "listing": {
+                        key: listing[key]
+                        for key in (
+                            "listing_id",
+                            "market",
+                            "security_id",
+                            "symbols",
+                            "lifecycle",
+                            "company_actions",
+                        )
+                    },
+                },
+            ),
+            trace_id="trace-ticket-08-calendar-mismatch-attestation",
+        )
+    )
+    calendar_mismatch = workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="platform-us-prices",
+            trace_id="trace-ticket-08-calendar-mismatch",
+            attestation_id=mismatched_calendar_attestation,
+        )
+    )
+    assert calendar_mismatch.status == "quarantined"
+    assert calendar_mismatch.reason_code == "historical_evidence_calendar_mismatch"
+
+    malformed_content = b"{not-json"
+    malformed_object_id = object_repository.put_verified(
+        BytesIO(malformed_content),
+        expected_checksum=hashlib.sha256(malformed_content).hexdigest(),
+        metadata={"content_type": "application/json"},
+    ).object_id
+    malformed_attestation = issuer.issue(
+        HistoricalEvidenceAttestationCommand(
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="platform-us-prices",
+            evidence_level="platform_observed",
+            evidence_object_id=malformed_object_id,
+            calendar_object_id=_put_evidence(
+                object_repository,
+                {
+                    "schema_version": "historical-realized-calendar/v1",
+                    "market": "XNAS",
+                    "version": evidence["calendar_version"],
+                    "sessions": listing["sessions"],
+                },
+            ),
+            reference_object_id=_put_evidence(
+                object_repository,
+                {
+                    "schema_version": "historical-listing-reference/v1",
+                    "listing": {
+                        key: listing[key]
+                        for key in (
+                            "listing_id",
+                            "market",
+                            "security_id",
+                            "symbols",
+                            "lifecycle",
+                            "company_actions",
+                        )
+                    },
+                },
+            ),
+            trace_id="trace-ticket-08-malformed-attestation",
+        )
+    )
+    malformed = workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="platform-us-prices",
+            trace_id="trace-ticket-08-malformed-evidence",
+            attestation_id=malformed_attestation,
+        )
+    )
+    assert malformed.status == "quarantined"
+    assert malformed.reason_code == "historical_evidence_json_invalid"
+    assert malformed.claim_id is None
+
+    Path(evidence_ref.uri).write_bytes(b"corrupted-after-attestation")
+    corrupted = workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="platform-us-prices",
+            trace_id="trace-ticket-08-corrupted-attested-object",
+            attestation_id=attestation_id,
+        )
+    )
+    assert corrupted.status == "quarantined"
+    assert corrupted.reason_code == "historical_evidence_object_invalid"
+    assert corrupted.claim_id is None
 
 
 def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
@@ -318,10 +741,22 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
         ],
     }
     evidence_object_id = _put_evidence(object_repository, evidence)
-    workflow = HistoricalEvidenceWorkflow(
+    now = datetime(2026, 8, 16, 2, 0, tzinfo=UTC)
+    workflow, issuer = _authorized_workflow(
         state_store,
-        object_repository=object_repository,
-        observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
+        object_repository,
+        source_id="official-us-archive",
+        now=now,
+    )
+    attestation_id = _attest(
+        issuer,
+        object_repository,
+        evidence,
+        source_id="official-us-archive",
+        listing_id="listing-us-xnas-meta",
+        market="XNAS",
+        evidence_level="archive_attested",
+        trace_id="trace-ticket-08-archive-attestation",
     )
 
     outcome = workflow.execute(
@@ -330,11 +765,8 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
             listing_id="listing-us-xnas-meta",
             market="XNAS",
             source_id="official-us-archive",
-            evidence_level="archive_attested",
-            evidence_object_id=evidence_object_id,
-            source_policy_id="policy-us-archive-research-v1",
-            public_terms_url="https://archive.example.test/terms",
             trace_id="trace-ticket-08-archive-reconstruction",
+            attestation_id=attestation_id,
         )
     )
 
@@ -351,7 +783,10 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
         "fold_manifest",
     }
     labels_artifact = state_store.get_canonical_artifact(outcome.artifact_ids["mature_labels"])
-    labels = labels_artifact["payload"]
+    labels_reference = cast(dict[str, object], labels_artifact["payload"])
+    labels = json.loads(
+        object_repository.open_by_id(str(labels_reference["labels_object_id"])).read()
+    )
     assert isinstance(labels, dict)
     assert labels["anchor_session_id"] == sessions[20]
     assert labels["labels"] == [
@@ -392,10 +827,11 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
         assert isinstance(lineage, dict)
         assert lineage["historical_availability_claim_id"] == outcome.claim_id
         assert lineage["evidence_object_id"] == evidence_object_id
+        assert lineage["evidence_level"] == "archive_attested"
         assert lineage["calendar_version"] == "xnas-realized-calendar-2026-v1"
         assert lineage["adjustment_version_id"] == outcome.artifact_ids["adjustment_version"]
         assert lineage["label_rule_version"] == "trend-label-rule/v1"
-        assert lineage["source_policy_id"] == "policy-us-archive-research-v1"
+        assert lineage["source_policy_id"] == "ticket-08/official-us-archive-policy-v1"
         assert lineage["code_provenance"] == "git:91867a06-test-fixture"
     report_artifact = state_store.get_canonical_artifact(
         outcome.artifact_ids["qualification_report"]
@@ -405,6 +841,16 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
     assert report["display_mode"] == "historical_reconstruction"
     assert report["production_prediction"] is False
     assert report["exclusion_reasons"] == []
+    for artifact_name, forbidden_fields in (
+        ("dataset", {"sessions", "symbols", "lifecycle", "unadjusted_prices"}),
+        ("adjustment_version", {"adjusted_prices", "company_action_ids"}),
+        ("mature_labels", {"labels"}),
+    ):
+        artifact_payload = state_store.get_canonical_artifact(outcome.artifact_ids[artifact_name])[
+            "payload"
+        ]
+        assert isinstance(artifact_payload, dict)
+        assert not forbidden_fields.intersection(artifact_payload)
 
     old_snapshot_id = outcome.artifact_ids["feature_snapshot"]
     old_snapshot = state_store.get_canonical_artifact(old_snapshot_id)
@@ -415,17 +861,24 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
         cast(list[dict[str, object]], revised_evidence["listings"])[0]["unadjusted_prices"],
     )
     revised_prices[21]["close"] = "100.40"
+    revised_attestation_id = _attest(
+        issuer,
+        object_repository,
+        revised_evidence,
+        source_id="official-us-archive",
+        listing_id="listing-us-xnas-meta",
+        market="XNAS",
+        evidence_level="archive_attested",
+        trace_id="trace-ticket-08-archive-correction-attestation",
+    )
     revised = workflow.execute(
         HistoricalEvidenceCommand(
             action="supersede",
             listing_id="listing-us-xnas-meta",
             market="XNAS",
             source_id="official-us-archive",
-            evidence_level="archive_attested",
-            evidence_object_id=_put_evidence(object_repository, revised_evidence),
-            source_policy_id="policy-us-archive-research-v1",
-            public_terms_url="https://archive.example.test/terms",
             trace_id="trace-ticket-08-archive-correction",
+            attestation_id=revised_attestation_id,
             prior_claim_id=outcome.claim_id,
         )
     )
@@ -493,25 +946,31 @@ def test_claim_upgrade_and_revocation_append_impact_without_rewriting_prior_view
             ],
         }
 
-    workflow = HistoricalEvidenceWorkflow(
+    now = datetime(2026, 8, 16, 2, 0, tzinfo=UTC)
+    workflow, issuer = _authorized_workflow(
         state_store,
-        object_repository=object_repository,
-        observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
+        object_repository,
+        source_id="platform-tw-prices",
+        now=now,
     )
+    first_evidence = platform_evidence(revision="rev-1", observed_at="2026-08-15T22:00:00+00:00")
     first = workflow.execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id="listing-tw-2330-xtai",
             market="XTAI",
             source_id="platform-tw-prices",
-            evidence_level="platform_observed",
-            evidence_object_id=_put_evidence(
-                object_repository,
-                platform_evidence(revision="rev-1", observed_at="2026-08-15T22:00:00+00:00"),
-            ),
-            source_policy_id="policy-tw-platform-v1",
-            public_terms_url="https://example.test/platform-terms",
             trace_id="trace-ticket-08-claim-v1",
+            attestation_id=_attest(
+                issuer,
+                object_repository,
+                first_evidence,
+                source_id="platform-tw-prices",
+                listing_id="listing-tw-2330-xtai",
+                market="XTAI",
+                evidence_level="platform_observed",
+                trace_id="trace-ticket-08-claim-v1-attestation",
+            ),
         )
     )
     assert first.claim_id is not None
@@ -520,20 +979,24 @@ def test_claim_upgrade_and_revocation_append_impact_without_rewriting_prior_view
         artifact_kind="historical_availability_claim",
     )
 
+    upgraded_evidence = platform_evidence(revision="rev-2", observed_at="2026-08-16T00:30:00+00:00")
     upgraded = workflow.execute(
         HistoricalEvidenceCommand(
             action="supersede",
             listing_id="listing-tw-2330-xtai",
             market="XTAI",
             source_id="platform-tw-prices",
-            evidence_level="platform_observed",
-            evidence_object_id=_put_evidence(
-                object_repository,
-                platform_evidence(revision="rev-2", observed_at="2026-08-16T00:30:00+00:00"),
-            ),
-            source_policy_id="policy-tw-platform-v1",
-            public_terms_url="https://example.test/platform-terms",
             trace_id="trace-ticket-08-claim-v2",
+            attestation_id=_attest(
+                issuer,
+                object_repository,
+                upgraded_evidence,
+                source_id="platform-tw-prices",
+                listing_id="listing-tw-2330-xtai",
+                market="XTAI",
+                evidence_level="platform_observed",
+                trace_id="trace-ticket-08-claim-v2-attestation",
+            ),
             prior_claim_id=first.claim_id,
         )
     )
@@ -568,10 +1031,6 @@ def test_claim_upgrade_and_revocation_append_impact_without_rewriting_prior_view
             listing_id="listing-tw-2330-xtai",
             market="XTAI",
             source_id="platform-tw-prices",
-            evidence_level="platform_observed",
-            evidence_object_id=str(upgraded_claim["evidence_object_id"]),
-            source_policy_id="policy-tw-platform-v1",
-            public_terms_url="https://example.test/platform-terms",
             trace_id="trace-ticket-08-claim-revoked",
             prior_claim_id=upgraded.claim_id,
         )
@@ -648,27 +1107,39 @@ def test_missing_exact_label_endpoint_is_not_shifted_to_next_available_price(
             }
         ],
     }
-    outcome = HistoricalEvidenceWorkflow(
+    now = datetime(2026, 8, 16, 2, 0, tzinfo=UTC)
+    workflow, issuer = _authorized_workflow(
         state_store,
-        object_repository=object_repository,
-        observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
-    ).execute(
+        object_repository,
+        source_id="official-us-archive",
+        now=now,
+    )
+    outcome = workflow.execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id="listing-us-xnas-meta",
             market="XNAS",
             source_id="official-us-archive",
-            evidence_level="archive_attested",
-            evidence_object_id=_put_evidence(object_repository, evidence),
-            source_policy_id="policy-us-archive-research-v1",
-            public_terms_url="https://archive.example.test/terms",
             trace_id="trace-ticket-08-missing-endpoint",
+            attestation_id=_attest(
+                issuer,
+                object_repository,
+                evidence,
+                source_id="official-us-archive",
+                listing_id="listing-us-xnas-meta",
+                market="XNAS",
+                evidence_level="archive_attested",
+                trace_id="trace-ticket-08-missing-endpoint-attestation",
+            ),
         )
     )
 
     assert outcome.status == "qualified"
     labels_artifact = state_store.get_canonical_artifact(outcome.artifact_ids["mature_labels"])
-    labels_payload = labels_artifact["payload"]
+    labels_reference = cast(dict[str, object], labels_artifact["payload"])
+    labels_payload = json.loads(
+        object_repository.open_by_id(str(labels_reference["labels_object_id"])).read()
+    )
     assert isinstance(labels_payload, dict)
     labels = cast(list[dict[str, object]], labels_payload["labels"])
     horizon_5 = labels[1]
@@ -698,26 +1169,32 @@ def test_missing_exact_label_endpoint_is_not_shifted_to_next_available_price(
         {"session_date": session, "close": "100.00"} for session in sessions[:20]
     ]
     short_evidence["coverage"] = {"start": sessions[0], "end": sessions[19]}
-    short = HistoricalEvidenceWorkflow(
-        state_store,
-        object_repository=object_repository,
-        observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
-    ).execute(
+    short = workflow.execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id="listing-us-xnas-meta",
             market="XNAS",
-            source_id="official-us-short-archive",
-            evidence_level="archive_attested",
-            evidence_object_id=_put_evidence(object_repository, short_evidence),
-            source_policy_id="policy-us-archive-research-v1",
-            public_terms_url="https://archive.example.test/terms",
+            source_id="official-us-archive",
             trace_id="trace-ticket-08-insufficient-history",
+            attestation_id=_attest(
+                issuer,
+                object_repository,
+                short_evidence,
+                source_id="official-us-archive",
+                listing_id="listing-us-xnas-meta",
+                market="XNAS",
+                evidence_level="archive_attested",
+                trace_id="trace-ticket-08-insufficient-history-attestation",
+            ),
         )
     )
-    short_labels_artifact = state_store.get_canonical_artifact(short.artifact_ids["mature_labels"])
-    short_labels = short_labels_artifact["payload"]
-    assert isinstance(short_labels, dict)
+    short_labels_reference = cast(
+        dict[str, object],
+        state_store.get_canonical_artifact(short.artifact_ids["mature_labels"])["payload"],
+    )
+    short_labels = json.loads(
+        object_repository.open_by_id(str(short_labels_reference["labels_object_id"])).read()
+    )
     assert short_labels["anchor_session_id"] == sessions[19]
     assert short_labels["labels"] == [
         {
@@ -809,37 +1286,83 @@ def test_reconstruction_preserves_security_identity_and_realized_session_gaps(
         ],
     }
 
-    outcome = HistoricalEvidenceWorkflow(
+    now = datetime(2026, 8, 16, 2, 0, tzinfo=UTC)
+    workflow, issuer = _authorized_workflow(
         state_store,
-        object_repository=object_repository,
-        observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
-    ).execute(
+        object_repository,
+        source_id="official-us-reused-symbol-archive",
+        now=now,
+    )
+    outcome = workflow.execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id="listing-us-xnas-acme-successor",
             market="XNAS",
             source_id="official-us-reused-symbol-archive",
-            evidence_level="archive_attested",
-            evidence_object_id=_put_evidence(object_repository, evidence),
-            source_policy_id="policy-us-archive-research-v1",
-            public_terms_url="https://archive.example.test/terms",
             trace_id="trace-ticket-08-ticker-reuse-realized-calendar",
+            attestation_id=_attest(
+                issuer,
+                object_repository,
+                evidence,
+                source_id="official-us-reused-symbol-archive",
+                listing_id="listing-us-xnas-acme-successor",
+                market="XNAS",
+                evidence_level="archive_attested",
+                trace_id="trace-ticket-08-ticker-reuse-attestation",
+            ),
         )
     )
 
-    dataset = state_store.get_canonical_artifact(outcome.artifact_ids["dataset"])["payload"]
-    assert isinstance(dataset, dict)
+    dataset_reference = cast(
+        dict[str, object],
+        state_store.get_canonical_artifact(outcome.artifact_ids["dataset"])["payload"],
+    )
+    dataset = json.loads(
+        object_repository.open_by_id(str(dataset_reference["dataset_object_id"])).read()
+    )
     assert dataset["listing_id"] == "listing-us-xnas-acme-successor"
     assert dataset["security_id"] == "security-acme-successor"
     assert dataset["symbols"] == [{"symbol": "ACME", "valid_from": "2021-01-04", "valid_to": None}]
     assert closed_session not in cast(list[str], dataset["sessions"])
-    labels = state_store.get_canonical_artifact(outcome.artifact_ids["mature_labels"])["payload"]
-    assert isinstance(labels, dict)
+    labels_reference = cast(
+        dict[str, object],
+        state_store.get_canonical_artifact(outcome.artifact_ids["mature_labels"])["payload"],
+    )
+    labels = json.loads(
+        object_repository.open_by_id(str(labels_reference["labels_object_id"])).read()
+    )
     assert [label["target_session_id"] for label in labels["labels"]] == [
         realized_sessions[21],
         realized_sessions[25],
         realized_sessions[40],
     ]
+
+    invalid_symbol_evidence = deepcopy(evidence)
+    invalid_symbol_listing = cast(list[dict[str, object]], invalid_symbol_evidence["listings"])[1]
+    invalid_symbol_listing["symbols"] = [
+        {"symbol": "ACME", "valid_from": realized_sessions[1], "valid_to": None}
+    ]
+    invalid_symbol = workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id="listing-us-xnas-acme-successor",
+            market="XNAS",
+            source_id="official-us-reused-symbol-archive",
+            trace_id="trace-ticket-08-symbol-validity-gap",
+            attestation_id=_attest(
+                issuer,
+                object_repository,
+                invalid_symbol_evidence,
+                source_id="official-us-reused-symbol-archive",
+                listing_id="listing-us-xnas-acme-successor",
+                market="XNAS",
+                evidence_level="archive_attested",
+                trace_id="trace-ticket-08-symbol-validity-gap-attestation",
+            ),
+        )
+    )
+    assert invalid_symbol.status == "quarantined"
+    assert invalid_symbol.reason_code == "historical_evidence_symbol_mismatch"
 
 
 def test_reconstruction_applies_company_actions_before_maturing_labels(
@@ -901,28 +1424,40 @@ def test_reconstruction_applies_company_actions_before_maturing_labels(
         ],
     }
 
-    outcome = HistoricalEvidenceWorkflow(
+    now = datetime(2026, 8, 16, 2, 0, tzinfo=UTC)
+    workflow, issuer = _authorized_workflow(
         state_store,
-        object_repository=object_repository,
-        observed_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
-    ).execute(
+        object_repository,
+        source_id="official-us-split-archive",
+        now=now,
+    )
+    outcome = workflow.execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id="listing-us-xnas-split",
             market="XNAS",
             source_id="official-us-split-archive",
-            evidence_level="archive_attested",
-            evidence_object_id=_put_evidence(object_repository, evidence),
-            source_policy_id="policy-us-archive-research-v1",
-            public_terms_url="https://archive.example.test/terms",
             trace_id="trace-ticket-08-split-adjustment",
+            attestation_id=_attest(
+                issuer,
+                object_repository,
+                evidence,
+                source_id="official-us-split-archive",
+                listing_id="listing-us-xnas-split",
+                market="XNAS",
+                evidence_level="archive_attested",
+                trace_id="trace-ticket-08-split-attestation",
+            ),
         )
     )
 
-    adjustment = state_store.get_canonical_artifact(outcome.artifact_ids["adjustment_version"])[
-        "payload"
-    ]
-    assert isinstance(adjustment, dict)
+    adjustment_reference = cast(
+        dict[str, object],
+        state_store.get_canonical_artifact(outcome.artifact_ids["adjustment_version"])["payload"],
+    )
+    adjustment = json.loads(
+        object_repository.open_by_id(str(adjustment_reference["adjustment_object_id"])).read()
+    )
     adjusted_prices = cast(list[dict[str, str]], adjustment["adjusted_prices"])
     assert adjusted_prices[0] == {
         "session_date": sessions[0],
@@ -932,6 +1467,11 @@ def test_reconstruction_applies_company_actions_before_maturing_labels(
         "session_date": split_session,
         "adjusted_close": "100.00",
     }
-    labels = state_store.get_canonical_artifact(outcome.artifact_ids["mature_labels"])["payload"]
-    assert isinstance(labels, dict)
+    labels_reference = cast(
+        dict[str, object],
+        state_store.get_canonical_artifact(outcome.artifact_ids["mature_labels"])["payload"],
+    )
+    labels = json.loads(
+        object_repository.open_by_id(str(labels_reference["labels_object_id"])).read()
+    )
     assert cast(list[dict[str, object]], labels["labels"])[0]["label"] == "flat"

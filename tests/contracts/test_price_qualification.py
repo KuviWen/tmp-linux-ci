@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -39,6 +40,8 @@ from stock_forecasting.data_supply import (
 )
 from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_DISTRIBUTIONS
 from stock_forecasting.historical_evidence import (
+    HistoricalEvidenceAttestationCommand,
+    HistoricalEvidenceAttestationIssuer,
     HistoricalEvidenceCommand,
     HistoricalEvidenceWorkflow,
 )
@@ -48,6 +51,7 @@ from stock_forecasting.price_qualification import (
     QualificationAuthorizationError,
     TaiwanPriceQualificationWorkflow,
 )
+from stock_forecasting.ticket_08_acceptance import build_ticket_08_engineering_governance
 
 
 class _QualificationLiteralAdapter:
@@ -81,6 +85,14 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         expires_at=now + timedelta(hours=23),
         data_protection_classes={"public_source"},
     )
+    collector = LocalApiKeyIdentity.issue(
+        owner="ticket-08-history-collector",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"public_source"},
+    )
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
@@ -101,12 +113,20 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
                 valid_from=now - timedelta(days=1),
                 valid_to=now + timedelta(days=1),
             ),
+            ActionGrant(
+                version_id="ticket-08-history-collector-grant-v1",
+                principal_id=collector.context.principal_id,
+                actions=frozenset({"market_data.collect"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
         ),
         source_policies=tuple(
             SourcePolicyVersion(
                 version_id=f"ticket-08-{source_id}-policy-v1",
                 dataset_id=source_id,
-                allowed_actions=frozenset({"price_qualification.govern"}),
+                allowed_actions=frozenset({"market_data.collect", "price_qualification.govern"}),
                 purposes=frozenset({"price_research"}),
                 environments=frozenset({"development"}),
                 data_protection_class="public_source",
@@ -131,7 +151,7 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
     )
     state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
     listing_id = manifest.listings[0].listing_id
-    evidence = {
+    evidence: dict[str, object] = {
         "schema_version": "historical-reconstruction-evidence/v1",
         "price_schema_version": "taiwan-unadjusted-eod-v1",
         "evidence_version": "ticket-08-formal-platform-history-v1",
@@ -181,21 +201,77 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         expected_checksum=hashlib.sha256(content).hexdigest(),
         metadata={"content_type": "application/json"},
     ).object_id
+    listing_evidence = cast(list[dict[str, object]], evidence["listings"])[0]
+    calendar_content = json.dumps(
+        {
+            "schema_version": "historical-realized-calendar/v1",
+            "market": "XTAI",
+            "version": evidence["calendar_version"],
+            "sessions": listing_evidence["sessions"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    calendar_object_id = repository.put_verified(
+        BytesIO(calendar_content),
+        expected_checksum=hashlib.sha256(calendar_content).hexdigest(),
+        metadata={"content_type": "application/json"},
+    ).object_id
+    reference_content = json.dumps(
+        {
+            "schema_version": "historical-listing-reference/v1",
+            "listing": {
+                key: listing_evidence[key]
+                for key in (
+                    "listing_id",
+                    "market",
+                    "security_id",
+                    "symbols",
+                    "lifecycle",
+                    "company_actions",
+                )
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    reference_object_id = repository.put_verified(
+        BytesIO(reference_content),
+        expected_checksum=hashlib.sha256(reference_content).hexdigest(),
+        metadata={"content_type": "application/json"},
+    ).object_id
+    attestation_id = HistoricalEvidenceAttestationIssuer(
+        state_store,
+        object_repository=repository,
+        authorization_policy=policy,
+        security_context=collector.context,
+        clock=lambda: now,
+    ).issue(
+        HistoricalEvidenceAttestationCommand(
+            listing_id=listing_id,
+            market="XTAI",
+            source_id=manifest.historical_source_id,
+            evidence_level="platform_observed",
+            evidence_object_id=evidence_object_id,
+            calendar_object_id=calendar_object_id,
+            reference_object_id=reference_object_id,
+            trace_id="trace-ticket-08-formal-attestation",
+        )
+    )
     claim = HistoricalEvidenceWorkflow(
         state_store,
         object_repository=repository,
         observed_at=now,
+        authorization_policy=policy,
+        security_context=identity.context,
     ).execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id=listing_id,
             market="XTAI",
             source_id=manifest.historical_source_id,
-            evidence_level="platform_observed",
-            evidence_object_id=evidence_object_id,
-            source_policy_id=f"ticket-08-{manifest.historical_source_id}-policy-v1",
-            public_terms_url="https://data.gov.tw/license",
             trace_id="trace-ticket-08-formal-claim",
+            attestation_id=attestation_id,
         )
     )
     assert claim.claim_id is not None
@@ -246,6 +322,55 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         },
     ]
     assert workflow.formal_qualification_available(qualified_manifest, sources) is True
+
+    engineering_collector, engineering_governor, engineering_policy = (
+        build_ticket_08_engineering_governance(
+            observed_at=now,
+            source_ids=(manifest.historical_source_id,),
+        )
+    )
+    engineering_attestation_id = HistoricalEvidenceAttestationIssuer(
+        state_store,
+        object_repository=repository,
+        authorization_policy=engineering_policy,
+        security_context=engineering_collector.context,
+        clock=lambda: now,
+    ).issue(
+        HistoricalEvidenceAttestationCommand(
+            listing_id=listing_id,
+            market="XTAI",
+            source_id=manifest.historical_source_id,
+            evidence_level="platform_observed",
+            evidence_object_id=evidence_object_id,
+            calendar_object_id=calendar_object_id,
+            reference_object_id=reference_object_id,
+            trace_id="trace-ticket-08-engineering-attestation",
+        )
+    )
+    engineering_claim = HistoricalEvidenceWorkflow(
+        state_store,
+        object_repository=repository,
+        observed_at=now,
+        authorization_policy=engineering_policy,
+        security_context=engineering_governor.context,
+    ).execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id=listing_id,
+            market="XTAI",
+            source_id=manifest.historical_source_id,
+            trace_id="trace-ticket-08-engineering-claim",
+            attestation_id=engineering_attestation_id,
+        )
+    )
+    assert engineering_claim.claim_id is not None
+    with pytest.raises(ValueError, match="formal_gate_requires_verified_source_basis"):
+        workflow.register_formal_qualification_gate(
+            manifest=archived_manifest,
+            historical_availability_claim_id=engineering_claim.claim_id,
+            source_basis_evidence_id=source_basis_id,
+            trace_id="trace-ticket-08-engineering-claim-formal-gate",
+        )
 
 
 def test_historical_claim_cannot_be_minted_without_qualification_authorization() -> None:

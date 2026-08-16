@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 
 import pytest
 
@@ -39,6 +39,8 @@ from stock_forecasting.data_supply import (
     TaiwanPriceSourceAdapter,
 )
 from stock_forecasting.historical_evidence import (
+    HistoricalEvidenceAttestationCommand,
+    HistoricalEvidenceAttestationIssuer,
     HistoricalEvidenceCommand,
     HistoricalEvidenceWorkflow,
     QualifiedHistoricalAvailabilityClaimVerifier,
@@ -47,6 +49,7 @@ from stock_forecasting.platform.object_repository import FilesystemObjectReposit
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
 from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
+from stock_forecasting.ticket_08_acceptance import build_ticket_08_engineering_governance
 
 TWSE_EOD_DISTRIBUTION_ID = "11549"
 TWSE_EOD_DISTRIBUTION_URL = (
@@ -885,7 +888,7 @@ def test_independently_qualified_claim_unlocks_historical_data_supply(
         create_schema=True,
     )
     object_repository = FilesystemObjectRepository(tmp_path / "objects")
-    evidence = {
+    evidence: dict[str, object] = {
         "schema_version": "historical-reconstruction-evidence/v1",
         "price_schema_version": "taiwan-unadjusted-eod-v1",
         "evidence_version": "ticket-08-data-supply-evidence-v1",
@@ -935,21 +938,81 @@ def test_independently_qualified_claim_unlocks_historical_data_supply(
         expected_checksum=checksum,
         metadata={"content_type": "application/json"},
     ).object_id
+    collector, governor, historical_policy = build_ticket_08_engineering_governance(
+        observed_at=now,
+        source_ids=(loaded.collection.source_id,),
+    )
+    listing_evidence = cast(list[dict[str, object]], evidence["listings"])[0]
+    calendar_content = json.dumps(
+        {
+            "schema_version": "historical-realized-calendar/v1",
+            "market": "XTAI",
+            "version": evidence["calendar_version"],
+            "sessions": listing_evidence["sessions"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    calendar_object_id = object_repository.put_verified(
+        BytesIO(calendar_content),
+        expected_checksum=hashlib.sha256(calendar_content).hexdigest(),
+        metadata={"content_type": "application/json"},
+    ).object_id
+    reference_content = json.dumps(
+        {
+            "schema_version": "historical-listing-reference/v1",
+            "listing": {
+                key: listing_evidence[key]
+                for key in (
+                    "listing_id",
+                    "market",
+                    "security_id",
+                    "symbols",
+                    "lifecycle",
+                    "company_actions",
+                )
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    reference_object_id = object_repository.put_verified(
+        BytesIO(reference_content),
+        expected_checksum=hashlib.sha256(reference_content).hexdigest(),
+        metadata={"content_type": "application/json"},
+    ).object_id
+    attestation_id = HistoricalEvidenceAttestationIssuer(
+        state_store,
+        object_repository=object_repository,
+        authorization_policy=historical_policy,
+        security_context=collector.context,
+        clock=lambda: now,
+    ).issue(
+        HistoricalEvidenceAttestationCommand(
+            listing_id=listing_id,
+            market="XTAI",
+            source_id=loaded.collection.source_id,
+            evidence_level="platform_observed",
+            evidence_object_id=evidence_object_id,
+            calendar_object_id=calendar_object_id,
+            reference_object_id=reference_object_id,
+            trace_id="trace-ticket-08-independent-attestation",
+        )
+    )
     qualification = HistoricalEvidenceWorkflow(
         state_store,
         object_repository=object_repository,
         observed_at=now,
+        authorization_policy=historical_policy,
+        security_context=governor.context,
     ).execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id=listing_id,
             market="XTAI",
             source_id=loaded.collection.source_id,
-            evidence_level="platform_observed",
-            evidence_object_id=evidence_object_id,
-            source_policy_id="policy-ticket-08-taiwan-history-v1",
-            public_terms_url="https://example.test/taiwan-platform-terms",
             trace_id="trace-ticket-08-independent-qualification",
+            attestation_id=attestation_id,
         )
     )
     assert qualification.claim_id is not None

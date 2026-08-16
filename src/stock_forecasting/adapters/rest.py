@@ -960,9 +960,11 @@ for (const button of document.querySelectorAll('[data-operation]')) {
                 "<dt>顯示模式</dt><dd>historical_reconstruction；"
                 "不得視為 production prediction</dd>"
                 "<dt>HistoricalAvailabilityClaim</dt>"
-                f"<dd>{escape(str(historical['claim_id']))}</dd>"
-                f"<dt>FeatureSnapshot</dt><dd>{escape(str(historical['feature_snapshot_id']))}</dd>"
-                f"<dt>Fold manifest</dt><dd>{escape(str(historical['fold_manifest_id']))}</dd>"
+                f"<dd>{escape(str(historical.get('claim_id') or '未建立'))}</dd>"
+                "<dt>FeatureSnapshot</dt>"
+                f"<dd>{escape(str(historical.get('feature_snapshot_id') or '未建立'))}</dd>"
+                "<dt>Fold manifest</dt>"
+                f"<dd>{escape(str(historical.get('fold_manifest_id') or '未建立'))}</dd>"
                 "</dl></section>"
             )
         else:

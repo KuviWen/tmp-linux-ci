@@ -21,7 +21,8 @@ Status: ready-for-agent
 
 ## Implementation notes
 
-- 公共 seam：`HistoricalEvidenceWorkflow.execute` 負責候選證據資格化與 append-only 影響證據；Research eligibility REST/UI 與 `OperationsControl.list_historical_qualifications` 負責外部投影；Compose `ticket-08-acceptance` 驗證部署邊界。
-- 歷史資料以 `listing_id`／`security_id` 保存身分，ticker 僅是具有效期的 symbol；標籤只使用證據列出的 realized sessions，並以內部公司行動調整版本計算。
-- 驗證：受影響測試 49 passed；非 PostgreSQL 全套 368 passed／1 deselected；PostgreSQL 1 passed／368 deselected；`mypy src tests`、`ruff check .`、`ruff format --check .`、Compose config、wheel build 均通過。
+- 公共 seam：`HistoricalEvidenceAttestationIssuer.issue` 以具 `market_data.collect` 權限的 collector 將 evidence／calendar／reference 物件與來源政策、distribution authorization 綁定；不同 principal 的 `HistoricalEvidenceWorkflow.execute` 再以 `price_qualification.govern` 權限執行資格化與 append-only 影響證據。Research eligibility REST/UI 與 `OperationsControl.list_historical_qualifications` 負責外部投影；Compose `ticket-08-acceptance` 驗證部署邊界。
+- 歷史資料以 `listing_id`／`security_id` 保存身分，ticker 僅是具有效期的 symbol；資格化逐一比對 immutable realized calendar、listing reference、生命週期、公司行動與 checksum。來源資料、內部調整值及成熟標籤留在 content-addressed object repository，治理 artifact 只保存安全的物件引用與 lineage。
+- 正式 qualification gate 另外要求 HistoricalAvailabilityClaim 的 `source_policy_id` 必須屬於已驗證 source-basis evidence；engineering contract 產生的 claim 不得藉由另一份正式來源證據升格。
+- 驗證：ticket-focused 測試 38 passed；非 PostgreSQL 全套 368 passed／1 deselected；PostgreSQL 1 passed／368 deselected；`mypy src tests`、`ruff check .`、`ruff format --check .`、Compose config、wheel build 均通過。
 - 部署 acceptance：`docker compose -f compose.yaml --profile ticket-08-acceptance run --build --rm ticket-08-acceptance` 回傳 `status=passed`，六項 checks 全為 true；輸出標示 `evidence_kind=engineering_acceptance` 與 `formal_source_qualification=not_claimed`，不宣稱 fixture 為正式來源資格。

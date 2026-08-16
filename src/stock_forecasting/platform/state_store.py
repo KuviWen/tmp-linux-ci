@@ -1108,12 +1108,19 @@ class StateStore:
                 "register_zero_fee_source_basis_evidence",
                 "register_historical_availability_claim",
                 "register_formal_qualification_gate",
+                "attest_historical_evidence",
+                "qualify_historical_evidence",
             }
             or not isinstance(payload.get("reason_code"), str)
             or not payload["reason_code"]
             or not authorizations
             or any(
-                authorization.get("action") != "price_qualification.govern"
+                authorization.get("action")
+                != (
+                    "market_data.collect"
+                    if payload.get("operation") == "attest_historical_evidence"
+                    else "price_qualification.govern"
+                )
                 for authorization in authorizations
             )
         ):
@@ -1246,12 +1253,13 @@ class StateStore:
             raise KeyError(artifact_id)
         return deepcopy(cast(dict[str, object], payload))
 
-    def publish_historical_evidence_artifact(
+    def _publish_historical_evidence_artifact(
         self,
         *,
         artifact_kind: str,
         payload: dict[str, object],
         trace_id: str,
+        authorizations: list[dict[str, object]],
     ) -> str:
         if artifact_kind not in {
             "historical_availability_claim",
@@ -1265,6 +1273,13 @@ class StateStore:
             "historical_fold_manifest",
         }:
             raise ValueError("unsupported_historical_evidence_artifact_kind")
+        if not authorizations or any(
+            authorization.get("action") != "price_qualification.govern"
+            or authorization.get("reason_code") != "authorized"
+            or authorization.get("dataset_id") != payload.get("source_id")
+            for authorization in authorizations
+        ):
+            raise ValueError("historical_evidence_authorization_invalid")
         execution_purpose = (
             "governance"
             if artifact_kind
@@ -1281,7 +1296,61 @@ class StateStore:
             execution_purpose=execution_purpose,
             payload=payload,
             trace_id=trace_id,
-            authorization_outcomes=[],
+            authorization_outcomes=[(authorization, "allowed") for authorization in authorizations],
+        )
+
+    def _publish_historical_evidence_attestation(
+        self,
+        *,
+        payload: dict[str, object],
+        trace_id: str,
+        authorizations: list[dict[str, object]],
+    ) -> str:
+        required_fields = {
+            "attestation_schema_version",
+            "listing_id",
+            "market",
+            "source_id",
+            "evidence_level",
+            "evidence_object_id",
+            "evidence_checksum",
+            "calendar_object_id",
+            "calendar_checksum",
+            "reference_object_id",
+            "reference_checksum",
+            "source_policy_version_id",
+            "source_basis_id",
+            "source_access_basis",
+            "collection_authorization_decision_ids",
+            "collector_principal_ids",
+            "attested_at",
+        }
+        if (
+            set(payload) != required_fields
+            or payload.get("attestation_schema_version") != "historical-evidence-attestation/v1"
+            or not authorizations
+            or any(
+                authorization.get("action") != "market_data.collect"
+                or authorization.get("reason_code") != "authorized"
+                or authorization.get("dataset_id") != payload.get("source_id")
+                or payload.get("source_policy_version_id")
+                != authorization.get("source_policy_version_id")
+                or not isinstance(authorization.get("decision_id"), str)
+                or not isinstance(authorization.get("principal_id"), str)
+                for authorization in authorizations
+            )
+            or payload.get("collection_authorization_decision_ids")
+            != sorted(str(authorization.get("decision_id")) for authorization in authorizations)
+            or payload.get("collector_principal_ids")
+            != sorted({str(authorization.get("principal_id")) for authorization in authorizations})
+        ):
+            raise ValueError("historical_evidence_attestation_invalid")
+        return self._publish_trace_artifact(
+            artifact_kind="historical_evidence_attestation",
+            execution_purpose="governance",
+            payload=payload,
+            trace_id=trace_id,
+            authorization_outcomes=[(authorization, "allowed") for authorization in authorizations],
         )
 
     def list_historical_claim_impacts(self, *, claim_id: str) -> list[dict[str, object]]:
