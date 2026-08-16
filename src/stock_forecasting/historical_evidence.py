@@ -181,6 +181,8 @@ class HistoricalEvidenceAttestationIssuer:
             raise RuntimeError("historical_observation_receipt_missing")
         observation_receipt_id, first_observation_receipt = first_observation
         first_observed_at = first_observation_receipt.acquired_at
+        if attested_at < first_observed_at:
+            raise ValueError("historical_evidence_observation_clock_regressed")
         return self._state_store._publish_historical_evidence_attestation(
             payload={
                 "attestation_schema_version": "historical-evidence-attestation/v1",

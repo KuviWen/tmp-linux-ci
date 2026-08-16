@@ -1411,12 +1411,19 @@ class StateStore:
                 select(
                     canonical_artifacts.c.artifact_id,
                     canonical_artifacts.c.payload,
-                ).where(
+                )
+                .select_from(
+                    trace_artifact_refs.join(
+                        canonical_artifacts,
+                        trace_artifact_refs.c.artifact_id == canonical_artifacts.c.artifact_id,
+                    )
+                )
+                .where(
                     canonical_artifacts.c.artifact_kind == "source_retrieval_receipt",
                     canonical_artifacts.c.execution_purpose == "price_research",
                 )
+                .order_by(trace_artifact_refs.c.sequence.asc())
             ).mappings()
-            matches: list[tuple[str, SourceRetrievalReceipt]] = []
             for row in rows:
                 payload = row["payload"]
                 if not isinstance(payload, dict):
@@ -1428,8 +1435,8 @@ class StateStore:
                     and receipt.distribution_id == distribution_id
                     and receipt.distribution_url == distribution_url
                 ):
-                    matches.append((str(row["artifact_id"]), receipt))
-        return min(matches, key=lambda match: (match[1].acquired_at, match[0])) if matches else None
+                    return str(row["artifact_id"]), receipt
+        return None
 
     def _publish_historical_policy_blocked(
         self,

@@ -554,6 +554,42 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
     )
     assert repeated_outcome.status == "qualified"
     assert repeated_outcome.reason_code == "historical_evidence_qualified"
+    issuer_now[0] = now - timedelta(minutes=1)
+    with pytest.raises(
+        ValueError,
+        match="historical_evidence_observation_clock_regressed",
+    ):
+        _attest(
+            issuer,
+            object_repository,
+            evidence,
+            source_id="platform-us-prices",
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            trace_id="trace-ticket-08-platform-clock-regression",
+        )
+    assert state_store.get_trace_evidence("trace-ticket-08-platform-clock-regression")[
+        "artifact_kinds"
+    ] == ["source_retrieval_receipt"]
+    issuer_now[0] = now + timedelta(minutes=45)
+    post_regression_attestation_id = _attest(
+        issuer,
+        object_repository,
+        evidence,
+        source_id="platform-us-prices",
+        listing_id="listing-us-xnas-meta",
+        market="XNAS",
+        trace_id="trace-ticket-08-platform-post-clock-regression",
+    )
+    post_regression_attestation = state_store.get_verified_governance_artifact(
+        artifact_id=post_regression_attestation_id,
+        artifact_kind="historical_evidence_attestation",
+    )
+    assert (
+        post_regression_attestation["observation_receipt_id"]
+        == attestation["observation_receipt_id"]
+    )
+    assert post_regression_attestation["first_observed_at"] == ("2026-08-16T02:00:00+00:00")
     issuer_now[0] = now
     assert {event["action"] for event in attestation_trace["audit_events"]} == {
         "market_data.collect"
