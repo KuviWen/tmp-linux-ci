@@ -205,11 +205,6 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         ],
     }
     content = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
-    evidence_object_id = repository.put_verified(
-        BytesIO(content),
-        expected_checksum=hashlib.sha256(content).hexdigest(),
-        metadata={"content_type": "application/json"},
-    ).object_id
     listing_evidence = cast(list[dict[str, object]], evidence["listings"])[0]
     historical_distribution_url = manifest.source_basis.datasets[0].distribution_url
     calendar_content = json.dumps(
@@ -223,11 +218,6 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    calendar_object_id = repository.put_verified(
-        BytesIO(calendar_content),
-        expected_checksum=hashlib.sha256(calendar_content).hexdigest(),
-        metadata={"content_type": "application/json"},
-    ).object_id
     reference_content = json.dumps(
         {
             "schema_version": "historical-listing-reference/v1",
@@ -247,11 +237,6 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    reference_object_id = repository.put_verified(
-        BytesIO(reference_content),
-        expected_checksum=hashlib.sha256(reference_content).hexdigest(),
-        metadata={"content_type": "application/json"},
-    ).object_id
     history_issuer = HistoricalEvidenceAttestationIssuer(
         state_store,
         object_repository=repository,
@@ -264,10 +249,9 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
             listing_id=listing_id,
             market="XTAI",
             source_id=manifest.historical_source_id,
-            evidence_level="platform_observed",
-            evidence_object_id=evidence_object_id,
-            calendar_object_id=calendar_object_id,
-            reference_object_id=reference_object_id,
+            evidence_content=content,
+            calendar_content=calendar_content,
+            reference_content=reference_content,
             trace_id="trace-ticket-08-formal-attestation",
         )
     )
@@ -289,6 +273,11 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         )
     )
     assert claim.claim_id is not None
+    platform_snapshot = state_store.get_canonical_artifact(claim.artifact_ids["feature_snapshot"])[
+        "payload"
+    ]
+    assert isinstance(platform_snapshot, dict)
+    assert platform_snapshot["information_cutoff"] == now.isoformat()
     workflow = TaiwanPriceQualificationWorkflow(
         state_store,
         authorization_policy=policy,
@@ -349,20 +338,14 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    incomplete_object_id = repository.put_verified(
-        BytesIO(incomplete_content),
-        expected_checksum=hashlib.sha256(incomplete_content).hexdigest(),
-        metadata={"content_type": "application/json"},
-    ).object_id
     incomplete_attestation_id = history_issuer.issue(
         HistoricalEvidenceAttestationCommand(
             listing_id=listing_id,
             market="XTAI",
             source_id=manifest.historical_source_id,
-            evidence_level="platform_observed",
-            evidence_object_id=incomplete_object_id,
-            calendar_object_id=calendar_object_id,
-            reference_object_id=reference_object_id,
+            evidence_content=incomplete_content,
+            calendar_content=calendar_content,
+            reference_content=reference_content,
             trace_id="trace-ticket-08-incomplete-formal-attestation",
         )
     )
@@ -408,11 +391,6 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    engineering_calendar_object_id = repository.put_verified(
-        BytesIO(engineering_calendar_content),
-        expected_checksum=hashlib.sha256(engineering_calendar_content).hexdigest(),
-        metadata={"content_type": "application/json"},
-    ).object_id
     engineering_reference_content = json.dumps(
         {
             "schema_version": "historical-listing-reference/v1",
@@ -432,11 +410,6 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    engineering_reference_object_id = repository.put_verified(
-        BytesIO(engineering_reference_content),
-        expected_checksum=hashlib.sha256(engineering_reference_content).hexdigest(),
-        metadata={"content_type": "application/json"},
-    ).object_id
     engineering_attestation_id = HistoricalEvidenceAttestationIssuer(
         state_store,
         object_repository=repository,
@@ -448,10 +421,9 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
             listing_id=listing_id,
             market="XTAI",
             source_id=manifest.historical_source_id,
-            evidence_level="platform_observed",
-            evidence_object_id=evidence_object_id,
-            calendar_object_id=engineering_calendar_object_id,
-            reference_object_id=engineering_reference_object_id,
+            evidence_content=content,
+            calendar_content=engineering_calendar_content,
+            reference_content=engineering_reference_content,
             trace_id="trace-ticket-08-engineering-attestation",
         )
     )

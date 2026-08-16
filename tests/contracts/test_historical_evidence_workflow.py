@@ -24,7 +24,6 @@ from stock_forecasting.historical_evidence import (
     HistoricalEvidenceAttestationCommand,
     HistoricalEvidenceAttestationIssuer,
     HistoricalEvidenceCommand,
-    HistoricalEvidenceLevel,
     HistoricalEvidenceWorkflow,
     QualifiedHistoricalAvailabilityClaimVerifier,
     SubmittedHistoricalEvidenceLevel,
@@ -47,18 +46,22 @@ def _put_evidence(
     object_repository: FilesystemObjectRepository,
     evidence: dict[str, object],
 ) -> str:
-    encoded = json.dumps(
-        evidence,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
+    encoded = _evidence_content(evidence)
     checksum = hashlib.sha256(encoded).hexdigest()
     return object_repository.put_verified(
         BytesIO(encoded),
         expected_checksum=checksum,
         metadata={"content_type": "application/json"},
     ).object_id
+
+
+def _evidence_content(evidence: dict[str, object]) -> bytes:
+    return json.dumps(
+        evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
 
 
 _HISTORICAL_REQUIRED_USES: frozenset[SourceUseRight] = frozenset(
@@ -232,7 +235,6 @@ def _attest(
     source_id: str,
     listing_id: str,
     market: str,
-    evidence_level: HistoricalEvidenceLevel,
     trace_id: str,
 ) -> str:
     listing = next(
@@ -240,8 +242,7 @@ def _attest(
         for item in cast(list[dict[str, object]], evidence["listings"])
         if item["listing_id"] == listing_id and item["market"] == market
     )
-    calendar_object_id = _put_evidence(
-        object_repository,
+    calendar_content = _evidence_content(
         {
             "schema_version": "historical-realized-calendar/v1",
             "source_reference": f"https://archive.example.test/{source_id}.json",
@@ -250,8 +251,7 @@ def _attest(
             "sessions": listing["sessions"],
         },
     )
-    reference_object_id = _put_evidence(
-        object_repository,
+    reference_content = _evidence_content(
         {
             "schema_version": "historical-listing-reference/v1",
             "source_reference": f"https://archive.example.test/{source_id}.json",
@@ -273,10 +273,9 @@ def _attest(
             listing_id=listing_id,
             market=market,
             source_id=source_id,
-            evidence_level=evidence_level,
-            evidence_object_id=_put_evidence(object_repository, evidence),
-            calendar_object_id=calendar_object_id,
-            reference_object_id=reference_object_id,
+            evidence_content=_evidence_content(evidence),
+            calendar_content=calendar_content,
+            reference_content=reference_content,
             trace_id=trace_id,
         )
     )
@@ -421,8 +420,11 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         source_id="platform-us-prices",
         listing_id="listing-us-xnas-meta",
         market="XNAS",
-        evidence_level="platform_observed",
         trace_id="trace-ticket-08-platform-attestation",
+    )
+    attestation = state_store.get_verified_governance_artifact(
+        artifact_id=attestation_id,
+        artifact_kind="historical_evidence_attestation",
     )
 
     outcome = workflow.execute(
@@ -456,6 +458,7 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         "attestation_id": attestation_id,
         "evidence_object_id": evidence_ref.object_id,
         "evidence_checksum": checksum,
+        "observation_receipt_id": attestation["observation_receipt_id"],
         "evidence_version": "platform-observation-2026-08-15",
         "evidence_revision": "rev-1",
         "observation_kind": "platform_observation",
@@ -484,7 +487,25 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         evaluated_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
     ).is_usable(claim_id=outcome.claim_id, claim=parsed_claim)
     attestation_trace = state_store.get_trace_evidence("trace-ticket-08-platform-attestation")
-    assert attestation_trace["artifact_kinds"] == ["historical_evidence_attestation"]
+    assert attestation_trace["artifact_kinds"] == [
+        "source_retrieval_receipt",
+        "historical_evidence_attestation",
+    ]
+    receipt = state_store.get_canonical_artifact(str(attestation["observation_receipt_id"]))
+    assert receipt["artifact_kind"] == "source_retrieval_receipt"
+    assert receipt["payload"] == {
+        "object_id": evidence_ref.object_id,
+        "request_id": "trace-ticket-08-platform-attestation:historical-observation",
+        "source_id": "platform-us-prices",
+        "source_mode": "current",
+        "source_revision": "rev-1",
+        "distribution_id": "platform-us-prices-archive",
+        "distribution_url": "https://archive.example.test/platform-us-prices.json",
+        "sanitized_source_uri": "platform://raw-price-partition/2026-08-15",
+        "acquired_at": "2026-08-16T02:00:00Z",
+        "checkpoint_before": None,
+        "checkpoint_after": None,
+    }
     assert {event["action"] for event in attestation_trace["audit_events"]} == {
         "market_data.collect"
     }
@@ -527,7 +548,6 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
                 source_id="platform-us-shared-principal",
                 listing_id="listing-us-xnas-meta",
                 market="XNAS",
-                evidence_level="platform_observed",
                 trace_id="trace-ticket-08-shared-principal-attestation",
             ),
         )
@@ -545,7 +565,6 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         source_id="platform-us-prices",
         listing_id="listing-us-xnas-meta",
         market="XNAS",
-        evidence_level="platform_observed",
         trace_id="trace-ticket-08-missing-actions-attestation",
     )
     incomplete = workflow.execute(
@@ -574,7 +593,6 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         source_id="platform-us-prices",
         listing_id="listing-us-xnas-meta",
         market="XNAS",
-        evidence_level="platform_observed",
         trace_id="trace-ticket-08-future-observation-attestation",
     )
     future = workflow.execute(
@@ -596,10 +614,8 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
             listing_id="listing-us-xnas-meta",
             market="XNAS",
             source_id="platform-us-prices",
-            evidence_level="platform_observed",
-            evidence_object_id=evidence_ref.object_id,
-            calendar_object_id=_put_evidence(
-                object_repository,
+            evidence_content=encoded,
+            calendar_content=_evidence_content(
                 {
                     "schema_version": "historical-realized-calendar/v1",
                     "source_reference": ("https://archive.example.test/platform-us-prices.json"),
@@ -608,8 +624,7 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
                     "sessions": ["2026-08-14"],
                 },
             ),
-            reference_object_id=_put_evidence(
-                object_repository,
+            reference_content=_evidence_content(
                 {
                     "schema_version": "historical-listing-reference/v1",
                     "source_reference": ("https://archive.example.test/platform-us-prices.json"),
@@ -643,20 +658,13 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
     assert calendar_mismatch.reason_code == "historical_evidence_calendar_mismatch"
 
     malformed_content = b"{not-json"
-    malformed_object_id = object_repository.put_verified(
-        BytesIO(malformed_content),
-        expected_checksum=hashlib.sha256(malformed_content).hexdigest(),
-        metadata={"content_type": "application/json"},
-    ).object_id
     malformed_attestation = issuer.issue(
         HistoricalEvidenceAttestationCommand(
             listing_id="listing-us-xnas-meta",
             market="XNAS",
             source_id="platform-us-prices",
-            evidence_level="platform_observed",
-            evidence_object_id=malformed_object_id,
-            calendar_object_id=_put_evidence(
-                object_repository,
+            evidence_content=malformed_content,
+            calendar_content=_evidence_content(
                 {
                     "schema_version": "historical-realized-calendar/v1",
                     "market": "XNAS",
@@ -664,8 +672,7 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
                     "sessions": listing["sessions"],
                 },
             ),
-            reference_object_id=_put_evidence(
-                object_repository,
+            reference_content=_evidence_content(
                 {
                     "schema_version": "historical-listing-reference/v1",
                     "listing": {
@@ -786,7 +793,6 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
         source_id="official-us-archive",
         listing_id="listing-us-xnas-meta",
         market="XNAS",
-        evidence_level="archive_attested",
         trace_id="trace-ticket-08-archive-attestation",
     )
     attestation = state_store.get_verified_governance_artifact(
@@ -830,7 +836,6 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
                 source_id="official-us-archive",
                 listing_id="listing-us-xnas-meta",
                 market="XNAS",
-                evidence_level="archive_attested",
                 trace_id="trace-ticket-08-unbound-archive-reference-attestation",
             ),
         )
@@ -948,7 +953,6 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
         source_id="official-us-archive",
         listing_id="listing-us-xnas-meta",
         market="XNAS",
-        evidence_level="archive_attested",
         trace_id="trace-ticket-08-archive-correction-attestation",
     )
     revised = workflow.execute(
@@ -1048,7 +1052,6 @@ def test_claim_upgrade_and_revocation_append_impact_without_rewriting_prior_view
                 source_id="platform-tw-prices",
                 listing_id="listing-tw-2330-xtai",
                 market="XTAI",
-                evidence_level="platform_observed",
                 trace_id="trace-ticket-08-claim-v1-attestation",
             ),
         )
@@ -1074,7 +1077,6 @@ def test_claim_upgrade_and_revocation_append_impact_without_rewriting_prior_view
                 source_id="platform-tw-prices",
                 listing_id="listing-tw-2330-xtai",
                 market="XTAI",
-                evidence_level="platform_observed",
                 trace_id="trace-ticket-08-claim-v2-attestation",
             ),
             prior_claim_id=first.claim_id,
@@ -1208,7 +1210,6 @@ def test_missing_exact_label_endpoint_is_not_shifted_to_next_available_price(
                 source_id="official-us-archive",
                 listing_id="listing-us-xnas-meta",
                 market="XNAS",
-                evidence_level="archive_attested",
                 trace_id="trace-ticket-08-missing-endpoint-attestation",
             ),
         )
@@ -1263,7 +1264,6 @@ def test_missing_exact_label_endpoint_is_not_shifted_to_next_available_price(
                 source_id="official-us-archive",
                 listing_id="listing-us-xnas-meta",
                 market="XNAS",
-                evidence_level="archive_attested",
                 trace_id="trace-ticket-08-insufficient-history-attestation",
             ),
         )
@@ -1389,7 +1389,6 @@ def test_reconstruction_preserves_security_identity_and_realized_session_gaps(
                 source_id="official-us-reused-symbol-archive",
                 listing_id="listing-us-xnas-acme-successor",
                 market="XNAS",
-                evidence_level="archive_attested",
                 trace_id="trace-ticket-08-ticker-reuse-attestation",
             ),
         )
@@ -1438,7 +1437,6 @@ def test_reconstruction_preserves_security_identity_and_realized_session_gaps(
                 source_id="official-us-reused-symbol-archive",
                 listing_id="listing-us-xnas-acme-successor",
                 market="XNAS",
-                evidence_level="archive_attested",
                 trace_id="trace-ticket-08-symbol-validity-gap-attestation",
             ),
         )
@@ -1527,7 +1525,6 @@ def test_reconstruction_applies_company_actions_before_maturing_labels(
                 source_id="official-us-split-archive",
                 listing_id="listing-us-xnas-split",
                 market="XNAS",
-                evidence_level="archive_attested",
                 trace_id="trace-ticket-08-split-attestation",
             ),
         )

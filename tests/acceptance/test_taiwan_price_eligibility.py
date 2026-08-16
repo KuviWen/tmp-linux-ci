@@ -1001,10 +1001,9 @@ def test_independently_qualified_claim_unlocks_historical_data_supply(
             listing_id=listing_id,
             market="XTAI",
             source_id=loaded.collection.source_id,
-            evidence_level="platform_observed",
-            evidence_object_id=evidence_object_id,
-            calendar_object_id=calendar_object_id,
-            reference_object_id=reference_object_id,
+            evidence_content=object_repository.open_by_id(evidence_object_id).read(),
+            calendar_content=object_repository.open_by_id(calendar_object_id).read(),
+            reference_content=object_repository.open_by_id(reference_object_id).read(),
             trace_id="trace-ticket-08-independent-attestation",
         )
     )

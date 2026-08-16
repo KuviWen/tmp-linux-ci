@@ -335,10 +335,9 @@ def run_ticket_08_acceptance(
                 listing_id=listing_id,
                 market=market,
                 source_id=source_id,
-                evidence_level="archive_attested",
-                evidence_object_id=evidence_object_id,
-                calendar_object_id=calendar_object_id,
-                reference_object_id=reference_object_id,
+                evidence_content=repository.open_by_id(evidence_object_id).read(),
+                calendar_content=repository.open_by_id(calendar_object_id).read(),
+                reference_content=repository.open_by_id(reference_object_id).read(),
                 trace_id=f"trace-ticket-08-{market.lower()}-attestation",
             )
         )

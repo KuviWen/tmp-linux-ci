@@ -25,6 +25,7 @@ from stock_forecasting.data_supply import HistoricalEvidenceLevel as HistoricalE
 from stock_forecasting.platform.object_repository import (
     FilesystemObjectRepository,
     ObjectIntegrityError,
+    ObjectRef,
 )
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_adjustment import (
@@ -60,10 +61,9 @@ class HistoricalEvidenceAttestationCommand:
     listing_id: str
     market: str
     source_id: str
-    evidence_level: HistoricalEvidenceLevel
-    evidence_object_id: str
-    calendar_object_id: str
-    reference_object_id: str
+    evidence_content: bytes
+    calendar_content: bytes
+    reference_content: bytes
     trace_id: str
 
 
@@ -112,21 +112,77 @@ class HistoricalEvidenceAttestationIssuer:
             listing_id=command.listing_id,
             market=command.market,
         )
-        evidence_bytes = self._object_repository.open_by_id(command.evidence_object_id).read()
-        calendar_bytes = self._object_repository.open_by_id(command.calendar_object_id).read()
-        reference_bytes = self._object_repository.open_by_id(command.reference_object_id).read()
+        evidence_ref = self._record_input_object(command.evidence_content, "historical_evidence")
+        calendar_ref = self._record_input_object(command.calendar_content, "realized_calendar")
+        reference_ref = self._record_input_object(command.reference_content, "listing_reference")
+        evidence_bytes = command.evidence_content
+        calendar_bytes = command.calendar_content
+        reference_bytes = command.reference_content
+        try:
+            evidence = _json_object(evidence_bytes)
+        except ValueError:
+            evidence = {}
+        observation_kind = evidence.get("observation_kind")
+        evidence_level: object = (
+            "platform_observed"
+            if observation_kind == "platform_observation"
+            else "archive_attested"
+            if observation_kind == "official_archive"
+            else "unknown"
+        )
+        source_mode = "current" if evidence_level == "platform_observed" else "historical"
+        observation_reference = evidence.get("observation_reference")
+        receipt_authorization = next(
+            (
+                authorization
+                for authorization in authorizations
+                if authorization.get("distribution_url") == observation_reference
+            ),
+            authorizations[0],
+        )
+        acquired_at = first_observed_at.isoformat().replace("+00:00", "Z")
+        observation_receipt_id = self._state_store._publish_historical_observation_receipt(
+            payload={
+                "object_id": evidence_ref.object_id,
+                "request_id": f"{command.trace_id}:historical-observation",
+                "source_id": command.source_id,
+                "source_mode": source_mode,
+                "source_revision": (
+                    evidence["revision"]
+                    if isinstance(evidence.get("revision"), str)
+                    else "unparseable"
+                ),
+                "distribution_id": receipt_authorization["distribution_id"],
+                "distribution_url": receipt_authorization["distribution_url"],
+                "sanitized_source_uri": (
+                    observation_reference
+                    if isinstance(observation_reference, str)
+                    else str(receipt_authorization["distribution_url"])
+                ),
+                "acquired_at": acquired_at,
+                "checkpoint_before": None,
+                "checkpoint_after": None,
+            },
+            trace_id=command.trace_id,
+            authorization=receipt_authorization,
+        )
+        observation_receipt = self._state_store.get_canonical_artifact(observation_receipt_id)
+        receipt_payload = cast(dict[str, object], observation_receipt["payload"])
+        first_observed_at = datetime.fromisoformat(
+            str(receipt_payload["acquired_at"]).replace("Z", "+00:00")
+        )
         return self._state_store._publish_historical_evidence_attestation(
             payload={
                 "attestation_schema_version": "historical-evidence-attestation/v1",
                 "listing_id": command.listing_id,
                 "market": command.market,
                 "source_id": command.source_id,
-                "evidence_level": command.evidence_level,
-                "evidence_object_id": command.evidence_object_id,
+                "evidence_level": evidence_level,
+                "evidence_object_id": evidence_ref.object_id,
                 "evidence_checksum": hashlib.sha256(evidence_bytes).hexdigest(),
-                "calendar_object_id": command.calendar_object_id,
+                "calendar_object_id": calendar_ref.object_id,
                 "calendar_checksum": hashlib.sha256(calendar_bytes).hexdigest(),
-                "reference_object_id": command.reference_object_id,
+                "reference_object_id": reference_ref.object_id,
                 "reference_checksum": hashlib.sha256(reference_bytes).hexdigest(),
                 "source_policy_version_id": policy.version_id,
                 "source_basis_id": policy.source_basis_id,
@@ -137,6 +193,7 @@ class HistoricalEvidenceAttestationIssuer:
                 "collector_principal_ids": sorted(
                     {str(authorization["principal_id"]) for authorization in authorizations}
                 ),
+                "observation_receipt_id": observation_receipt_id,
                 "distribution_bindings": sorted(
                     [
                         {
@@ -157,6 +214,17 @@ class HistoricalEvidenceAttestationIssuer:
             },
             trace_id=command.trace_id,
             authorizations=authorizations,
+        )
+
+    def _record_input_object(self, content: bytes, object_kind: str) -> ObjectRef:
+        checksum = hashlib.sha256(content).hexdigest()
+        return self._object_repository.put_verified(
+            BytesIO(content),
+            expected_checksum=checksum,
+            metadata={
+                "content_type": "application/json",
+                "object_kind": object_kind,
+            },
         )
 
 
@@ -288,6 +356,7 @@ class HistoricalEvidenceWorkflow:
             "attestation_id": command.attestation_id,
             "evidence_object_id": evidence_object_id,
             "evidence_checksum": attestation["evidence_checksum"],
+            "observation_receipt_id": attestation["observation_receipt_id"],
             "calendar_object_id": attestation["calendar_object_id"],
             "reference_object_id": attestation["reference_object_id"],
             "evidence_version": evidence["evidence_version"],
@@ -329,6 +398,7 @@ class HistoricalEvidenceWorkflow:
             "attestation_id": command.attestation_id,
             "evidence_object_id": evidence_object_id,
             "evidence_checksum": attestation["evidence_checksum"],
+            "observation_receipt_id": attestation["observation_receipt_id"],
             "evidence_version": evidence["evidence_version"],
             "evidence_revision": evidence["revision"],
             "observation_kind": evidence["observation_kind"],
@@ -368,6 +438,8 @@ class HistoricalEvidenceWorkflow:
                     evidence_level=evidence_level,
                     source_policy_id=source_policy.version_id,
                     evidence_object_id=evidence_object_id,
+                    observation_receipt_id=str(attestation["observation_receipt_id"]),
+                    first_observed_at=str(attestation["first_observed_at"]),
                     authorizations=authorizations,
                 )
             )
@@ -517,8 +589,6 @@ class HistoricalEvidenceWorkflow:
         evidence_level = attestation.get("evidence_level")
         if evidence_level == "published_current_only":
             raise ValueError("historical_evidence_current_only")
-        if evidence_level not in {"platform_observed", "archive_attested"}:
-            raise ValueError("historical_evidence_attestation_invalid")
         if (
             attestation.get("listing_id") != command.listing_id
             or attestation.get("market") != command.market
@@ -537,6 +607,13 @@ class HistoricalEvidenceWorkflow:
         evidence = _json_object(evidence_bytes)
         calendar = _json_object(calendar_bytes)
         reference = _json_object(reference_bytes)
+        if evidence_level not in {"platform_observed", "archive_attested"}:
+            raise ValueError("historical_evidence_attestation_invalid")
+        self._verified_observation_receipt(
+            attestation=attestation,
+            evidence=evidence,
+            source_id=command.source_id,
+        )
         listings = evidence.get("listings")
         if not isinstance(listings, list):
             raise ValueError("historical_evidence_invalid")
@@ -649,6 +726,48 @@ class HistoricalEvidenceWorkflow:
             cast(dict[str, object], validity),
             cast(HistoricalEvidenceLevel, evidence_level),
         )
+
+    def _verified_observation_receipt(
+        self,
+        *,
+        attestation: dict[str, object],
+        evidence: dict[str, object],
+        source_id: str,
+    ) -> dict[str, object]:
+        receipt_id = attestation.get("observation_receipt_id")
+        if not isinstance(receipt_id, str):
+            raise ValueError("historical_observation_receipt_invalid")
+        receipt = self._state_store.get_canonical_artifact(receipt_id)
+        payload = receipt.get("payload")
+        expected_source_mode = (
+            "current" if attestation.get("evidence_level") == "platform_observed" else "historical"
+        )
+        bindings = attestation.get("distribution_bindings")
+        if (
+            receipt.get("artifact_kind") != "source_retrieval_receipt"
+            or receipt.get("execution_purpose") != "price_research"
+            or not isinstance(payload, dict)
+            or payload.get("object_id") != attestation.get("evidence_object_id")
+            or payload.get("source_id") != source_id
+            or payload.get("source_mode") != expected_source_mode
+            or payload.get("source_revision") != evidence.get("revision")
+            or not isinstance(bindings, list)
+            or not any(
+                isinstance(binding, dict)
+                and binding.get("distribution_id") == payload.get("distribution_id")
+                and binding.get("distribution_url") == payload.get("distribution_url")
+                for binding in bindings
+            )
+        ):
+            raise ValueError("historical_observation_receipt_invalid")
+        try:
+            acquired_at = datetime.fromisoformat(str(payload["acquired_at"]).replace("Z", "+00:00"))
+            first_observed_at = datetime.fromisoformat(str(attestation["first_observed_at"]))
+        except (KeyError, ValueError) as error:
+            raise ValueError("historical_observation_receipt_invalid") from error
+        if acquired_at.tzinfo is None or acquired_at != first_observed_at:
+            raise ValueError("historical_observation_receipt_invalid")
+        return cast(dict[str, object], payload)
 
     def _verified_attested_object(
         self,
@@ -817,6 +936,8 @@ class HistoricalEvidenceWorkflow:
         evidence_level: HistoricalEvidenceLevel,
         source_policy_id: str,
         evidence_object_id: str,
+        observation_receipt_id: str,
+        first_observed_at: str,
         authorizations: list[dict[str, object]],
     ) -> dict[str, str]:
         common_lineage: dict[str, object] = {
@@ -827,6 +948,8 @@ class HistoricalEvidenceWorkflow:
             "historical_availability_claim_id": claim_id,
             "evidence_level": evidence_level,
             "evidence_object_id": evidence_object_id,
+            "observation_receipt_id": observation_receipt_id,
+            "first_observed_at": first_observed_at,
             "calendar_version": evidence["calendar_version"],
             "label_rule_version": evidence["label_rule_version"],
             "source_policy_id": source_policy_id,
@@ -928,9 +1051,13 @@ class HistoricalEvidenceWorkflow:
             payload={
                 **derived_lineage,
                 "feature_snapshot_schema_version": "historical-feature-snapshot/v1",
-                "information_cutoff": cast(list[str], listing["sessions"])[
-                    min(20, len(cast(list[object], listing["sessions"])) - 1)
-                ],
+                "information_cutoff": (
+                    first_observed_at
+                    if evidence_level == "platform_observed"
+                    else cast(list[str], listing["sessions"])[
+                        min(20, len(cast(list[object], listing["sessions"])) - 1)
+                    ]
+                ),
                 "execution_purpose": "historical_reconstruction",
             },
             trace_id=command.trace_id,

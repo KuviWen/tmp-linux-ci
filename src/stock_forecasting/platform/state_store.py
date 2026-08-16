@@ -1323,6 +1323,7 @@ class StateStore:
             "source_access_basis",
             "collection_authorization_decision_ids",
             "collector_principal_ids",
+            "observation_receipt_id",
             "distribution_bindings",
             "first_observed_at",
             "attested_at",
@@ -1345,6 +1346,7 @@ class StateStore:
             != sorted(str(authorization.get("decision_id")) for authorization in authorizations)
             or payload.get("collector_principal_ids")
             != sorted({str(authorization.get("principal_id")) for authorization in authorizations})
+            or not isinstance(payload.get("observation_receipt_id"), str)
             or payload.get("distribution_bindings")
             != sorted(
                 [
@@ -1369,6 +1371,58 @@ class StateStore:
             payload=payload,
             trace_id=trace_id,
             authorization_outcomes=[(authorization, "allowed") for authorization in authorizations],
+        )
+
+    def _publish_historical_observation_receipt(
+        self,
+        *,
+        payload: dict[str, object],
+        trace_id: str,
+        authorization: dict[str, object],
+    ) -> str:
+        required_fields = {
+            "object_id",
+            "request_id",
+            "source_id",
+            "source_mode",
+            "source_revision",
+            "distribution_id",
+            "distribution_url",
+            "sanitized_source_uri",
+            "acquired_at",
+            "checkpoint_before",
+            "checkpoint_after",
+        }
+        if (
+            set(payload) != required_fields
+            or payload.get("source_mode") not in {"current", "historical"}
+            or any(
+                not isinstance(payload.get(field_name), str)
+                for field_name in (
+                    "object_id",
+                    "request_id",
+                    "source_id",
+                    "source_revision",
+                    "distribution_id",
+                    "distribution_url",
+                    "sanitized_source_uri",
+                    "acquired_at",
+                )
+            )
+            or authorization.get("action") != "market_data.collect"
+            or authorization.get("reason_code") != "authorized"
+            or authorization.get("dataset_id") != payload.get("source_id")
+            or authorization.get("distribution_id") != payload.get("distribution_id")
+            or authorization.get("distribution_url") != payload.get("distribution_url")
+            or authorization.get("evaluated_at") != payload.get("acquired_at")
+        ):
+            raise ValueError("historical_observation_receipt_invalid")
+        return self._publish_trace_artifact(
+            artifact_kind="source_retrieval_receipt",
+            execution_purpose="price_research",
+            payload=payload,
+            trace_id=trace_id,
+            authorization_outcomes=[(authorization, "allowed")],
         )
 
     def _publish_historical_policy_blocked(
