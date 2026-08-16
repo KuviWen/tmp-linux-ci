@@ -1202,12 +1202,22 @@ def test_passed_live_source_contract_assessment_requires_versioned_universe_iden
         )
 
 
-def test_source_contract_assessment_rejects_non_uuid_listing_evidence() -> None:
+@pytest.mark.parametrize(
+    "listing_id",
+    [
+        "not-a-uuid",
+        "70000000000040008000000000000001",
+        "{70000000-0000-4000-8000-000000000001}",
+    ],
+)
+def test_source_contract_assessment_rejects_non_canonical_uuid_listing_evidence(
+    listing_id: str,
+) -> None:
     with pytest.raises(ValueError, match="source_contract_assessment_invalid"):
         SourceContractAssessment(
             contract_id="alpaca-ticket-07-live-v1",
             live_validation="failed",
-            listing_ids=("not-a-uuid",),
+            listing_ids=(listing_id,),
             source_contract_reason_code="source_contract_schema_invalid",
         )
 

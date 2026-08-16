@@ -330,7 +330,8 @@ class SourceContractAssessment:
             for listing_id in self.listing_ids:
                 if not listing_id.strip():
                     raise ValueError
-                UUID(listing_id)
+                if str(UUID(listing_id)) != listing_id.lower():
+                    raise ValueError
         except (AttributeError, TypeError, ValueError):
             raise ValueError("source_contract_assessment_invalid") from None
         if len(set(self.listing_ids)) != len(self.listing_ids):
