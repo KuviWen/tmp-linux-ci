@@ -11,6 +11,7 @@ from stock_forecasting.alpaca_market_data import (
     AlpacaLiveContractValidator,
     UrllibProviderHttpTransport,
 )
+from stock_forecasting.alpaca_provider_contract import ALPACA_PROVIDER_ID
 from stock_forecasting.application import Application, build_application
 from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
@@ -137,8 +138,6 @@ class RuntimeSettings:
             source_adapter_security_context=source_adapter_security_context,
             secret_provider=EncryptedFilesystemSecretProvider(self.source_secret_root),
             source_credential_validators={
-                "alpaca-market-data-basic": AlpacaLiveContractValidator(
-                    UrllibProviderHttpTransport()
-                )
+                ALPACA_PROVIDER_ID: AlpacaLiveContractValidator(UrllibProviderHttpTransport())
             },
         )

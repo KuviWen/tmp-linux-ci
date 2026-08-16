@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from stock_forecasting.alpaca_provider_contract import ALPACA_PROVIDER_ID
 from stock_forecasting.application import Application
 from stock_forecasting.authorization import (
     IdentityVerificationError,
@@ -936,7 +937,7 @@ for (const button of document.querySelectorAll('[data-operation]')) {
         if source_basis.get("basis_type") == "zero_fee_plan":
             provider_name = (
                 "Alpaca Market Data Basic"
-                if source_basis.get("provider_id") == "alpaca-market-data-basic"
+                if source_basis.get("provider_id") == ALPACA_PROVIDER_ID
                 else str(source_basis.get("provider_id", "未知 provider"))
             )
             basis_details = (

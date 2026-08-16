@@ -15,6 +15,10 @@ from stock_forecasting.alpaca_market_data import (
     load_candidate_alpaca_market_calendar_evidence,
     load_candidate_alpaca_reference_graph,
 )
+from stock_forecasting.alpaca_provider_contract import (
+    ALPACA_BARS_DISTRIBUTION,
+    ALPACA_PROVIDER_ID,
+)
 from stock_forecasting.authorization import (
     AuthorizationPolicy,
     CurrentSourcePrincipalAttributes,
@@ -181,14 +185,14 @@ class Application:
         reference_graph = load_candidate_alpaca_reference_graph()
         market_calendar_evidence = load_candidate_alpaca_market_calendar_evidence()
         return AlpacaPriceSourceAdapter(
-            source_id="alpaca-us-stock-bars",
+            source_id=ALPACA_BARS_DISTRIBUTION.policy_dataset_id,
             mode="historical",
-            adapter_version="alpaca-market-data-basic-v1",
+            adapter_version=f"{ALPACA_PROVIDER_ID}-v1",
             rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
             source_access_mode=source_access_mode,
             collector=AlpacaSourceCollector(
-                source_id="alpaca-us-stock-bars",
-                provider_id="alpaca-market-data-basic",
+                source_id=ALPACA_BARS_DISTRIBUTION.policy_dataset_id,
+                provider_id=ALPACA_PROVIDER_ID,
                 reference_graph=reference_graph,
                 market_calendar_evidence=market_calendar_evidence,
                 credential_resolver=ManagedSourceCredentialResolver(
@@ -203,7 +207,7 @@ class Application:
                 rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
             ),
             decoder=AlpacaSourceDecoder(
-                source_id="alpaca-us-stock-bars",
+                source_id=ALPACA_BARS_DISTRIBUTION.policy_dataset_id,
                 reference_graph=reference_graph,
             ),
         )

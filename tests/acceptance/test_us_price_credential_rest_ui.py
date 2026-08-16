@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Barrier, BrokenBarrierError
 from time import monotonic
 from typing import Any
 
@@ -156,6 +159,21 @@ class RecordingSecretProvider:
             raise OSError("injected_secret_delete_failure")
         self.delegate.revoke(secret_ref)
         self.refs.discard(secret_ref.secret_ref_id)
+
+
+class ConcurrentCheckoutSecretProvider(RecordingSecretProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.synchronize_checkout = False
+        self.concurrent_checkout_attempts = 0
+        self.checkout_barrier = Barrier(2)
+
+    def checkout(self, secret_ref: SecretRef, use_context: SecretUseContext) -> SecretLease:
+        if self.synchronize_checkout:
+            self.concurrent_checkout_attempts += 1
+            with suppress(BrokenBarrierError):
+                self.checkout_barrier.wait(timeout=0.5)
+        return super().checkout(secret_ref, use_context)
 
 
 class SequenceProviderTransport:
@@ -759,6 +777,13 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
                 contract_id="alpaca-ticket-07-live-v1",
                 live_validation="passed",
                 ticker_count=10,
+                pagination_pages=2,
+                datasets=(
+                    "alpaca-us-stock-bars-v2",
+                    "alpaca-us-corporate-actions-v1",
+                    "alpaca-us-trading-calendar-v2",
+                ),
+                symbol_lifecycle_probe="passed",
             ),
         )
     )
@@ -798,9 +823,13 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
         "contract_id": "alpaca-ticket-07-live-v1",
         "live_validation": "passed",
         "ticker_count": 10,
-        "pagination_pages": None,
-        "datasets": [],
-        "symbol_lifecycle_probe": None,
+        "pagination_pages": 2,
+        "datasets": [
+            "alpaca-us-stock-bars-v2",
+            "alpaca-us-corporate-actions-v1",
+            "alpaca-us-trading-calendar-v2",
+        ],
+        "symbol_lifecycle_probe": "passed",
         "source_contract_reason_code": None,
     }
     assert re.fullmatch(
@@ -1107,6 +1136,48 @@ def test_source_contract_assessment_rejects_incoherent_state_combinations(
         SourceContractAssessment(**assessment_fields)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "assessment_fields",
+    [
+        {
+            "contract_id": "alpaca-ticket-07-live-v1",
+            "live_validation": "passed",
+            "ticker_count": 0,
+            "pagination_pages": 2,
+            "datasets": (
+                "alpaca-us-stock-bars-v2",
+                "alpaca-us-corporate-actions-v1",
+                "alpaca-us-trading-calendar-v2",
+            ),
+            "symbol_lifecycle_probe": "passed",
+        },
+        {
+            "contract_id": "alpaca-ticket-07-live-v1",
+            "live_validation": "passed",
+            "ticker_count": 10,
+            "pagination_pages": 1,
+            "datasets": (
+                "alpaca-us-stock-bars-v2",
+                "alpaca-us-corporate-actions-v1",
+                "alpaca-us-trading-calendar-v2",
+            ),
+            "symbol_lifecycle_probe": "passed",
+        },
+        {
+            "contract_id": "alpaca-credential-probe-v1",
+            "live_validation": "passed",
+            "ticker_count": 1,
+            "datasets": (),
+        },
+    ],
+)
+def test_passed_source_contract_assessment_requires_contract_specific_evidence(
+    assessment_fields: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="source_contract_assessment_invalid"):
+        SourceContractAssessment(**assessment_fields)  # type: ignore[arg-type]
+
+
 def test_operations_rejects_validator_output_that_echoes_a_credential_value(
     tmp_path: Path,
 ) -> None:
@@ -1119,6 +1190,14 @@ def test_operations_rejects_validator_output_that_echoes_a_credential_value(
             source_contract_assessment=SourceContractAssessment(
                 contract_id=secret_value,
                 live_validation="passed",
+                ticker_count=10,
+                pagination_pages=2,
+                datasets=(
+                    "alpaca-us-stock-bars-v2",
+                    "alpaca-us-corporate-actions-v1",
+                    "alpaca-us-trading-calendar-v2",
+                ),
+                symbol_lifecycle_probe="passed",
             ),
         )
     )
@@ -1526,6 +1605,73 @@ def test_one_work_id_stays_pinned_to_one_credential_version_after_rotation(
     )
     assert new_work_lease.secret_ref_id == second["secret_ref_id"]
     assert new_work_lease.credential_fields()["api_key_id"] == "PK-PINNED-SECOND"
+
+
+def test_concurrent_resolution_returns_one_lease_for_one_work_id(tmp_path: Path) -> None:
+    secret_provider = ConcurrentCheckoutSecretProvider()
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+        secret_provider=secret_provider,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-CONCURRENT-LEASE",
+                "api_secret_key": "concurrent-lease-secret",
+            }
+        },
+    )
+    client.post(f"{endpoint}/validations", headers=headers)
+    resolve_arguments = {
+        "trace_id": "trace-concurrent-work-lease",
+        "request_id": "request-concurrent-work-lease",
+        "work_id": "work-concurrent-work-lease",
+        "source_id": "alpaca-us-stock-bars",
+    }
+    ManagedSourceCredentialResolver(
+        application.state_store,
+        secret_provider,
+        workload_principal_id="workload:alpaca-source-adapter",
+        environment="development",
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+    ).resolve_valid("alpaca-market-data-basic", **resolve_arguments)
+    secret_provider.checkout_calls.clear()
+    secret_provider.leases.clear()
+    secret_provider.synchronize_checkout = True
+    resolver = ManagedSourceCredentialResolver(
+        application.state_store,
+        secret_provider,
+        workload_principal_id="workload:alpaca-source-adapter",
+        environment="development",
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                resolver.resolve_valid,
+                "alpaca-market-data-basic",
+                **resolve_arguments,
+            )
+            for _ in range(2)
+        ]
+        leases = [future.result() for future in futures]
+
+    assert leases[0] is leases[1]
+    assert secret_provider.concurrent_checkout_attempts == 1
+    assert len(secret_provider.checkout_calls) == 1
+    assert len(secret_provider.leases) == 1
 
 
 def test_one_work_id_cannot_renew_its_pinned_lease_window(tmp_path: Path) -> None:

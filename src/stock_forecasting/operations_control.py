@@ -39,7 +39,7 @@ from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 _ALPACA_SOURCE_BASIS = load_us_stock_pool_manifest().source_basis.as_payload()
 _SOURCE_CREDENTIAL_PROVIDERS: tuple[dict[str, object], ...] = (
     {
-        "provider_id": "alpaca-market-data-basic",
+        "provider_id": ALPACA_PROVIDER_ID,
         "display_name": "Alpaca Market Data Basic",
         "credential_kind": "api_key_pair",
         "source_basis": _ALPACA_SOURCE_BASIS,

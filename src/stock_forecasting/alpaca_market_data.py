@@ -19,6 +19,7 @@ from stock_forecasting.alpaca_provider_contract import (
     ALPACA_CREDENTIAL_VALIDATION_URL,
     ALPACA_LIVE_VALIDATION_CONTRACT_ID,
     ALPACA_PROVIDER_DISTRIBUTIONS,
+    ALPACA_PROVIDER_ID,
     ALPACA_REQUIRED_BUNDLE_DISTRIBUTIONS,
     ALPACA_TRADING_CALENDAR_DISTRIBUTION,
 )
@@ -1258,7 +1259,7 @@ class AlpacaSourceDecoder:
             raise ValueError("source_provider_schema_invalid") from error
         if (
             not isinstance(bundle, dict)
-            or bundle.get("provider_id") != "alpaca-market-data-basic"
+            or bundle.get("provider_id") != ALPACA_PROVIDER_ID
             or bundle.get("schema_version") != "alpaca-source-bundle-v1"
         ):
             raise ValueError("source_provider_schema_invalid")

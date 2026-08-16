@@ -18,8 +18,8 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from cryptography.fernet import Fernet, InvalidToken
 
 from stock_forecasting.alpaca_provider_contract import (
-    ALPACA_VALIDATION_CONTRACT_IDS,
     ALPACA_VALIDATION_DATASET_IDS,
+    alpaca_validation_contract,
 )
 from stock_forecasting.authorization import SourceAccessMode
 from stock_forecasting.platform.state_store import StateStore
@@ -305,7 +305,10 @@ class SourceContractAssessment:
     def __post_init__(self) -> None:
         if self.live_validation not in {"not_run", "passed", "failed"}:
             raise ValueError("source_contract_assessment_invalid")
-        if self.contract_id is not None and self.contract_id not in ALPACA_VALIDATION_CONTRACT_IDS:
+        validation_contract = (
+            alpaca_validation_contract(self.contract_id) if self.contract_id is not None else None
+        )
+        if self.contract_id is not None and validation_contract is None:
             raise ValueError("source_contract_assessment_invalid")
         if self.ticker_count is not None and self.ticker_count < 0:
             raise ValueError("source_contract_assessment_invalid")
@@ -333,7 +336,14 @@ class SourceContractAssessment:
         if self.live_validation == "not_run" and has_measurement:
             raise ValueError("source_contract_assessment_invalid")
         if self.live_validation == "passed" and (
-            self.contract_id is None or self.source_contract_reason_code is not None
+            validation_contract is None
+            or self.source_contract_reason_code is not None
+            or not validation_contract.accepts_passed_evidence(
+                ticker_count=self.ticker_count,
+                pagination_pages=self.pagination_pages,
+                dataset_ids=self.datasets,
+                symbol_lifecycle_probe=self.symbol_lifecycle_probe,
+            )
         ):
             raise ValueError("source_contract_assessment_invalid")
         if self.live_validation == "failed" and (
@@ -704,8 +714,27 @@ class ManagedSourceCredentialResolver:
         self._environment = environment
         self._clock = clock or (lambda: datetime.now(UTC))
         self._leases: OrderedDict[tuple[str, str], SecretLease] = OrderedDict()
+        self._resolve_lock = Lock()
 
     def resolve_valid(
+        self,
+        provider_id: str,
+        *,
+        trace_id: str,
+        request_id: str,
+        work_id: str,
+        source_id: str,
+    ) -> SecretLease:
+        with self._resolve_lock:
+            return self._resolve_valid(
+                provider_id,
+                trace_id=trace_id,
+                request_id=request_id,
+                work_id=work_id,
+                source_id=source_id,
+            )
+
+    def _resolve_valid(
         self,
         provider_id: str,
         *,

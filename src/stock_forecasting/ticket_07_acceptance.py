@@ -13,6 +13,12 @@ from stock_forecasting.alpaca_market_data import (
     ProviderHttpRequest,
     load_candidate_alpaca_reference_graph,
 )
+from stock_forecasting.alpaca_provider_contract import (
+    ALPACA_BARS_DISTRIBUTION,
+    ALPACA_CORPORATE_ACTIONS_DISTRIBUTION,
+    ALPACA_PROVIDER_ID,
+    ALPACA_TRADING_CALENDAR_DISTRIBUTION,
+)
 from stock_forecasting.authorization import LocalApiKeyIdentity
 from stock_forecasting.authorization_repository import (
     TICKET_07_ENGINEERING_POLICY_SET,
@@ -78,14 +84,14 @@ def run_ticket_07_acceptance(
     secret_provider = EncryptedFilesystemSecretProvider(source_secret_root)
     transport = _ProviderMustNotBeContacted()
     adapter = AlpacaPriceSourceAdapter(
-        source_id="alpaca-us-stock-bars",
+        source_id=ALPACA_BARS_DISTRIBUTION.policy_dataset_id,
         mode="historical",
-        adapter_version="alpaca-market-data-basic-v1",
+        adapter_version=f"{ALPACA_PROVIDER_ID}-v1",
         rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
         source_access_mode="engineering_double",
         collector=AlpacaSourceCollector(
-            source_id="alpaca-us-stock-bars",
-            provider_id="alpaca-market-data-basic",
+            source_id=ALPACA_BARS_DISTRIBUTION.policy_dataset_id,
+            provider_id=ALPACA_PROVIDER_ID,
             reference_graph=reference_graph,
             credential_resolver=ManagedSourceCredentialResolver(
                 state_store,
@@ -98,14 +104,14 @@ def run_ticket_07_acceptance(
             rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
         ),
         decoder=AlpacaSourceDecoder(
-            source_id="alpaca-us-stock-bars",
+            source_id=ALPACA_BARS_DISTRIBUTION.policy_dataset_id,
             reference_graph=reference_graph,
         ),
     )
     data_supply = DataSupply(
         authorization_policy=source_adapter_policy,
         security_context=source_adapter_identity.context,
-        adapters={"alpaca-us-stock-bars": adapter},
+        adapters={ALPACA_BARS_DISTRIBUTION.policy_dataset_id: adapter},
         object_repository=FilesystemObjectRepository(object_root),
         state_store=state_store,
         clock=lambda: datetime.now(UTC),
@@ -114,26 +120,26 @@ def run_ticket_07_acceptance(
         SourcePartitionRequest(
             request_id="ticket-07-deployed-missing-credential",
             trace_id="p2-trace-us-01-deployed-missing-credential",
-            source_id="alpaca-us-stock-bars",
+            source_id=ALPACA_BARS_DISTRIBUTION.policy_dataset_id,
             mode="historical",
             listing_ids=(listing.listing_id,),
             start_date=date(2024, 1, 3),
             end_date=date(2024, 1, 3),
             expected_checkpoint=None,
-            distribution_id="alpaca-us-stock-bars-v2",
-            distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+            distribution_id=ALPACA_BARS_DISTRIBUTION.distribution_id,
+            distribution_url=ALPACA_BARS_DISTRIBUTION.distribution_url,
             source_basis_id="ENGINEERING-ALPACA-CONTRACT-01",
             bundle_members=(
                 SourceBundleMemberRequest(
-                    dataset_id="alpaca-us-corporate-actions-v1",
-                    distribution_id="alpaca-us-corporate-actions-v1",
-                    distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+                    dataset_id=ALPACA_CORPORATE_ACTIONS_DISTRIBUTION.policy_dataset_id,
+                    distribution_id=ALPACA_CORPORATE_ACTIONS_DISTRIBUTION.distribution_id,
+                    distribution_url=ALPACA_CORPORATE_ACTIONS_DISTRIBUTION.distribution_url,
                     schema_version="alpaca-corporate-actions-v1",
                 ),
                 SourceBundleMemberRequest(
-                    dataset_id="alpaca-us-trading-calendar-v2",
-                    distribution_id="alpaca-us-trading-calendar-v2",
-                    distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+                    dataset_id=ALPACA_TRADING_CALENDAR_DISTRIBUTION.policy_dataset_id,
+                    distribution_id=ALPACA_TRADING_CALENDAR_DISTRIBUTION.distribution_id,
+                    distribution_url=ALPACA_TRADING_CALENDAR_DISTRIBUTION.distribution_url,
                     schema_version="alpaca-trading-calendar-v2",
                 ),
             ),
