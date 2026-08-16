@@ -17,6 +17,10 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from stock_forecasting.alpaca_provider_contract import (
+    ALPACA_VALIDATION_CONTRACT_IDS,
+    ALPACA_VALIDATION_DATASET_IDS,
+)
 from stock_forecasting.authorization import SourceAccessMode
 from stock_forecasting.platform.state_store import StateStore
 
@@ -30,14 +34,6 @@ _CREDENTIAL_VALIDATION_REASON_CODES = frozenset(
         "source_credential_validation_inconclusive",
         "source_credential_validator_output_rejected",
         "source_credential_valid",
-    }
-)
-_VALIDATION_CONTRACT_IDS = frozenset({"alpaca-credential-probe-v1", "alpaca-ticket-07-live-v1"})
-_VALIDATION_DATASET_IDS = frozenset(
-    {
-        "alpaca-us-corporate-actions-v1",
-        "alpaca-us-stock-bars-v2",
-        "alpaca-us-trading-calendar-v2",
     }
 )
 _SOURCE_CONTRACT_REASON_CODES = frozenset(
@@ -309,13 +305,13 @@ class SourceContractAssessment:
     def __post_init__(self) -> None:
         if self.live_validation not in {"not_run", "passed", "failed"}:
             raise ValueError("source_contract_assessment_invalid")
-        if self.contract_id is not None and self.contract_id not in _VALIDATION_CONTRACT_IDS:
+        if self.contract_id is not None and self.contract_id not in ALPACA_VALIDATION_CONTRACT_IDS:
             raise ValueError("source_contract_assessment_invalid")
         if self.ticker_count is not None and self.ticker_count < 0:
             raise ValueError("source_contract_assessment_invalid")
         if self.pagination_pages is not None and self.pagination_pages < 0:
             raise ValueError("source_contract_assessment_invalid")
-        if any(dataset not in _VALIDATION_DATASET_IDS for dataset in self.datasets):
+        if any(dataset not in ALPACA_VALIDATION_DATASET_IDS for dataset in self.datasets):
             raise ValueError("source_contract_assessment_invalid")
         if self.symbol_lifecycle_probe not in {None, "passed"}:
             raise ValueError("source_contract_assessment_invalid")
@@ -729,6 +725,9 @@ class ManagedSourceCredentialResolver:
             )
         )
         existing_pin = self._state_store.get_security_event(event_id=pin_event_id)
+        if current["readiness"] in {"expired", "revoked", "validation_failed"}:
+            self._revoke_work_lease(provider_id=provider_id, work_id=work_id)
+            raise CredentialNotReady(str(current["reason_code"]))
         if existing_pin is None and current["readiness"] != "valid":
             raise CredentialNotReady(str(current["reason_code"]))
         evaluated_at = self._clock()
@@ -752,6 +751,7 @@ class ManagedSourceCredentialResolver:
             isinstance(credential_expires_at, str)
             and datetime.fromisoformat(credential_expires_at.replace("Z", "+00:00")) <= evaluated_at
         ):
+            self._revoke_work_lease(provider_id=provider_id, work_id=work_id)
             raise CredentialNotReady("source_credential_expired")
         credential_version = pinned.get("credential_version")
         secret_ref_id = pinned.get("secret_ref_id")
@@ -767,6 +767,7 @@ class ManagedSourceCredentialResolver:
         pinned_not_before = datetime.fromisoformat(lease_not_before.replace("Z", "+00:00"))
         pinned_expires_at = datetime.fromisoformat(lease_expires_at.replace("Z", "+00:00"))
         if pinned_expires_at <= evaluated_at:
+            self._revoke_work_lease(provider_id=provider_id, work_id=work_id)
             raise CredentialNotReady("source_credential_lease_expired")
         cached_lease = self._leases.get((provider_id, work_id))
         if cached_lease is not None:
@@ -810,6 +811,11 @@ class ManagedSourceCredentialResolver:
                 continue
             lease.revoke()
             del self._leases[cache_key]
+
+    def _revoke_work_lease(self, *, provider_id: str, work_id: str) -> None:
+        lease = self._leases.pop((provider_id, work_id), None)
+        if lease is not None:
+            lease.revoke()
 
 
 class InMemorySecretProvider:

@@ -1330,6 +1330,74 @@ def test_only_a_valid_managed_credential_can_be_resolved_for_provider_use(
         )
 
 
+@pytest.mark.parametrize(
+    ("terminal_transition", "expected_reason"),
+    [
+        ("revoke", "source_credential_revoked"),
+        ("validation_failed", "source_credential_authentication_failed"),
+    ],
+)
+def test_terminal_credential_state_revokes_an_existing_work_lease(
+    tmp_path: Path,
+    terminal_transition: str,
+    expected_reason: str,
+) -> None:
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-TERMINAL-LEASE",
+                "api_secret_key": "terminal-lease-secret",
+            }
+        },
+    )
+    client.post(f"{endpoint}/validations", headers=headers)
+    resolver = ManagedSourceCredentialResolver(
+        application.state_store,
+        application.secret_provider,
+        workload_principal_id="workload:alpaca-source-adapter",
+        environment="development",
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+    )
+    resolve_arguments = {
+        "trace_id": "trace-terminal-work-lease",
+        "request_id": "request-terminal-work-lease",
+        "work_id": "work-terminal-work-lease",
+        "source_id": "alpaca-us-stock-bars",
+    }
+    lease = resolver.resolve_valid("alpaca-market-data-basic", **resolve_arguments)
+    assert lease.active is True
+
+    if terminal_transition == "revoke":
+        client.delete(endpoint, headers=headers)
+    else:
+        validator.result = CredentialValidationResult(
+            readiness="validation_failed",
+            reason_code="source_credential_authentication_failed",
+            evidence=CredentialValidationEvidence(authentication_status="failed"),
+        )
+        client.post(f"{endpoint}/validations", headers=headers)
+
+    with pytest.raises(CredentialNotReady, match=expected_reason):
+        resolver.resolve_valid("alpaca-market-data-basic", **resolve_arguments)
+    assert lease.revoked is True
+    with pytest.raises(SecretUnavailableError, match="source_credential_lease_revoked"):
+        lease.credential_fields()
+
+
 def test_secret_checkout_audit_failure_prevents_secret_egress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

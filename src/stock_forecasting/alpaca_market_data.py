@@ -15,7 +15,9 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from stock_forecasting.alpaca_provider_contract import (
     ALPACA_BARS_DISTRIBUTION,
     ALPACA_CORPORATE_ACTIONS_DISTRIBUTION,
+    ALPACA_CREDENTIAL_PROBE_CONTRACT_ID,
     ALPACA_CREDENTIAL_VALIDATION_URL,
+    ALPACA_LIVE_VALIDATION_CONTRACT_ID,
     ALPACA_PROVIDER_DISTRIBUTIONS,
     ALPACA_REQUIRED_BUNDLE_DISTRIBUTIONS,
     ALPACA_TRADING_CALENDAR_DISTRIBUTION,
@@ -458,7 +460,7 @@ class AlpacaCredentialValidator:
                 readiness="configured",
                 reason_code="source_credential_validation_inconclusive",
                 source_contract_assessment=SourceContractAssessment(
-                    contract_id="alpaca-credential-probe-v1",
+                    contract_id=ALPACA_CREDENTIAL_PROBE_CONTRACT_ID,
                     live_validation="failed",
                     source_contract_reason_code="source_contract_forbidden",
                 ),
@@ -468,7 +470,7 @@ class AlpacaCredentialValidator:
                 readiness="configured",
                 reason_code="source_credential_validation_inconclusive",
                 source_contract_assessment=SourceContractAssessment(
-                    contract_id="alpaca-credential-probe-v1",
+                    contract_id=ALPACA_CREDENTIAL_PROBE_CONTRACT_ID,
                     live_validation="failed",
                     source_contract_reason_code="source_contract_rate_limited",
                 ),
@@ -478,7 +480,7 @@ class AlpacaCredentialValidator:
                 readiness="configured",
                 reason_code="source_credential_validation_inconclusive",
                 source_contract_assessment=SourceContractAssessment(
-                    contract_id="alpaca-credential-probe-v1",
+                    contract_id=ALPACA_CREDENTIAL_PROBE_CONTRACT_ID,
                     live_validation="failed",
                     source_contract_reason_code="source_contract_unavailable",
                 ),
@@ -493,7 +495,7 @@ class AlpacaCredentialValidator:
                 reason_code="source_credential_valid",
                 evidence=CredentialValidationEvidence(authentication_status="passed"),
                 source_contract_assessment=SourceContractAssessment(
-                    contract_id="alpaca-credential-probe-v1",
+                    contract_id=ALPACA_CREDENTIAL_PROBE_CONTRACT_ID,
                     live_validation="failed",
                     source_contract_reason_code="source_contract_schema_invalid",
                 ),
@@ -503,7 +505,7 @@ class AlpacaCredentialValidator:
             reason_code="source_credential_valid",
             evidence=CredentialValidationEvidence(authentication_status="passed"),
             source_contract_assessment=SourceContractAssessment(
-                contract_id="alpaca-credential-probe-v1",
+                contract_id=ALPACA_CREDENTIAL_PROBE_CONTRACT_ID,
                 live_validation="passed",
                 ticker_count=1,
                 datasets=(ALPACA_BARS_DISTRIBUTION.distribution_id,),
@@ -668,7 +670,7 @@ class AlpacaLiveContractValidator:
                 authentication_status="passed",
             ),
             source_contract_assessment=SourceContractAssessment(
-                contract_id="alpaca-ticket-07-live-v1",
+                contract_id=ALPACA_LIVE_VALIDATION_CONTRACT_ID,
                 live_validation="passed",
                 ticker_count=10,
                 pagination_pages=pagination_pages,
@@ -742,7 +744,7 @@ class AlpacaLiveContractValidator:
                 readiness="configured",
                 reason_code="source_credential_validation_inconclusive",
                 source_contract_assessment=SourceContractAssessment(
-                    contract_id="alpaca-ticket-07-live-v1",
+                    contract_id=ALPACA_LIVE_VALIDATION_CONTRACT_ID,
                     live_validation="failed",
                     source_contract_reason_code=source_contract_reason,
                 ),
@@ -776,7 +778,7 @@ class AlpacaLiveContractValidator:
             reason_code="source_credential_valid",
             evidence=CredentialValidationEvidence(authentication_status="passed"),
             source_contract_assessment=SourceContractAssessment(
-                contract_id="alpaca-ticket-07-live-v1",
+                contract_id=ALPACA_LIVE_VALIDATION_CONTRACT_ID,
                 live_validation="failed",
                 source_contract_reason_code=reason_code,
             ),

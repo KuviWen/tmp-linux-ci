@@ -4,8 +4,12 @@ from datetime import date
 from uuid import UUID
 
 from stock_forecasting.alpaca_provider_contract import (
+    ALPACA_CREDENTIAL_PROBE_CONTRACT_ID,
+    ALPACA_LIVE_VALIDATION_CONTRACT_ID,
     ALPACA_PROVIDER_DISTRIBUTIONS,
     ALPACA_PROVIDER_ID,
+    ALPACA_VALIDATION_CONTRACT_IDS,
+    ALPACA_VALIDATION_DATASET_IDS,
 )
 from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
@@ -179,3 +183,24 @@ def test_alpaca_provider_contract_catalog_matches_the_source_manifest() -> None:
         (distribution.distribution_id, distribution.distribution_url)
         for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
     ]
+    assert (
+        frozenset(
+            {
+                "alpaca-credential-probe-v1",
+                "alpaca-ticket-07-live-v1",
+            }
+        )
+        == ALPACA_VALIDATION_CONTRACT_IDS
+    )
+    assert ALPACA_CREDENTIAL_PROBE_CONTRACT_ID in ALPACA_VALIDATION_CONTRACT_IDS
+    assert ALPACA_LIVE_VALIDATION_CONTRACT_ID in ALPACA_VALIDATION_CONTRACT_IDS
+    assert (
+        frozenset(
+            {
+                "alpaca-us-stock-bars-v2",
+                "alpaca-us-corporate-actions-v1",
+                "alpaca-us-trading-calendar-v2",
+            }
+        )
+        == ALPACA_VALIDATION_DATASET_IDS
+    )

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 ALPACA_PROVIDER_ID = "alpaca-market-data-basic"
+ALPACA_CREDENTIAL_PROBE_CONTRACT_ID = "alpaca-credential-probe-v1"
+ALPACA_LIVE_VALIDATION_CONTRACT_ID = "alpaca-ticket-07-live-v1"
 
 
 @dataclass(frozen=True)
@@ -39,4 +41,13 @@ ALPACA_REQUIRED_BUNDLE_DISTRIBUTIONS = (
 )
 ALPACA_CREDENTIAL_VALIDATION_URL = (
     f"{ALPACA_BARS_DISTRIBUTION.distribution_url.removesuffix('/bars')}/AAPL/bars"
+)
+ALPACA_VALIDATION_CONTRACT_IDS = frozenset(
+    {
+        ALPACA_CREDENTIAL_PROBE_CONTRACT_ID,
+        ALPACA_LIVE_VALIDATION_CONTRACT_ID,
+    }
+)
+ALPACA_VALIDATION_DATASET_IDS = frozenset(
+    distribution.distribution_id for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
 )
