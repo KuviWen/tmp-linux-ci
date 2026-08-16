@@ -309,6 +309,26 @@ class PriceSourceAdapter(Protocol):
     def load(self, request: SourcePartitionRequest) -> LoadedSourcePartition: ...
 
 
+class HistoricalAvailabilityClaimVerifier(Protocol):
+    def is_usable(
+        self,
+        *,
+        claim_id: str,
+        claim: HistoricalAvailabilityClaim,
+    ) -> bool: ...
+
+
+class _UnavailableHistoricalClaimVerifier:
+    def is_usable(
+        self,
+        *,
+        claim_id: str,
+        claim: HistoricalAvailabilityClaim,
+    ) -> bool:
+        del claim_id, claim
+        return False
+
+
 class SourceRateLimited(RuntimeError):
     def __init__(self, *, retry_after_seconds: int, rate_limit_policy_id: str) -> None:
         if retry_after_seconds < 0:
@@ -482,6 +502,7 @@ class DataSupply:
         object_repository: FilesystemObjectRepository,
         state_store: StateStore,
         clock: Callable[[], datetime],
+        historical_claim_verifier: HistoricalAvailabilityClaimVerifier | None = None,
     ) -> None:
         self._authorization_policy = authorization_policy
         self._security_context = security_context
@@ -489,6 +510,9 @@ class DataSupply:
         self._object_repository = object_repository
         self._state_store = state_store
         self._clock = clock
+        self._historical_claim_verifier = (
+            historical_claim_verifier or _UnavailableHistoricalClaimVerifier()
+        )
 
     def materialize(self, request: SourcePartitionRequest) -> PriceMaterializationOutcome:
         if request.policy_decision_id is not None:
@@ -1030,7 +1054,13 @@ class DataSupply:
                 artifact_id=claim_id,
                 artifact_kind="historical_availability_claim",
             )
-            return HistoricalAvailabilityClaim.from_payload(payload)
+            claim = HistoricalAvailabilityClaim.from_payload(payload)
+            if not self._historical_claim_verifier.is_usable(
+                claim_id=claim_id,
+                claim=claim,
+            ):
+                return None
+            return claim
         except (KeyError, ValueError):
             return None
 

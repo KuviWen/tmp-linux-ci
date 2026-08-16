@@ -13,13 +13,16 @@ from stock_forecasting.authorization import (
     ActionGrant,
     AuthorizationPolicy,
     LocalApiKeyIdentity,
+    OperationIntent,
     SourceAccessMode,
     SourceDistribution,
     SourceEntitlement,
     SourcePolicyVersion,
     SourceUseRight,
+    authorization_audit_payload,
 )
 from stock_forecasting.data_supply import (
+    PRICE_RESEARCH_REQUIRED_USES,
     CanonicalPriceRow,
     CollectedSourcePartition,
     CompanyActionRecord,
@@ -744,6 +747,110 @@ def test_synthetic_published_sources_cannot_be_reported_as_formally_qualified(
     assert expired_result["status"] == "policy_blocked"
     assert expired_result["reason_code"] == "source_rights_not_effective"
     assert expired_result["formally_qualified"] is False
+
+
+def test_stale_qualified_claim_is_quarantined_until_independent_verification(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 16, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-stale-claim-test",
+        environment="development",
+        scopes={"market_data.collect", "price_qualification.govern"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    loaded = _loaded_partition(
+        now=now,
+        listing_id=listing_id,
+        request_id="request-stale-qualified-claim",
+        source_revision="revision-stale-qualified-claim",
+        raw_payload=b'{"mode":"historical","claim":"legacy-qualified"}',
+    )
+    policy = _qualified_price_policy(identity, now)
+    state_store = StateStore(
+        f"sqlite+pysqlite:///{tmp_path / 'stale-qualified-claim.db'}",
+        create_schema=True,
+    )
+    legacy_claim = HistoricalAvailabilityClaim(
+        source_id=loaded.collection.source_id,
+        evidence_level="archive_attested",
+        evidence_status="qualified",
+        observed_start=date(2019, 8, 14),
+        observed_end=date(2026, 8, 14),
+        schema_version="taiwan-unadjusted-eod-v1",
+        exact_sessions_verified=True,
+        integrity_verified=True,
+        company_actions_verified=True,
+        listing_lifecycle_verified=True,
+        qualification_artifact_id=f"sha256:{'a' * 64}",
+    )
+    legacy_claim_id = "sha256:904011c20d1d3caa2765af7fb11097582f68c429320a889f9ace3b38f25ee6b2"
+    governance_decision = policy.evaluate(
+        identity.context,
+        OperationIntent(
+            action="price_qualification.govern",
+            dataset_id=loaded.collection.source_id,
+            purpose="price_research",
+            environment="development",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-legacy-qualified-claim",
+            correlation_id="legacy-qualified-claim",
+            required_uses=PRICE_RESEARCH_REQUIRED_USES,
+        ),
+    )
+    assert governance_decision.allowed is True
+    state_store.publish_price_research_evaluation(
+        trace_id="trace-legacy-qualified-claim",
+        execution_purpose="governance",
+        artifacts=[
+            {
+                "artifact_id": legacy_claim_id,
+                "artifact_kind": "historical_availability_claim",
+                "payload": legacy_claim.as_payload(),
+            }
+        ],
+        authorization=authorization_audit_payload(governance_decision),
+        authorization_outcome="allowed",
+        eligibility_records=[],
+    )
+    data_supply = DataSupply(
+        authorization_policy=policy,
+        security_context=identity.context,
+        adapters={loaded.collection.source_id: LiteralPriceAdapter(loaded)},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=state_store,
+        clock=lambda: now,
+    )
+
+    outcome = data_supply.materialize(
+        SourcePartitionRequest(
+            request_id=loaded.collection.request_id,
+            trace_id="trace-stale-qualified-materialization",
+            source_id=loaded.collection.source_id,
+            distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+            distribution_url=TWSE_EOD_DISTRIBUTION_URL,
+            mode="historical",
+            listing_ids=(listing_id,),
+            start_date=loaded.collection.coverage.requested_start,
+            end_date=loaded.collection.coverage.requested_end,
+            expected_checkpoint=None,
+            historical_availability_claim_id=legacy_claim_id,
+        )
+    )
+
+    assert outcome.status == "quarantined"
+    assert outcome.reason_code == "historical_evidence_unverified"
+    assert outcome.dataset_version_id is None
+    assert outcome.adjustment_version_id is None
+    assert state_store.get_trace_evidence(outcome.trace_id)["artifact_kinds"] == [
+        "raw_source_object",
+        "source_retrieval_receipt",
+        "quarantine_record",
+    ]
 
 
 @pytest.mark.parametrize(
