@@ -25,9 +25,11 @@ from stock_forecasting.authorization import (
     CurrentSourcePrincipalAttributes,
     EntitlementStatus,
     LocalApiKeyIdentity,
+    OperationIntent,
     PolicyDeniedOutcome,
     SecurityContext,
     SourceAccessMode,
+    authorization_audit_payload,
     build_fixture_authorization_policy,
 )
 from stock_forecasting.authorization_repository import AuthorizationPolicyRepository
@@ -325,6 +327,35 @@ class Application:
 
     def governance_time(self) -> datetime:
         return self._fixed_security_time or datetime.now(UTC)
+
+    def authorize_model_governance(
+        self,
+        *,
+        action: Literal["model_governance.read", "model_governance.approve"],
+        security_context: SecurityContext,
+        trace_id: str,
+    ) -> PolicyDeniedOutcome | None:
+        decision = self.authorization_policy.evaluate(
+            security_context,
+            OperationIntent(
+                action=action,
+                dataset_id="model-governance-ledger",
+                purpose="model_governance",
+                environment=security_context.environment,
+                resource_state="active",
+                evaluated_at=self.governance_time(),
+                trace_id=trace_id,
+                correlation_id=trace_id,
+            ),
+        )
+        self.state_store.record_authorization_decision(
+            authorization=authorization_audit_payload(decision),
+            outcome="allowed" if decision.allowed else "denied",
+            trace_id=trace_id,
+        )
+        if decision.allowed:
+            return None
+        return PolicyDeniedOutcome.from_decision(decision)
 
     def relay_outbox(self, *, event_id: str | None = None) -> RelayOutcome:
         return self.state_store.relay_outbox(

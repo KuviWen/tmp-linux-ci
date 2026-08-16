@@ -1,7 +1,13 @@
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
-from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
+from stock_forecasting.data_supply import HistoricalAvailabilityClaim
+from stock_forecasting.forecast_lab import (
+    ForecastLab,
+    HistoricalClaimRef,
+    Market,
+    TrainingIntentRef,
+)
 from stock_forecasting.forecasting import FeatureBatch, FeatureRow
 from tests.modeling_support import engineering_model_history
 
@@ -40,7 +46,6 @@ def test_forecast_lab_blocks_candidate_when_class_support_is_incomplete() -> Non
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=batch,
         preregistered_seeds=(17, 29, 43),
-        source_basis_verified=True,
     )
 
     outcome = ForecastLab().develop(intent)
@@ -59,7 +64,6 @@ def test_forecast_lab_builds_reproducible_dual_market_bootstrap_evidence() -> No
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
-        source_basis_verified=False,
         execution_purpose="engineering_acceptance",
     )
 
@@ -108,6 +112,9 @@ def test_forecast_lab_builds_reproducible_dual_market_bootstrap_evidence() -> No
     assert tuple(artifact.seed for artifact in bundle.logistic_artifacts) == (17, 29, 43)
     assert len(bundle.calibrators) == 6
     assert all(item.status == "sufficient_data" for item in bundle.calibrators)
+    assert all(item.fit_method == "temperature_scaling" for item in bundle.calibrators)
+    assert all(item.post_nll <= item.pre_nll for item in bundle.calibrators)
+    assert any(item.post_nll < item.pre_nll for item in bundle.calibrators)
     assert bundle.primary_artifact.calibrator_ids == tuple(
         item.calibrator_id for item in bundle.calibrators
     )
@@ -129,7 +136,6 @@ def test_latest_test_quarter_cannot_influence_fitted_artifact_or_calibrators() -
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=original_batch,
         preregistered_seeds=(17, 29, 43),
-        source_basis_verified=False,
         execution_purpose="engineering_acceptance",
     )
     changed_rows = tuple(
@@ -184,7 +190,6 @@ def test_insufficient_latest_validation_classes_block_all_candidate_artifacts() 
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=replace(batch, rows=rows),
         preregistered_seeds=(17, 29, 43),
-        source_basis_verified=False,
         execution_purpose="engineering_acceptance",
     )
 
@@ -193,3 +198,70 @@ def test_insufficient_latest_validation_classes_block_all_candidate_artifacts() 
     assert outcome.status == "blocked"
     assert outcome.blocked_reasons == ("insufficient_calibration_support",)
     assert outcome.candidate_bundle is None
+
+
+def test_formal_candidate_requires_verified_ticket_08_historical_claim_chain() -> None:
+    intent = TrainingIntentRef(
+        training_intent_id="intent-unverified-formal-history",
+        model_family_id="dual-market-price-baseline-v1",
+        initiated_by="model-operator-a",
+        executed_by="model-operator-b",
+        created_at=datetime(2026, 8, 17, tzinfo=UTC),
+        feature_batch=engineering_model_history(),
+        preregistered_seeds=(17, 29, 43),
+    )
+
+    outcome = ForecastLab().develop(intent)
+
+    assert outcome.status == "blocked"
+    assert outcome.blocked_reasons == ("unverified_source_basis",)
+    assert outcome.candidate_bundle is None
+
+
+def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> None:
+    verified_claim_ids: list[str] = []
+
+    class VerifiedClaimBoundary:
+        def is_formally_reconstructable(
+            self, *, claim_id: str, claim: HistoricalAvailabilityClaim
+        ) -> bool:
+            verified_claim_ids.append(claim_id)
+            return claim.evidence_status == "qualified"
+
+    def claim_ref(market: Market) -> HistoricalClaimRef:
+        claim = HistoricalAvailabilityClaim(
+            source_id=f"source-{market.lower()}",
+            evidence_level="platform_observed",
+            evidence_status="qualified",
+            observed_start=date(2023, 1, 2),
+            observed_end=date(2025, 12, 31),
+            schema_version="1.0.0",
+            exact_sessions_verified=True,
+            integrity_verified=True,
+            company_actions_verified=True,
+            listing_lifecycle_verified=True,
+            qualification_artifact_id=f"sha256:qualification-{market.lower()}",
+        )
+        return HistoricalClaimRef(
+            market=market,
+            claim_id=f"sha256:claim-{market.lower()}",
+            claim=claim,
+        )
+
+    intent = TrainingIntentRef(
+        training_intent_id="intent-verified-formal-history",
+        model_family_id="dual-market-price-baseline-v1",
+        initiated_by="model-operator-a",
+        executed_by="model-operator-b",
+        created_at=datetime(2026, 8, 17, tzinfo=UTC),
+        feature_batch=engineering_model_history(),
+        preregistered_seeds=(17, 29, 43),
+        historical_claims=(claim_ref("XTAI"), claim_ref("XNAS")),
+    )
+
+    outcome = ForecastLab(historical_claim_verifier=VerifiedClaimBoundary()).develop(intent)
+
+    assert outcome.status == "developed"
+    assert outcome.candidate_bundle is not None
+    assert outcome.candidate_bundle.formal_qualification is True
+    assert verified_claim_ids == ["sha256:claim-xtai", "sha256:claim-xnas"]

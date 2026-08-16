@@ -31,7 +31,12 @@ AuthorizationAction = Literal[
     "model_governance.read",
     "model_governance.approve",
 ]
-AuthorizationPurpose = Literal["fixture_research", "price_research", "source_administration"]
+AuthorizationPurpose = Literal[
+    "fixture_research",
+    "price_research",
+    "source_administration",
+    "model_governance",
+]
 AuthorizationResourceState = Literal["active"]
 SourceUseRight = Literal[
     "ingest",
@@ -1368,9 +1373,15 @@ def build_fixture_authorization_policy(
     states = entitlement_states or {}
     purposes = entitlement_purposes or {}
     known_markets = policy_markets or frozenset({"XTAI", "XNAS"})
-    actions: frozenset[AuthorizationAction] = frozenset(
+    fixture_actions: frozenset[AuthorizationAction] = frozenset(
         {"fixture_pipeline.execute", "research_prediction.read"}
     )
+    governance_actions: frozenset[AuthorizationAction] = frozenset(
+        action
+        for action in ("model_governance.read", "model_governance.approve")
+        if action in context.scopes
+    )
+    actions = fixture_actions | governance_actions
     if grant_actions is not None and not grant_actions <= actions:
         raise ValueError("unknown_authorization_action")
     resolved_grant_actions = (
@@ -1401,7 +1412,7 @@ def build_fixture_authorization_policy(
         if market in known_markets:
             policy_payload: dict[str, object] = {
                 "dataset_id": dataset_id,
-                "allowed_actions": sorted(actions),
+                "allowed_actions": sorted(fixture_actions),
                 "purposes": ["fixture_research"],
                 "environments": [context.environment],
                 "data_protection_class": "internal",
@@ -1413,7 +1424,7 @@ def build_fixture_authorization_policy(
                 SourcePolicyVersion(
                     version_id=_contract_version_id(f"{namespace}/source-policy", policy_payload),
                     dataset_id=dataset_id,
-                    allowed_actions=actions,
+                    allowed_actions=fixture_actions,
                     purposes=frozenset({"fixture_research"}),
                     environments=frozenset({context.environment}),
                     data_protection_class="internal",
@@ -1431,7 +1442,7 @@ def build_fixture_authorization_policy(
             "principal_id": context.principal_id,
             "dataset_id": dataset_id,
             "status": state,
-            "allowed_actions": sorted(actions),
+            "allowed_actions": sorted(fixture_actions),
             "purposes": sorted(allowed_purposes),
             "environments": [context.environment],
             "valid_from": _instant(context.issued_at),
@@ -1445,8 +1456,58 @@ def build_fixture_authorization_policy(
                 principal_id=context.principal_id,
                 dataset_id=dataset_id,
                 status=state,
-                allowed_actions=actions,
+                allowed_actions=fixture_actions,
                 purposes=allowed_purposes,
+                environments=frozenset({context.environment}),
+                valid_from=context.issued_at,
+                valid_to=context.expires_at,
+            )
+        )
+    if governance_actions:
+        dataset_id = "model-governance-ledger"
+        policy_payload = {
+            "dataset_id": dataset_id,
+            "allowed_actions": sorted(governance_actions),
+            "purposes": ["model_governance"],
+            "environments": [context.environment],
+            "data_protection_class": "internal",
+            "resource_states": ["active"],
+            "valid_from": _instant(context.issued_at),
+            "valid_to": _instant(context.expires_at),
+        }
+        source_policies.append(
+            SourcePolicyVersion(
+                version_id=_contract_version_id("model-governance/source-policy", policy_payload),
+                dataset_id=dataset_id,
+                allowed_actions=governance_actions,
+                purposes=frozenset({"model_governance"}),
+                environments=frozenset({context.environment}),
+                data_protection_class="internal",
+                resource_states=frozenset({"active"}),
+                valid_from=context.issued_at,
+                valid_to=context.expires_at,
+            )
+        )
+        entitlement_payload = {
+            "principal_id": context.principal_id,
+            "dataset_id": dataset_id,
+            "status": "active",
+            "allowed_actions": sorted(governance_actions),
+            "purposes": ["model_governance"],
+            "environments": [context.environment],
+            "valid_from": _instant(context.issued_at),
+            "valid_to": _instant(context.expires_at),
+        }
+        source_entitlements.append(
+            SourceEntitlement(
+                version_id=_contract_version_id(
+                    "model-governance/source-entitlement", entitlement_payload
+                ),
+                principal_id=context.principal_id,
+                dataset_id=dataset_id,
+                status="active",
+                allowed_actions=governance_actions,
+                purposes=frozenset({"model_governance"}),
                 environments=frozenset({context.environment}),
                 valid_from=context.issued_at,
                 valid_to=context.expires_at,

@@ -11,26 +11,10 @@ from stock_forecasting.bootstrap_workflow import (
     BootstrapGovernanceWorkflow,
 )
 from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
-from stock_forecasting.model_governance import HardGateEvidence, RecordShadowEod
-from tests.modeling_support import engineering_model_history
+from tests.modeling_support import engineering_model_history, passing_hard_gate_evidence
 
 
-def _passing_hard_gates() -> HardGateEvidence:
-    return HardGateEvidence(
-        qualification=True,
-        point_in_time=True,
-        leakage=True,
-        calibration=True,
-        economics=True,
-        stability=True,
-        coverage=True,
-        operational=True,
-        security=True,
-        reproducibility=True,
-    )
-
-
-def test_bootstrap_tracer_reaches_five_shadows_but_never_production() -> None:
+def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -> None:
     now = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
     approver = LocalApiKeyIdentity.issue(
         owner="ticket-09-separated-approver",
@@ -48,63 +32,29 @@ def test_bootstrap_tracer_reaches_five_shadows_but_never_production() -> None:
         created_at=now - timedelta(hours=2),
         feature_batch=engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
-        source_basis_verified=False,
         execution_purpose="engineering_acceptance",
     )
     workflow = BootstrapGovernanceWorkflow(ForecastLab(), application.model_lifecycle)
+    preview = ForecastLab().develop(intent).candidate_bundle
+    assert preview is not None
 
     candidate = workflow.execute(
         BootstrapGovernanceCommand(
             command_id_prefix="ticket-09-engineering",
             intent=intent,
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_passing_hard_gates(),
+            hard_gates=passing_hard_gate_evidence(preview.evaluation_report.evaluation_report_id),
             expected_version=0,
             occurred_at=now - timedelta(hours=1),
         )
     )
 
-    assert candidate.status == "awaiting_approval"
+    assert candidate.status == "blocked"
     assert candidate.candidate_bundle is not None
-    bundle = candidate.candidate_bundle
+    assert candidate.gate_decision is not None
+    assert candidate.gate_decision.failed_gates == ("qualification",)
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     authorization = approver.credential.authorization_header()
-    approval = client.post(
-        "/api/v1/governance/approval-decisions",
-        headers={
-            "Authorization": authorization,
-            "Idempotency-Key": "ticket-09-approval",
-            "If-Match": '"2"',
-        },
-        json={
-            "model_family_id": intent.model_family_id,
-            "candidate_id": bundle.candidate_id,
-            "artifact_id": bundle.primary_artifact.artifact_id,
-            "evaluation_report_id": bundle.evaluation_report.evaluation_report_id,
-            "policy_version_id": "bootstrap-gate-policy-v1",
-            "decision": "approved",
-            "reason": "Engineering evidence approved for controlled shadow only.",
-            "expected_assignment": "production:dual-market-price-baseline-v1",
-        },
-    )
-    assert approval.status_code == 201
-    assert approval.json()["status"] == "approved"
-
-    shadow = None
-    for cycle in range(1, 6):
-        shadow = application.model_lifecycle.execute(
-            RecordShadowEod(
-                command_id=f"ticket-09-shadow-{cycle}",
-                model_family_id=intent.model_family_id,
-                candidate_id=bundle.candidate_id,
-                shadow_run_id=f"ticket-09-shadow-run-{cycle}",
-                market_eligibility=("XTAI", "XNAS"),
-                expected_version=cycle + 2,
-                occurred_at=now + timedelta(days=cycle),
-            )
-        )
-    assert shadow is not None
-    assert shadow.status == "shadow_complete"
 
     rest = client.get(
         f"/api/v1/research/model-families/{intent.model_family_id}/backtests",
@@ -115,13 +65,14 @@ def test_bootstrap_tracer_reaches_five_shadows_but_never_production() -> None:
         headers={"Authorization": authorization},
     )
     assert rest.status_code == 200
-    assert rest.json()["shadow"] == {"eligible_cycle_count": 5, "required": 5}
+    assert rest.json()["shadow"] == {"eligible_cycle_count": 0, "required": 5}
     assert rest.json()["serving"] == {
         "status": "blocked",
         "production_assignment_id": None,
     }
     assert rest.json()["candidate"]["formal_qualification"] is False
-    assert "5 / 5" in page.text
+    assert rest.json()["gate"]["status"] == "failed"
+    assert "0 / 5" in page.text
     assert application.model_lifecycle_store.production_assignments(intent.model_family_id) == ()
 
     formal = workflow.execute(
@@ -134,7 +85,7 @@ def test_bootstrap_tracer_reaches_five_shadows_but_never_production() -> None:
                 execution_purpose="formal_candidate",
             ),
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_passing_hard_gates(),
+            hard_gates=passing_hard_gate_evidence(preview.evaluation_report.evaluation_report_id),
             expected_version=0,
             occurred_at=now,
         )
@@ -156,7 +107,7 @@ def test_bootstrap_tracer_reaches_five_shadows_but_never_production() -> None:
                 feature_batch=replace(intent.feature_batch, rows=malformed_rows),
             ),
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_passing_hard_gates(),
+            hard_gates=passing_hard_gate_evidence(preview.evaluation_report.evaluation_report_id),
             expected_version=0,
             occurred_at=now,
         )

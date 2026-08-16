@@ -4,12 +4,15 @@ from fastapi.testclient import TestClient
 
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import Application, build_test_application
-from stock_forecasting.authorization import LocalApiKeyIdentity
+from stock_forecasting.authorization import (
+    LocalApiKeyIdentity,
+    build_fixture_authorization_policy,
+)
 from stock_forecasting.model_governance import (
     EvaluateBootstrapCandidate,
-    HardGateEvidence,
     RecordCandidate,
 )
+from tests.modeling_support import passing_hard_gate_evidence
 
 
 def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
@@ -43,7 +46,7 @@ def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
             class_prior_equal_cell_macro_f1=0.333,
             logistic_equal_cell_macro_f1=0.812,
             fold_count=16,
-            formal_qualification=False,
+            formal_qualification=True,
         )
     )
     application.model_lifecycle.execute(
@@ -52,18 +55,7 @@ def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
             model_family_id="dual-market-price-baseline-v1",
             candidate_id="candidate-research",
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=HardGateEvidence(
-                qualification=True,
-                point_in_time=True,
-                leakage=True,
-                calibration=True,
-                economics=True,
-                stability=True,
-                coverage=True,
-                operational=True,
-                security=True,
-                reproducibility=True,
-            ),
+            hard_gates=passing_hard_gate_evidence("sha256:research-evaluation"),
             expected_version=1,
             occurred_at=now,
         )
@@ -74,7 +66,10 @@ def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
 def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> None:
     application, identity = _governance_application()
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
-    headers = {"Authorization": identity.credential.authorization_header()}
+    headers = {
+        "Authorization": identity.credential.authorization_header(),
+        "X-Request-ID": "trace-governance-read",
+    }
 
     rest = client.get(
         "/api/v1/research/model-families/dual-market-price-baseline-v1/backtests",
@@ -92,7 +87,7 @@ def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> Non
             "candidate_id": "candidate-research",
             "model_family": "regularized_multinomial_logistic",
             "artifact_id": "sha256:research-artifact",
-            "formal_qualification": False,
+            "formal_qualification": True,
         },
         "baseline": {
             "model_family": "class_prior",
@@ -109,6 +104,10 @@ def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> Non
             "status": "passed",
             "policy_version_id": "bootstrap-gate-policy-v1",
             "failed_gates": [],
+            "hard_gate_evidence_id": passing_hard_gate_evidence(
+                "sha256:research-evaluation"
+            ).evidence_id,
+            "hard_gate_evidence_refs": ["sha256:worked-example-gate-report"],
         },
         "approval": {"status": "awaiting_approval"},
         "shadow": {"eligible_cycle_count": 0, "required": 5},
@@ -124,6 +123,10 @@ def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> Non
     assert "Gate passed" in page.text
     assert "Serving blocked" in page.text
     assert "0 / 5" in page.text
+    audits = application.security_audit.list_events(trace_id="trace-governance-read")
+    assert len(audits) == 2
+    assert {event["action"] for event in audits} == {"model_governance.read"}
+    assert {event["outcome"] for event in audits} == {"allowed"}
 
 
 def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> None:
@@ -133,6 +136,7 @@ def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> Non
         "Authorization": identity.credential.authorization_header(),
         "Idempotency-Key": "approve-research-candidate",
         "If-Match": '"2"',
+        "X-Request-ID": "trace-governance-approve",
     }
     body = {
         "model_family_id": "dual-market-price-baseline-v1",
@@ -142,7 +146,7 @@ def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> Non
         "policy_version_id": "bootstrap-gate-policy-v1",
         "decision": "approved",
         "reason": "Exact bootstrap evidence reviewed for shadow only.",
-        "expected_assignment": "production:dual-market-price-baseline-v1",
+        "expected_assignment": "unassigned",
     }
 
     first = client.post(
@@ -166,7 +170,43 @@ def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> Non
     assert first.json()["status"] == "approved"
     assert first.json()["decision"]["approver_id"] == identity.context.principal_id
     assert first.json()["decision"]["artifact_id"] == "sha256:research-artifact"
-    assert first.json()["decision"]["expected_assignment"] == (
-        "production:dual-market-price-baseline-v1"
-    )
+    assert first.json()["decision"]["expected_assignment"] == ("unassigned")
     assert read_model.json()["approval"] == {"status": "approved"}
+    approval_audits = application.security_audit.list_events(trace_id="trace-governance-approve")
+    assert len(approval_audits) == 2
+    assert {event["action"] for event in approval_audits} == {"model_governance.approve"}
+
+
+def test_governance_scope_cannot_bypass_a_missing_action_grant() -> None:
+    now = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="model-governance-denied",
+        environment="development",
+        scopes={"model_governance.read"},
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(hours=2),
+    )
+    application = build_test_application(
+        observed_at=now,
+        local_identity=identity,
+        authorization_policy_override=build_fixture_authorization_policy(
+            identity.context,
+            grant_actions=frozenset(),
+        ),
+    )
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+
+    response = client.get(
+        "/api/v1/research/model-families/blocked-family/backtests",
+        headers={
+            "Authorization": identity.credential.authorization_header(),
+            "X-Request-ID": "trace-governance-denied",
+        },
+    )
+
+    assert response.status_code == 403
+    audit = application.security_audit.list_events(trace_id="trace-governance-denied")
+    assert len(audit) == 1
+    assert audit[0]["action"] == "model_governance.read"
+    assert audit[0]["outcome"] == "denied"
+    assert audit[0]["reason_code"] == "action_grant_missing"

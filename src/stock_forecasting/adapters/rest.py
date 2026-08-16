@@ -374,11 +374,18 @@ def create_web_app(application: Application) -> FastAPI:
         response_model=None,
     )
     def get_model_family_backtest(
+        request: Request,
         model_family_id: str,
         security_context: SecurityContext = research_authentication,
-    ) -> dict[str, object]:
-        if "model_governance.read" not in security_context.scopes:
-            raise HTTPException(status_code=403, detail="model_governance_read_required")
+    ) -> dict[str, object] | JSONResponse:
+        trace_id = request.headers.get("X-Request-ID") or f"trace-model-governance-{uuid4()}"
+        denial = application.authorize_model_governance(
+            action="model_governance.read",
+            security_context=security_context,
+            trace_id=trace_id,
+        )
+        if denial is not None:
+            return authorization_denied(request, denial)
         try:
             return application.model_governance_query.get_backtest(model_family_id)
         except KeyError as error:
@@ -390,13 +397,20 @@ def create_web_app(application: Application) -> FastAPI:
         response_model=None,
     )
     def post_approval_decision(
+        request: Request,
         body: ApprovalDecisionRequest,
         idempotency_key: str = Header(..., alias="Idempotency-Key"),
         if_match: str = Header(..., alias="If-Match"),
         security_context: SecurityContext = research_authentication,
-    ) -> dict[str, object]:
-        if "model_governance.approve" not in security_context.scopes:
-            raise HTTPException(status_code=403, detail="model_governance_approve_required")
+    ) -> dict[str, object] | JSONResponse:
+        trace_id = request.headers.get("X-Request-ID") or f"trace-model-governance-{uuid4()}"
+        denial = application.authorize_model_governance(
+            action="model_governance.approve",
+            security_context=security_context,
+            trace_id=trace_id,
+        )
+        if denial is not None:
+            return authorization_denied(request, denial)
         if len(idempotency_key) > 128:
             raise HTTPException(status_code=422, detail="idempotency_key_too_long")
         try:
@@ -449,11 +463,18 @@ def create_web_app(application: Application) -> FastAPI:
         response_model=None,
     )
     def model_family_backtest_page(
+        request: Request,
         model_family_id: str,
         security_context: SecurityContext = research_authentication,
-    ) -> str:
-        if "model_governance.read" not in security_context.scopes:
-            raise HTTPException(status_code=403, detail="model_governance_read_required")
+    ) -> str | JSONResponse:
+        trace_id = request.headers.get("X-Request-ID") or f"trace-model-governance-{uuid4()}"
+        denial = application.authorize_model_governance(
+            action="model_governance.read",
+            security_context=security_context,
+            trace_id=trace_id,
+        )
+        if denial is not None:
+            return authorization_denied(request, denial)
         try:
             report = application.model_governance_query.get_backtest(model_family_id)
         except KeyError as error:

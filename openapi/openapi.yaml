@@ -987,12 +987,16 @@ components:
             failed_gates:
               type: array
               items: {type: string}
+            hard_gate_evidence_id: {type: [string, 'null']}
+            hard_gate_evidence_refs:
+              type: array
+              items: {type: string}
         approval:
           type: object
           additionalProperties: false
           required: [status]
           properties:
-            status: {type: string, enum: [awaiting_approval, approved, rejected]}
+            status: {type: string, enum: [blocked_by_gate, awaiting_approval, approved, rejected]}
         shadow:
           type: object
           additionalProperties: false

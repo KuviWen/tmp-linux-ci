@@ -162,18 +162,35 @@ class ClassPriorTrendForecaster:
         if request.artifact.artifact_id != expected_id:
             raise ValueError("artifact_checksum_mismatch")
         raw_probabilities = cast(dict[str, float], self._payload["probabilities"])
-        probabilities: ProbabilityVector = {
-            "up": raw_probabilities["up"],
-            "flat": raw_probabilities["flat"],
-            "down": raw_probabilities["down"],
-        }
+        base_probabilities = (
+            raw_probabilities["up"],
+            raw_probabilities["flat"],
+            raw_probabilities["down"],
+        )
         return ForecastBatch(
             artifact_id=request.artifact.artifact_id,
             predictions=tuple(
-                ForecastPrediction(row_id=row.row_id, probabilities=probabilities)
+                ForecastPrediction(
+                    row_id=row.row_id,
+                    probabilities=self._calibrated_prior(row, base_probabilities),
+                )
                 for row in request.rows
             ),
         )
+
+    def _calibrated_prior(
+        self,
+        row: FeatureRow,
+        probabilities: tuple[float, float, float],
+    ) -> ProbabilityVector:
+        temperature = _artifact_temperature(self._payload, row)
+        scaled = [max(value, 1e-15) ** (1.0 / temperature) for value in probabilities]
+        total = sum(scaled)
+        return {
+            "up": scaled[0] / total,
+            "flat": scaled[1] / total,
+            "down": scaled[2] / total,
+        }
 
 
 class RegularizedMultinomialLogisticTrendForecaster:
@@ -319,6 +336,14 @@ class RegularizedMultinomialLogisticTrendForecaster:
                     for label_weights in weights
                 ]
             )
+            temperature = _artifact_temperature(self._payload, row)
+            if temperature != 1.0:
+                raw_probabilities = self._softmax(
+                    [
+                        log(max(probability, 1e-15)) / temperature
+                        for probability in raw_probabilities
+                    ]
+                )
             probabilities: ProbabilityVector = {
                 "up": raw_probabilities[0],
                 "flat": raw_probabilities[1],
@@ -336,6 +361,29 @@ class RegularizedMultinomialLogisticTrendForecaster:
         exponentials = [exp(score - maximum) for score in scores]
         total = sum(exponentials)
         return [value / total for value in exponentials]
+
+
+def _artifact_temperature(payload: dict[str, object] | None, row: FeatureRow) -> float:
+    if payload is None:
+        return 1.0
+    calibrators = payload.get("calibrators", [])
+    if not isinstance(calibrators, list):
+        raise ValueError("artifact_calibrators_invalid")
+    matches = [
+        item
+        for item in calibrators
+        if isinstance(item, dict)
+        and item.get("market") == row.market
+        and item.get("horizon_sessions") == row.horizon_sessions
+    ]
+    if not matches:
+        return 1.0
+    if len(matches) != 1:
+        raise ValueError("artifact_calibrators_ambiguous")
+    temperature = matches[0].get("temperature")
+    if not isinstance(temperature, (int, float)) or temperature <= 0:
+        raise ValueError("artifact_calibrator_temperature_invalid")
+    return float(temperature)
 
 
 def _training_selection_id(request: TrainingRequest) -> str:

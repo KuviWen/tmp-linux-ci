@@ -1,35 +1,116 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
-from sqlalchemy import create_engine
+import pytest
+from sqlalchemy import create_engine, func, select
 
 from stock_forecasting.model_governance import (
     DecideApproval,
     EvaluateBootstrapCandidate,
+    GateMeasurement,
     HardGateEvidence,
     InMemoryLifecycleStore,
+    LifecycleConflict,
     ModelLifecycle,
     RecordCandidate,
     RecordShadowEod,
+    ShadowRunEvidence,
     SqlAlchemyLifecycleStore,
 )
+from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import metadata
+from tests.modeling_support import passing_hard_gate_evidence
 
 
-def _hard_gates(**overrides: bool) -> HardGateEvidence:
-    values = {
-        "qualification": True,
-        "point_in_time": True,
-        "leakage": True,
-        "calibration": True,
-        "economics": True,
-        "stability": True,
-        "coverage": True,
-        "operational": True,
-        "security": True,
-        "reproducibility": True,
-    }
-    values.update(overrides)
-    return HardGateEvidence(**values)
+def _hard_gates(
+    candidate_id: str,
+    *,
+    overrides: dict[str, float] | None = None,
+) -> HardGateEvidence:
+    return passing_hard_gate_evidence(
+        f"sha256:evaluation-{candidate_id}",
+        overrides=overrides,
+    )
+
+
+def _shadow_evidence(
+    cycle: int,
+    *,
+    previous_shadow_run_id: str | None,
+) -> ShadowRunEvidence:
+    return ShadowRunEvidence.create(
+        shadow_run_id=f"shadow-run-{cycle}",
+        eligible_eod_date=date(2026, 8, 18 + cycle),
+        previous_shadow_run_id=previous_shadow_run_id,
+        markets=("XTAI", "XNAS"),
+        cold_load_checksum_verified=True,
+        schema_compatible=True,
+        probability_invariants_verified=True,
+        comparison_completed=True,
+        source_policy_verified=True,
+        cpu_prediction_seconds=420.0,
+    )
+
+
+def test_bootstrap_gate_rejects_unqualified_candidate_and_tampered_metric_evidence() -> None:
+    lifecycle = ModelLifecycle(InMemoryLifecycleStore())
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-unqualified-evidence",
+        model_family_id="family-unqualified-evidence",
+        improvement=12.0,
+        formal_qualification=False,
+    )
+    evidence = HardGateEvidence.create(
+        evidence_kind="formal_evidence",
+        policy_version_id="bootstrap-gate-policy-v1",
+        evaluation_report_id="sha256:evaluation-candidate-unqualified-evidence",
+        evidence_refs=("sha256:gate-report",),
+        measurements=(GateMeasurement("qualification.manifest_fraction", 1.0),),
+    )
+
+    result = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-unqualified-evidence",
+            model_family_id="family-unqualified-evidence",
+            candidate_id="candidate-unqualified-evidence",
+            policy_version_id="bootstrap-gate-policy-v1",
+            hard_gates=evidence,
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "gate_failed"
+    assert result.gate_decision is not None
+    assert "qualification" in result.gate_decision.failed_gates
+    assert "hard_gate_evidence" in result.gate_decision.failed_gates
+
+
+def test_in_memory_store_matches_sql_command_replay_and_conflict_contract() -> None:
+    store = InMemoryLifecycleStore()
+    lifecycle = ModelLifecycle(store)
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-replay",
+        model_family_id="family-replay",
+        improvement=2.0,
+    )
+
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-replay",
+        model_family_id="family-replay",
+        improvement=2.0,
+    )
+
+    assert len(store.events("family-replay")) == 1
+    with pytest.raises(LifecycleConflict, match="command_id_payload_conflict"):
+        _record_candidate(
+            lifecycle,
+            candidate_id="candidate-replay",
+            model_family_id="family-replay",
+            improvement=3.0,
+        )
 
 
 def _record_candidate(
@@ -38,6 +119,7 @@ def _record_candidate(
     candidate_id: str,
     model_family_id: str,
     improvement: float,
+    formal_qualification: bool = True,
 ) -> None:
     result = lifecycle.execute(
         RecordCandidate(
@@ -52,6 +134,7 @@ def _record_candidate(
             training_executor="model-operator-b",
             improvement_percentage_points=improvement,
             calibrator_statuses=("sufficient_data",) * 6,
+            formal_qualification=formal_qualification,
             expected_version=0,
             occurred_at=datetime(2026, 8, 17, 1, 0, tzinfo=UTC),
         )
@@ -75,7 +158,7 @@ def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> Non
             model_family_id="family-pass",
             candidate_id="candidate-pass",
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_hard_gates(),
+            hard_gates=_hard_gates("candidate-pass"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
         )
@@ -98,7 +181,10 @@ def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> Non
             model_family_id="family-fail",
             candidate_id="candidate-fail",
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_hard_gates(security=False),
+            hard_gates=_hard_gates(
+                "candidate-fail",
+                overrides={"security.critical_finding_count": 1.0},
+            ),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
         )
@@ -133,7 +219,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             model_family_id="family-approval-conflict",
             candidate_id="candidate-approval-conflict",
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_hard_gates(),
+            hard_gates=_hard_gates("candidate-approval-conflict"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
         )
@@ -150,7 +236,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             approver_id="model-operator-a",
             decision="approved",
             reason="ready for controlled shadow",
-            expected_assignment="production:dual-market-price-baseline-v1",
+            expected_assignment="unassigned",
             expected_version=2,
             occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
         )
@@ -173,7 +259,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             model_family_id="family-approved",
             candidate_id="candidate-approved",
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_hard_gates(),
+            hard_gates=_hard_gates("candidate-approved"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
         )
@@ -189,7 +275,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             approver_id="model-approver-c",
             decision="approved",
             reason="exact evidence reviewed for shadow only",
-            expected_assignment="production:dual-market-price-baseline-v1",
+            expected_assignment="unassigned",
             expected_version=2,
             occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
         )
@@ -198,11 +284,30 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
     assert approved.status == "approved"
     assert approved.approval_decision is not None
     assert approved.approval_decision.artifact_id == ("sha256:artifact-candidate-approved")
-    assert approved.approval_decision.expected_assignment == (
-        "production:dual-market-price-baseline-v1"
-    )
+    assert approved.approval_decision.expected_assignment == ("unassigned")
     assert approved.approval_decision.expires_at == datetime(2026, 8, 24, 2, 0, tzinfo=UTC)
     assert approved.approval_decision.invalidated_reason is None
+
+    stale_assignment = lifecycle.execute(
+        DecideApproval(
+            command_id="approval-stale-assignment",
+            model_family_id="family-approved",
+            candidate_id="candidate-approved",
+            artifact_id="sha256:artifact-candidate-approved",
+            evaluation_report_id="sha256:evaluation-candidate-approved",
+            policy_version_id="bootstrap-gate-policy-v1",
+            approver_id="model-approver-d",
+            decision="approved",
+            reason="reviewed against a stale assignment",
+            expected_assignment="production:stale-assignment",
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert stale_assignment.status == "approval_rejected"
+    assert stale_assignment.approval_decision is not None
+    assert stale_assignment.approval_decision.invalidated_reason == ("expected_assignment_changed")
 
 
 def _approved_lifecycle() -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
@@ -220,7 +325,7 @@ def _approved_lifecycle() -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
             model_family_id="family-shadow",
             candidate_id="candidate-shadow",
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_hard_gates(),
+            hard_gates=_hard_gates("candidate-shadow"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
         )
@@ -236,7 +341,7 @@ def _approved_lifecycle() -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
             approver_id="model-approver-c",
             decision="approved",
             reason="approved for five controlled shadow cycles",
-            expected_assignment="production:dual-market-price-baseline-v1",
+            expected_assignment="unassigned",
             expected_version=2,
             occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
         )
@@ -254,8 +359,10 @@ def test_five_joint_market_shadows_complete_without_production_assignment() -> N
                 command_id=f"shadow-{cycle}",
                 model_family_id="family-shadow",
                 candidate_id="candidate-shadow",
-                shadow_run_id=f"shadow-run-{cycle}",
-                market_eligibility=("XTAI", "XNAS"),
+                evidence=_shadow_evidence(
+                    cycle,
+                    previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                ),
                 expected_version=cycle + 2,
                 occurred_at=datetime(2026, 8, 18 + cycle, 2, 0, tzinfo=UTC),
             )
@@ -268,6 +375,22 @@ def test_five_joint_market_shadows_complete_without_production_assignment() -> N
     assert outcome.shadow_evidence.production_history_written is False
     assert store.production_assignments("family-shadow") == ()
 
+    duplicate = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-duplicate-with-new-command",
+            model_family_id="family-shadow",
+            candidate_id="candidate-shadow",
+            evidence=_shadow_evidence(5, previous_shadow_run_id="shadow-run-4"),
+            expected_version=8,
+            occurred_at=datetime(2026, 8, 24, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert duplicate.status == "shadow_blocked"
+    assert duplicate.shadow_evidence is not None
+    assert duplicate.shadow_evidence.eligible_cycle_count == 5
+    assert duplicate.shadow_evidence.blocked_reason == "duplicate_shadow_run"
+
 
 def test_expired_approval_blocks_shadow_and_preserves_failure_evidence() -> None:
     lifecycle, store = _approved_lifecycle()
@@ -277,8 +400,18 @@ def test_expired_approval_blocks_shadow_and_preserves_failure_evidence() -> None
             command_id="shadow-after-expiry",
             model_family_id="family-shadow",
             candidate_id="candidate-shadow",
-            shadow_run_id="shadow-run-expired",
-            market_eligibility=("XTAI", "XNAS"),
+            evidence=ShadowRunEvidence.create(
+                shadow_run_id="shadow-run-expired",
+                eligible_eod_date=date(2026, 8, 25),
+                previous_shadow_run_id=None,
+                markets=("XTAI", "XNAS"),
+                cold_load_checksum_verified=True,
+                schema_compatible=True,
+                probability_invariants_verified=True,
+                comparison_completed=True,
+                source_policy_verified=True,
+                cpu_prediction_seconds=420.0,
+            ),
             expected_version=3,
             occurred_at=datetime(2026, 8, 25, 2, 0, tzinfo=UTC),
         )
@@ -310,7 +443,7 @@ def test_bootstrap_policy_is_permanently_disabled_after_first_assignment() -> No
             model_family_id="family-ever-assigned",
             candidate_id="candidate-after-assignment",
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_hard_gates(),
+            hard_gates=_hard_gates("candidate-after-assignment"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
         )
@@ -342,7 +475,7 @@ def test_sql_lifecycle_store_preserves_append_only_state_across_instances() -> N
             model_family_id="family-sql",
             candidate_id="candidate-sql",
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_hard_gates(),
+            hard_gates=_hard_gates("candidate-sql"),
             expected_version=1,
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
         )
@@ -357,3 +490,8 @@ def test_sql_lifecycle_store_preserves_append_only_state_across_instances() -> N
         "CandidateRecorded",
         "GateDecisionRecorded",
     )
+    with engine.connect() as connection:
+        assert connection.execute(select(func.count()).select_from(outbox_events)).scalar_one() == 2
+        assert (
+            connection.execute(select(func.count()).select_from(outbox_dispatch)).scalar_one() == 2
+        )

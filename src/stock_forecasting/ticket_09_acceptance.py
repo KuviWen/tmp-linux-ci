@@ -14,9 +14,9 @@ from stock_forecasting.bootstrap_workflow import (
 from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
 from stock_forecasting.forecasting import FeatureBatch, FeatureRow, TrendLabel
 from stock_forecasting.model_governance import (
+    GateMeasurement,
     HardGateEvidence,
     ModelLifecycle,
-    RecordShadowEod,
     SqlAlchemyLifecycleStore,
 )
 from stock_forecasting.platform.state_store import StateStore
@@ -58,18 +58,46 @@ def _engineering_model_history() -> FeatureBatch:
     )
 
 
-def _passing_hard_gates() -> HardGateEvidence:
-    return HardGateEvidence(
-        qualification=True,
-        point_in_time=True,
-        leakage=True,
-        calibration=True,
-        economics=True,
-        stability=True,
-        coverage=True,
-        operational=True,
-        security=True,
-        reproducibility=True,
+def _engineering_hard_gate_evidence(evaluation_report_id: str) -> HardGateEvidence:
+    measurements = {
+        "qualification.manifest_fraction": 1.0,
+        "point_in_time.contract_fraction": 1.0,
+        "leakage.contract_fraction": 1.0,
+        "calibration.equal_cell_ece": 0.04,
+        "calibration.max_full_support_cell_ece": 0.07,
+        "calibration.max_degraded_support_cell_ece": 0.09,
+        "calibration.sufficient_calibrator_count": 6.0,
+        "calibration.identity_fallback_count": 0.0,
+        "calibration.nll_degradation_fraction": 0.0,
+        "calibration.brier_degradation_fraction": 0.0,
+        "economics.positive_market_rank_ic_count": 2.0,
+        "economics.positive_cell_rank_ic_count": 4.0,
+        "economics.ic_information_ratio": 0.30,
+        "economics.nonnegative_market_excess_count": 2.0,
+        "economics.nonnegative_cell_excess_count": 4.0,
+        "economics.drawdown_worsening_points": 2.0,
+        "stability.noninferior_quarter_count": 6.0,
+        "stability.max_consecutive_lagging_quarters": 2.0,
+        "stability.seed_macro_f1_std_points": 1.0,
+        "stability.worst_seed_delta_points": 0.1,
+        "coverage.large_slice_max_decline_points": 2.0,
+        "coverage.degraded_coverage_decline_points": 5.0,
+        "coverage.degraded_macro_f1_decline_points": 2.0,
+        "operational.trainable_parameter_count": 15_000_000.0,
+        "operational.cpu_prediction_minutes": 10.0,
+        "operational.daily_pipeline_minutes": 120.0,
+        "security.safe_artifact_fraction": 1.0,
+        "security.critical_finding_count": 0.0,
+        "security.artifact_corruption_count": 0.0,
+        "reproducibility.sample_replay_fraction": 1.0,
+        "reproducibility.cpu_probability_max_delta": 0.000001,
+    }
+    return HardGateEvidence.create(
+        evidence_kind="engineering_example",
+        policy_version_id="bootstrap-gate-policy-v1",
+        evaluation_report_id=evaluation_report_id,
+        evidence_refs=("sha256:engineering-only-gate-report",),
+        measurements=tuple(GateMeasurement(name, value) for name, value in measurements.items()),
     )
 
 
@@ -123,15 +151,19 @@ def run_ticket_09_acceptance(
         created_at=observed_at,
         feature_batch=_engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
-        source_basis_verified=False,
         execution_purpose="engineering_acceptance",
     )
+    preview = ForecastLab().develop(intent).candidate_bundle
+    if preview is None:
+        return {"ticket": "09", "status": "failed", "reason": "preview_missing"}
     candidate = workflow.execute(
         BootstrapGovernanceCommand(
             command_id_prefix="ticket-09-engineering-v1",
             intent=intent,
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_passing_hard_gates(),
+            hard_gates=_engineering_hard_gate_evidence(
+                preview.evaluation_report.evaluation_report_id
+            ),
             expected_version=0,
             occurred_at=governance_time,
         )
@@ -143,37 +175,6 @@ def run_ticket_09_acceptance(
             "status": "failed",
             "reason": "engineering_candidate_missing",
         }
-    approval_status, approval_text = _request(
-        base_url=base_url,
-        path="/api/v1/governance/approval-decisions",
-        identity=identity,
-        method="POST",
-        headers={"Idempotency-Key": "ticket-09-approval-v1", "If-Match": '"2"'},
-        payload={
-            "model_family_id": intent.model_family_id,
-            "candidate_id": bundle.candidate_id,
-            "artifact_id": bundle.primary_artifact.artifact_id,
-            "evaluation_report_id": bundle.evaluation_report.evaluation_report_id,
-            "policy_version_id": "bootstrap-gate-policy-v1",
-            "decision": "approved",
-            "reason": "Engineering evidence approved for controlled shadow only.",
-            "expected_assignment": "production:dual-market-price-baseline-v1",
-        },
-    )
-    approval = json.loads(approval_text)
-    shadow = None
-    for cycle in range(1, 6):
-        shadow = lifecycle.execute(
-            RecordShadowEod(
-                command_id=f"ticket-09-shadow-{cycle}",
-                model_family_id=intent.model_family_id,
-                candidate_id=bundle.candidate_id,
-                shadow_run_id=f"ticket-09-shadow-run-{cycle}",
-                market_eligibility=("XTAI", "XNAS"),
-                expected_version=cycle + 2,
-                occurred_at=governance_time + timedelta(days=cycle),
-            )
-        )
     rest_status, rest_text = _request(
         base_url=base_url,
         path=(f"/api/v1/research/model-families/{intent.model_family_id}/backtests"),
@@ -195,7 +196,9 @@ def run_ticket_09_acceptance(
                 execution_purpose="formal_candidate",
             ),
             policy_version_id="bootstrap-gate-policy-v1",
-            hard_gates=_passing_hard_gates(),
+            hard_gates=_engineering_hard_gate_evidence(
+                preview.evaluation_report.evaluation_report_id
+            ),
             expected_version=0,
             occurred_at=governance_time,
         )
@@ -213,17 +216,20 @@ def run_ticket_09_acceptance(
                 for fold in bundle.fold_manifest.folds
             )
         ),
-        "bootstrap_gate": (
-            candidate.status == "awaiting_approval"
-            and bundle.evaluation_report.improvement_percentage_points >= 1.0
+        "formal_gate_fail_closed": (
+            candidate.status == "blocked"
+            and candidate.gate_decision is not None
+            and candidate.gate_decision.failed_gates == ("qualification", "hard_gate_evidence")
         ),
-        "separated_approval": approval_status == 201 and approval.get("status") == "approved",
-        "five_joint_shadows": shadow is not None and shadow.status == "shadow_complete",
         "research_rest": rest_status == 200
-        and read_model.get("shadow") == {"eligible_cycle_count": 5, "required": 5},
+        and read_model.get("shadow") == {"eligible_cycle_count": 0, "required": 5},
         "research_ui": page_status == 200
-        and "5 / 5" in page_text
+        and "0 / 5" in page_text
         and "Serving blocked" in page_text,
+        "approval_and_shadow_not_fabricated": (
+            read_model.get("approval") == {"status": "blocked_by_gate"}
+            and read_model.get("shadow") == {"eligible_cycle_count": 0, "required": 5}
+        ),
         "not_production": read_model.get("serving")
         == {"status": "blocked", "production_assignment_id": None},
         "formal_source_fail_closed": formal.gate_decision is not None

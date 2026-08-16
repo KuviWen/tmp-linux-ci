@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from typing import Literal, Protocol, cast
+from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
+from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import model_lifecycle_events
 
 
@@ -18,17 +20,108 @@ class LifecycleConflict(RuntimeError):
 
 
 @dataclass(frozen=True)
+class GateMeasurement:
+    name: str
+    value: float
+
+
+@dataclass(frozen=True)
 class HardGateEvidence:
-    qualification: bool
-    point_in_time: bool
-    leakage: bool
-    calibration: bool
-    economics: bool
-    stability: bool
-    coverage: bool
-    operational: bool
-    security: bool
-    reproducibility: bool
+    evidence_id: str
+    evidence_kind: Literal["formal_evidence", "engineering_example"]
+    policy_version_id: str
+    evaluation_report_id: str
+    evidence_refs: tuple[str, ...]
+    measurements: tuple[GateMeasurement, ...]
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        evidence_kind: Literal["formal_evidence", "engineering_example"],
+        policy_version_id: str,
+        evaluation_report_id: str,
+        evidence_refs: tuple[str, ...],
+        measurements: tuple[GateMeasurement, ...],
+    ) -> HardGateEvidence:
+        ordered_measurements = tuple(sorted(measurements, key=lambda item: item.name))
+        ordered_refs = tuple(sorted(evidence_refs))
+        payload = {
+            "evidence_kind": evidence_kind,
+            "policy_version_id": policy_version_id,
+            "evaluation_report_id": evaluation_report_id,
+            "evidence_refs": ordered_refs,
+            "measurements": [
+                {"name": item.name, "value": item.value} for item in ordered_measurements
+            ],
+        }
+        return cls(
+            evidence_id=_content_id("hard_gate_evidence", payload),
+            evidence_kind=evidence_kind,
+            policy_version_id=policy_version_id,
+            evaluation_report_id=evaluation_report_id,
+            evidence_refs=ordered_refs,
+            measurements=ordered_measurements,
+        )
+
+    def is_content_addressed(self) -> bool:
+        rebuilt = self.create(
+            evidence_kind=self.evidence_kind,
+            policy_version_id=self.policy_version_id,
+            evaluation_report_id=self.evaluation_report_id,
+            evidence_refs=self.evidence_refs,
+            measurements=self.measurements,
+        )
+        return rebuilt == self
+
+
+@dataclass(frozen=True)
+class _GateThreshold:
+    category: str
+    comparison: Literal["at_least", "at_most"]
+    limit: float
+
+    def passes(self, value: float) -> bool:
+        if self.comparison == "at_least":
+            return value >= self.limit
+        return value <= self.limit
+
+
+_BOOTSTRAP_GATE_POLICY_V1: dict[str, _GateThreshold] = {
+    "qualification.manifest_fraction": _GateThreshold("qualification", "at_least", 1.0),
+    "point_in_time.contract_fraction": _GateThreshold("point_in_time", "at_least", 1.0),
+    "leakage.contract_fraction": _GateThreshold("leakage", "at_least", 1.0),
+    "calibration.equal_cell_ece": _GateThreshold("calibration", "at_most", 0.05),
+    "calibration.max_full_support_cell_ece": _GateThreshold("calibration", "at_most", 0.08),
+    "calibration.max_degraded_support_cell_ece": _GateThreshold("calibration", "at_most", 0.10),
+    "calibration.sufficient_calibrator_count": _GateThreshold("calibration", "at_least", 6.0),
+    "calibration.identity_fallback_count": _GateThreshold("calibration", "at_most", 0.0),
+    "calibration.nll_degradation_fraction": _GateThreshold("calibration", "at_most", 0.0),
+    "calibration.brier_degradation_fraction": _GateThreshold("calibration", "at_most", 0.0),
+    "economics.positive_market_rank_ic_count": _GateThreshold("economics", "at_least", 2.0),
+    "economics.positive_cell_rank_ic_count": _GateThreshold("economics", "at_least", 4.0),
+    "economics.ic_information_ratio": _GateThreshold("economics", "at_least", 0.30),
+    "economics.nonnegative_market_excess_count": _GateThreshold("economics", "at_least", 2.0),
+    "economics.nonnegative_cell_excess_count": _GateThreshold("economics", "at_least", 4.0),
+    "economics.drawdown_worsening_points": _GateThreshold("economics", "at_most", 2.0),
+    "stability.noninferior_quarter_count": _GateThreshold("stability", "at_least", 6.0),
+    "stability.max_consecutive_lagging_quarters": _GateThreshold("stability", "at_most", 2.0),
+    "stability.seed_macro_f1_std_points": _GateThreshold("stability", "at_most", 1.0),
+    "stability.worst_seed_delta_points": _GateThreshold("stability", "at_least", 0.0),
+    "coverage.large_slice_max_decline_points": _GateThreshold("coverage", "at_most", 2.0),
+    "coverage.degraded_coverage_decline_points": _GateThreshold("coverage", "at_most", 5.0),
+    "coverage.degraded_macro_f1_decline_points": _GateThreshold("coverage", "at_most", 2.0),
+    "operational.trainable_parameter_count": _GateThreshold("operational", "at_most", 15_000_000.0),
+    "operational.cpu_prediction_minutes": _GateThreshold("operational", "at_most", 10.0),
+    "operational.daily_pipeline_minutes": _GateThreshold("operational", "at_most", 120.0),
+    "security.safe_artifact_fraction": _GateThreshold("security", "at_least", 1.0),
+    "security.critical_finding_count": _GateThreshold("security", "at_most", 0.0),
+    "security.artifact_corruption_count": _GateThreshold("security", "at_most", 0.0),
+    "reproducibility.sample_replay_fraction": _GateThreshold("reproducibility", "at_least", 1.0),
+    "reproducibility.cpu_probability_max_delta": _GateThreshold(
+        "reproducibility", "at_most", 0.000001
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -80,12 +173,83 @@ class DecideApproval:
 
 
 @dataclass(frozen=True)
+class ShadowRunEvidence:
+    evidence_id: str
+    shadow_run_id: str
+    eligible_eod_date: date
+    previous_shadow_run_id: str | None
+    markets: tuple[str, ...]
+    cold_load_checksum_verified: bool
+    schema_compatible: bool
+    probability_invariants_verified: bool
+    comparison_completed: bool
+    source_policy_verified: bool
+    cpu_prediction_seconds: float
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        shadow_run_id: str,
+        eligible_eod_date: date,
+        previous_shadow_run_id: str | None,
+        markets: tuple[str, ...],
+        cold_load_checksum_verified: bool,
+        schema_compatible: bool,
+        probability_invariants_verified: bool,
+        comparison_completed: bool,
+        source_policy_verified: bool,
+        cpu_prediction_seconds: float,
+    ) -> ShadowRunEvidence:
+        ordered_markets = tuple(sorted(markets))
+        payload = {
+            "shadow_run_id": shadow_run_id,
+            "eligible_eod_date": eligible_eod_date.isoformat(),
+            "previous_shadow_run_id": previous_shadow_run_id,
+            "markets": ordered_markets,
+            "cold_load_checksum_verified": cold_load_checksum_verified,
+            "schema_compatible": schema_compatible,
+            "probability_invariants_verified": probability_invariants_verified,
+            "comparison_completed": comparison_completed,
+            "source_policy_verified": source_policy_verified,
+            "cpu_prediction_seconds": cpu_prediction_seconds,
+        }
+        return cls(
+            evidence_id=_content_id("shadow_run_evidence", payload),
+            shadow_run_id=shadow_run_id,
+            eligible_eod_date=eligible_eod_date,
+            previous_shadow_run_id=previous_shadow_run_id,
+            markets=ordered_markets,
+            cold_load_checksum_verified=cold_load_checksum_verified,
+            schema_compatible=schema_compatible,
+            probability_invariants_verified=probability_invariants_verified,
+            comparison_completed=comparison_completed,
+            source_policy_verified=source_policy_verified,
+            cpu_prediction_seconds=cpu_prediction_seconds,
+        )
+
+    def is_content_addressed(self) -> bool:
+        rebuilt = self.create(
+            shadow_run_id=self.shadow_run_id,
+            eligible_eod_date=self.eligible_eod_date,
+            previous_shadow_run_id=self.previous_shadow_run_id,
+            markets=self.markets,
+            cold_load_checksum_verified=self.cold_load_checksum_verified,
+            schema_compatible=self.schema_compatible,
+            probability_invariants_verified=self.probability_invariants_verified,
+            comparison_completed=self.comparison_completed,
+            source_policy_verified=self.source_policy_verified,
+            cpu_prediction_seconds=self.cpu_prediction_seconds,
+        )
+        return rebuilt == self
+
+
+@dataclass(frozen=True)
 class RecordShadowEod:
     command_id: str
     model_family_id: str
     candidate_id: str
-    shadow_run_id: str
-    market_eligibility: tuple[str, ...]
+    evidence: ShadowRunEvidence
     expected_version: int
     occurred_at: datetime
 
@@ -119,6 +283,8 @@ class GateDecision:
     policy_version_id: str
     status: Literal["passed", "failed"]
     failed_gates: tuple[str, ...]
+    hard_gate_evidence_id: str | None = None
+    hard_gate_evidence_refs: tuple[str, ...] = ()
     serving_status: Literal["blocked"] = "blocked"
 
 
@@ -203,15 +369,32 @@ class InMemoryLifecycleStore:
         occurred_at: datetime,
     ) -> LifecycleEvent:
         family_events = self._events.setdefault(model_family_id, [])
-        current_version = len(family_events)
-        if expected_version != current_version:
-            raise LifecycleConflict("stale_lifecycle_version")
         payload_json = json.dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
+        existing = next(
+            (
+                event
+                for events in self._events.values()
+                for event in events
+                if event.command_id == command_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if (
+                existing.model_family_id != model_family_id
+                or existing.event_kind != event_kind
+                or existing.payload_json != payload_json
+            ):
+                raise LifecycleConflict("command_id_payload_conflict")
+            return existing
+        current_version = len(family_events)
+        if expected_version != current_version:
+            raise LifecycleConflict("stale_lifecycle_version")
         event_id = _content_id(
             "lifecycle_event",
             {
@@ -309,6 +492,41 @@ class SqlAlchemyLifecycleStore:
                         event_kind=event_kind,
                         payload=payload,
                         occurred_at=occurred_at.isoformat(),
+                    )
+                )
+                outbox_event_id = str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"stock-forecasting/model-lifecycle-outbox/{event_id}",
+                    )
+                )
+                connection.execute(
+                    outbox_events.insert().values(
+                        event_id=outbox_event_id,
+                        event_type="model_lifecycle.event_recorded",
+                        schema_version="1.0.0",
+                        aggregate_id=str(
+                            uuid5(
+                                NAMESPACE_URL,
+                                f"stock-forecasting/model-family/{model_family_id}",
+                            )
+                        ),
+                        aggregate_version=current_version + 1,
+                        occurred_at=occurred_at.isoformat(),
+                        producer="model_governance",
+                        trace_id=command_id,
+                        payload={
+                            "lifecycle_event_id": event_id,
+                            "event_kind": event_kind,
+                            "model_family_id": model_family_id,
+                        },
+                    )
+                )
+                connection.execute(
+                    outbox_dispatch.insert().values(
+                        event_id=outbox_event_id,
+                        status="pending",
+                        fencing_token=0,
                     )
                 )
                 return LifecycleEvent(
@@ -427,6 +645,8 @@ class ModelLifecycle:
             failed_gates.append("bootstrap_disabled_after_first_production_assignment")
         if candidate["model_family"] != "regularized_multinomial_logistic":
             failed_gates.append("model_family")
+        if candidate["formal_qualification"] is not True:
+            failed_gates.append("qualification")
         if cast(float, candidate["improvement_percentage_points"]) < 1.0:
             failed_gates.append("minimum_improvement")
         calibrator_statuses = tuple(cast(list[str], candidate["calibrator_statuses"]))
@@ -434,8 +654,29 @@ class ModelLifecycle:
             status != "sufficient_data" for status in calibrator_statuses
         ):
             failed_gates.append("calibration_support")
-        hard_gate_values = asdict(command.hard_gates)
-        failed_gates.extend(name for name in self._gate_names if not bool(hard_gate_values[name]))
+        evidence = command.hard_gates
+        evidence_is_valid = (
+            evidence.evidence_kind == "formal_evidence"
+            and evidence.policy_version_id == command.policy_version_id
+            and evidence.evaluation_report_id == candidate["evaluation_report_id"]
+            and evidence.is_content_addressed()
+            and bool(evidence.evidence_refs)
+            and all(reference.startswith("sha256:") for reference in evidence.evidence_refs)
+            and {item.name for item in evidence.measurements} == set(_BOOTSTRAP_GATE_POLICY_V1)
+        )
+        if command.policy_version_id != "bootstrap-gate-policy-v1" or not evidence_is_valid:
+            failed_gates.append("hard_gate_evidence")
+        else:
+            failed_categories = {
+                threshold.category
+                for measurement in evidence.measurements
+                if not (threshold := _BOOTSTRAP_GATE_POLICY_V1[measurement.name]).passes(
+                    measurement.value
+                )
+            }
+            failed_gates.extend(
+                category for category in self._gate_names if category in failed_categories
+            )
         decision_payload = {
             "candidate_id": command.candidate_id,
             "artifact_id": candidate["artifact_id"],
@@ -443,6 +684,8 @@ class ModelLifecycle:
             "policy_version_id": command.policy_version_id,
             "status": "failed" if failed_gates else "passed",
             "failed_gates": failed_gates,
+            "hard_gate_evidence_id": evidence.evidence_id,
+            "hard_gate_evidence_refs": evidence.evidence_refs,
             "serving_status": "blocked",
         }
         decision = GateDecision(
@@ -453,6 +696,8 @@ class ModelLifecycle:
             policy_version_id=command.policy_version_id,
             status="failed" if failed_gates else "passed",
             failed_gates=tuple(failed_gates),
+            hard_gate_evidence_id=evidence.evidence_id,
+            hard_gate_evidence_refs=evidence.evidence_refs,
         )
         event = self._store.append(
             command_id=command.command_id,
@@ -493,6 +738,8 @@ class ModelLifecycle:
             or command.policy_version_id != gate["policy_version_id"]
         ):
             invalidated_reason = "evidence_reference_mismatch"
+        elif command.expected_assignment != self._current_assignment(command.model_family_id):
+            invalidated_reason = "expected_assignment_changed"
         elif command.occurred_at > expires_at:
             invalidated_reason = "approval_expired"
         elif not command.reason.strip():
@@ -544,6 +791,10 @@ class ModelLifecycle:
             approval_decision=decision,
         )
 
+    def _current_assignment(self, model_family_id: str) -> str:
+        assignments = self._store.production_assignments(model_family_id)
+        return assignments[-1] if assignments else "unassigned"
+
     def _passed_gate(
         self, model_family_id: str, candidate_id: str
     ) -> tuple[LifecycleEvent, dict[str, object]]:
@@ -561,21 +812,57 @@ class ModelLifecycle:
     def _record_shadow(self, command: RecordShadowEod) -> LifecycleResult:
         approval = self._current_approval(command.model_family_id, command.candidate_id)
         expires_at = datetime.fromisoformat(str(approval["expires_at"]))
+        evidence = command.evidence
+        prior_shadow_events = tuple(
+            event
+            for event in self._store.events(command.model_family_id)
+            if event.event_kind == "ShadowEodRecorded"
+            and json.loads(event.payload_json)["candidate_id"] == command.candidate_id
+        )
+        prior_payloads = tuple(json.loads(event.payload_json) for event in prior_shadow_events)
+        previous = prior_payloads[-1] if prior_payloads else None
         blocked_reason: str | None = None
         if approval["decision"] != "approved" or approval["invalidated_reason"] is not None:
             blocked_reason = "approval_not_valid"
         elif command.occurred_at > expires_at:
             blocked_reason = "approval_expired"
-        elif set(command.market_eligibility) != {"XTAI", "XNAS"}:
+        elif approval["expected_assignment"] != self._current_assignment(command.model_family_id):
+            blocked_reason = "expected_assignment_changed"
+        elif not evidence.is_content_addressed():
+            blocked_reason = "shadow_evidence_checksum_mismatch"
+        elif set(evidence.markets) != {"XTAI", "XNAS"}:
             blocked_reason = "incomplete_market_shadow"
-        completed_cycles = sum(
-            event.event_kind == "ShadowEodRecorded"
-            and json.loads(event.payload_json)["candidate_id"] == command.candidate_id
-            for event in self._store.events(command.model_family_id)
-        )
+        elif (
+            not all(
+                (
+                    evidence.cold_load_checksum_verified,
+                    evidence.schema_compatible,
+                    evidence.probability_invariants_verified,
+                    evidence.comparison_completed,
+                    evidence.source_policy_verified,
+                )
+            )
+            or evidence.cpu_prediction_seconds > 600
+        ):
+            blocked_reason = "shadow_checks_failed"
+        elif any(
+            payload["shadow_run_id"] == evidence.shadow_run_id
+            or payload["eligible_eod_date"] == evidence.eligible_eod_date.isoformat()
+            for payload in prior_payloads
+        ):
+            blocked_reason = "duplicate_shadow_run"
+        elif evidence.previous_shadow_run_id != (
+            str(previous["shadow_run_id"]) if previous is not None else None
+        ):
+            blocked_reason = "shadow_sequence_broken"
+        elif previous is not None and evidence.eligible_eod_date <= date.fromisoformat(
+            str(previous["eligible_eod_date"])
+        ):
+            blocked_reason = "shadow_date_not_increasing"
+        completed_cycles = len(prior_shadow_events)
         eligible_cycle_count = completed_cycles + (0 if blocked_reason else 1)
-        evidence = ShadowEvidence(
-            shadow_run_id=command.shadow_run_id,
+        outcome_evidence = ShadowEvidence(
+            shadow_run_id=evidence.shadow_run_id,
             candidate_id=command.candidate_id,
             eligible_cycle_count=eligible_cycle_count,
             blocked_reason=blocked_reason,
@@ -586,9 +873,18 @@ class ModelLifecycle:
             expected_version=command.expected_version,
             event_kind=("ShadowEodBlocked" if blocked_reason else "ShadowEodRecorded"),
             payload={
-                "shadow_run_id": command.shadow_run_id,
+                "shadow_run_id": evidence.shadow_run_id,
+                "shadow_evidence_id": evidence.evidence_id,
+                "eligible_eod_date": evidence.eligible_eod_date.isoformat(),
+                "previous_shadow_run_id": evidence.previous_shadow_run_id,
                 "candidate_id": command.candidate_id,
-                "market_eligibility": command.market_eligibility,
+                "market_eligibility": evidence.markets,
+                "cold_load_checksum_verified": evidence.cold_load_checksum_verified,
+                "schema_compatible": evidence.schema_compatible,
+                "probability_invariants_verified": (evidence.probability_invariants_verified),
+                "comparison_completed": evidence.comparison_completed,
+                "source_policy_verified": evidence.source_policy_verified,
+                "cpu_prediction_seconds": evidence.cpu_prediction_seconds,
                 "eligible_cycle_count": eligible_cycle_count,
                 "blocked_reason": blocked_reason,
                 "production_history_written": False,
@@ -604,7 +900,7 @@ class ModelLifecycle:
                 else "shadow_recorded"
             ),
             version=event.version,
-            shadow_evidence=evidence,
+            shadow_evidence=outcome_evidence,
         )
 
     def _current_approval(self, model_family_id: str, candidate_id: str) -> dict[str, object]:
@@ -700,6 +996,8 @@ class ModelGovernanceQuery:
                     "status": gate["status"],
                     "policy_version_id": gate["policy_version_id"],
                     "failed_gates": gate["failed_gates"],
+                    "hard_gate_evidence_id": gate.get("hard_gate_evidence_id"),
+                    "hard_gate_evidence_refs": gate.get("hard_gate_evidence_refs", []),
                 }
                 if gate is not None
                 else {"status": "not_evaluated"}
@@ -707,7 +1005,13 @@ class ModelGovernanceQuery:
             "approval": (
                 {"status": ("approved" if approval["decision"] == "approved" else "rejected")}
                 if approval is not None
-                else {"status": "awaiting_approval"}
+                else {
+                    "status": (
+                        "blocked_by_gate"
+                        if gate is not None and gate["status"] == "failed"
+                        else "awaiting_approval"
+                    )
+                }
             ),
             "shadow": {"eligible_cycle_count": shadow_count, "required": 5},
             "serving": {

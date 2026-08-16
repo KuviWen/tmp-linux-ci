@@ -1,9 +1,13 @@
+import hashlib
 import json
+
+import pytest
 
 from stock_forecasting.forecasting import (
     ClassPriorTrendForecaster,
     FeatureBatch,
     FeatureRow,
+    ModelArtifact,
     PredictionRequest,
     RegularizedMultinomialLogisticTrendForecaster,
     TrainingRequest,
@@ -137,3 +141,47 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
 
     assert payload["class_weights"] == {"up": 0.5, "flat": 2.0, "down": 2.0}
     assert payload["normalizer"]["means"] != [100.0, 100.0]
+
+
+def test_logistic_offline_artifact_applies_bound_market_horizon_temperature() -> None:
+    payload = {
+        "model_family": "regularized_multinomial_logistic",
+        "seed": 17,
+        "manifest_ids": ["feature", "source", "label", "fold", "cost"],
+        "training_selection_id": "sha256:selection",
+        "normalizer": {"means": [0.0], "scales": [1.0]},
+        "class_weights": {"up": 1.0, "flat": 1.0, "down": 1.0},
+        "regularization": 0.05,
+        "weights": [[2.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+        "calibrators": [
+            {
+                "calibrator_id": "sha256:literal-temperature",
+                "market": "XTAI",
+                "horizon_sessions": 1,
+                "temperature": 2.0,
+                "fit_method": "temperature_scaling",
+            }
+        ],
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    artifact = ModelArtifact(
+        artifact_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
+        model_family="regularized_multinomial_logistic",
+        seed=17,
+        manifest_ids=("feature", "source", "label", "fold", "cost"),
+        training_selection_id="sha256:selection",
+        model_parameters_id="sha256:parameters",
+        serialized=serialized,
+        calibrator_ids=("sha256:literal-temperature",),
+    )
+
+    forecast = RegularizedMultinomialLogisticTrendForecaster.load(serialized).predict(
+        PredictionRequest(
+            artifact,
+            (FeatureRow("literal-row", "XTAI", 1, (1.0,), None),),
+        )
+    )
+
+    assert forecast.predictions[0].probabilities == pytest.approx(
+        {"up": 0.5761168848, "flat": 0.2119415576, "down": 0.2119415576}
+    )
