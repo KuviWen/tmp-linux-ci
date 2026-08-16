@@ -106,7 +106,9 @@ class Application:
             object_repository=self.object_repository,
         )
         self.security_audit = SecurityAudit(self.state_store)
-        self.secret_provider = secret_provider or InMemorySecretProvider()
+        self.secret_provider = secret_provider or InMemorySecretProvider(
+            clock=lambda: self._fixed_security_time or datetime.now(UTC)
+        )
         self.operations_control = OperationsControl(
             self.state_store,
             authorization_policy=self.authorization_policy,

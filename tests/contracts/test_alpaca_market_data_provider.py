@@ -139,9 +139,12 @@ class LiteralCredentialResolver:
                 request_id=request_id,
                 work_id=work_id,
                 credential_version=1,
-                issued_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
                 lease_duration=timedelta(minutes=5),
+                lease_not_before=datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+                lease_expires_at=datetime(2026, 8, 15, 8, 5, tzinfo=UTC),
             ),
+            clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+            monotonic_clock=lambda: 0.0,
         )
 
 

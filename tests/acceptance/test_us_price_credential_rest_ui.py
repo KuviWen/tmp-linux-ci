@@ -4,6 +4,7 @@ import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import pytest
@@ -72,14 +73,25 @@ class SecretBearingExceptionValidator:
 
 
 class RecordingSecretProvider:
-    def __init__(self) -> None:
-        self.delegate = InMemorySecretProvider()
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self.delegate = InMemorySecretProvider(
+            clock=clock or (lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC)),
+            monotonic_clock=monotonic_clock,
+        )
         self.refs: set[str] = set()
+        self.fail_put = False
         self.fail_revoke = False
         self.fail_checkout = False
         self.checkout_calls: list[str] = []
 
     def put(self, *, provider_id: str, credential_fields: Mapping[str, str]) -> SecretRef:
+        if self.fail_put:
+            raise OSError("secret provider write failed with SHOULD-NOT-BE-AUDITED")
         ref = self.delegate.put(provider_id=provider_id, credential_fields=credential_fields)
         self.refs.add(ref.secret_ref_id)
         return ref
@@ -108,6 +120,7 @@ class SequenceProviderTransport:
 
 
 def _direct_secret_context(*, credential_version: int) -> SecretUseContext:
+    lease_not_before = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
     return SecretUseContext(
         workload_principal_id="workload:ticket-07-test",
         environment="development",
@@ -117,8 +130,9 @@ def _direct_secret_context(*, credential_version: int) -> SecretUseContext:
         request_id=f"request-direct-secret-{credential_version}",
         work_id=f"work-direct-secret-{credential_version}",
         credential_version=credential_version,
-        issued_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
         lease_duration=timedelta(minutes=5),
+        lease_not_before=lease_not_before,
+        lease_expires_at=lease_not_before + timedelta(minutes=5),
     )
 
 
@@ -362,6 +376,103 @@ def test_alpaca_credential_can_be_set_without_ever_being_returned(tmp_path: Path
     }
 
 
+@pytest.mark.parametrize("operation", ["set", "rotate"])
+def test_secret_write_failure_keeps_allow_and_terminal_audit(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    secret_provider = RecordingSecretProvider(clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC))
+    application, client, headers = _credential_application(
+        tmp_path,
+        secret_provider=secret_provider,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    previous: dict[str, object] | None = None
+    if operation == "rotate":
+        previous = client.put(
+            endpoint,
+            headers={**headers, "X-Trace-Id": "trace-before-failed-rotation"},
+            json={
+                "credential_fields": {
+                    "api_key_id": "PK-BEFORE-FAILED-ROTATION",
+                    "api_secret_key": "before-failed-rotation-secret",
+                }
+            },
+        ).json()
+    secret_provider.fail_put = True
+    trace_id = f"trace-secret-{operation}-failure"
+
+    with pytest.raises(OSError, match="SHOULD-NOT-BE-AUDITED"):
+        client.request(
+            "PUT" if operation == "set" else "POST",
+            endpoint if operation == "set" else f"{endpoint}/rotations",
+            headers={**headers, "X-Trace-Id": trace_id},
+            json={
+                "credential_fields": {
+                    "api_key_id": f"PK-{operation.upper()}-FAILURE",
+                    "api_secret_key": f"{operation}-failure-secret",
+                }
+            },
+        )
+
+    events = application.state_store.list_audit_events(trace_id=trace_id)
+    assert events[0]["action"] == "source_credential.manage"
+    assert events[0]["outcome"] == "allowed"
+    write_events = [event for event in events if event["action"] == "source_credential.write"]
+    assert [event["outcome"] for event in write_events] == ["attempted", "failed"]
+    assert write_events[-1]["reason_code"] == "source_credential_write_failed"
+    assert "SHOULD-NOT-BE-AUDITED" not in str(events)
+    assert f"{operation}-failure-secret" not in str(events)
+    current = application.state_store.get_source_credential(provider_id="alpaca-market-data-basic")
+    if operation == "set":
+        assert current is None
+    else:
+        assert current is not None
+        assert current["secret_ref_id"] == previous["secret_ref_id"]  # type: ignore[index]
+
+
+def test_secret_write_is_revoked_when_success_terminal_audit_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_provider = RecordingSecretProvider()
+    application, client, headers = _credential_application(
+        tmp_path,
+        secret_provider=secret_provider,
+    )
+    original_record = application.state_store.record_security_event
+
+    def fail_write_success(**kwargs: object) -> None:
+        if kwargs["action"] == "source_credential.write" and kwargs["outcome"] == "succeeded":
+            raise OSError("secret_write_terminal_audit_unavailable")
+        original_record(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(application.state_store, "record_security_event", fail_write_success)
+
+    with pytest.raises(OSError, match="secret_write_terminal_audit_unavailable"):
+        client.put(
+            "/api/v1/operations/source-credentials/alpaca-market-data-basic",
+            headers={**headers, "X-Trace-Id": "trace-secret-write-terminal-failure"},
+            json={
+                "credential_fields": {
+                    "api_key_id": "PK-WRITE-TERMINAL-AUDIT",
+                    "api_secret_key": "write-terminal-audit-secret",
+                }
+            },
+        )
+
+    assert secret_provider.refs == set()
+    assert (
+        application.state_store.get_source_credential(provider_id="alpaca-market-data-basic")
+        is None
+    )
+    events = application.state_store.list_audit_events(
+        trace_id="trace-secret-write-terminal-failure"
+    )
+    assert [event["outcome"] for event in events] == ["allowed", "attempted"]
+    assert "write-terminal-audit-secret" not in str(events)
+
+
 def test_malformed_credential_body_never_echoes_rejected_secret(tmp_path: Path) -> None:
     _, client, headers = _credential_application(tmp_path)
     plaintext = "MALFORMED-PLAINTEXT-SECRET"
@@ -496,7 +607,7 @@ def test_alpaca_credential_rotation_replaces_the_old_secret_lease(tmp_path: Path
         SecretRef(payload["secret_ref_id"]),
         _direct_secret_context(credential_version=2),
     )
-    assert lease.credential_fields(accessed_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC)) == {
+    assert lease.credential_fields() == {
         "api_key_id": "PK-SECOND",
         "api_secret_key": "second-secret-value",
     }
@@ -893,7 +1004,7 @@ def test_only_a_valid_managed_credential_can_be_resolved_for_provider_use(
         work_id="work-direct-resolver",
         source_id="alpaca-us-stock-bars",
     )
-    assert lease.credential_fields(accessed_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC)) == {
+    assert lease.credential_fields() == {
         "api_key_id": "PK-RESOLVER",
         "api_secret_key": "resolver-secret-value",
     }
@@ -1042,14 +1153,15 @@ def test_one_work_id_stays_pinned_to_one_credential_version_after_rotation(
     ).json()
     client.post(f"{endpoint}/validations", headers=headers)
 
-    with pytest.raises(CredentialNotReady, match="source_credential_secret_unavailable"):
-        resolver.resolve_valid(
-            "alpaca-market-data-basic",
-            trace_id="trace-pinned-retry",
-            request_id="request-pinned",
-            work_id="work-pinned",
-            source_id="alpaca-us-stock-bars",
-        )
+    pinned_retry = resolver.resolve_valid(
+        "alpaca-market-data-basic",
+        trace_id="trace-pinned-retry",
+        request_id="request-pinned",
+        work_id="work-pinned",
+        source_id="alpaca-us-stock-bars",
+    )
+    assert pinned_retry is first_lease
+    assert pinned_retry.credential_fields()["api_key_id"] == "PK-PINNED-FIRST"
     new_work_lease = resolver.resolve_valid(
         "alpaca-market-data-basic",
         trace_id="trace-pinned-new-work",
@@ -1058,12 +1170,78 @@ def test_one_work_id_stays_pinned_to_one_credential_version_after_rotation(
         source_id="alpaca-us-stock-bars",
     )
     assert new_work_lease.secret_ref_id == second["secret_ref_id"]
-    assert (
-        new_work_lease.credential_fields(accessed_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC))[
-            "api_key_id"
-        ]
-        == "PK-PINNED-SECOND"
+    assert new_work_lease.credential_fields()["api_key_id"] == "PK-PINNED-SECOND"
+
+
+def test_one_work_id_cannot_renew_its_pinned_lease_window(tmp_path: Path) -> None:
+    wall_time = [datetime(2026, 8, 15, 8, 0, tzinfo=UTC)]
+    monotonic_time = [100.0]
+    secret_provider = RecordingSecretProvider(
+        clock=lambda: wall_time[0],
+        monotonic_clock=lambda: monotonic_time[0],
     )
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+        secret_provider=secret_provider,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-NONRENEWABLE-LEASE",
+                "api_secret_key": "nonrenewable-lease-secret",
+            }
+        },
+    )
+    client.post(f"{endpoint}/validations", headers=headers)
+    secret_provider.checkout_calls.clear()
+    resolver = ManagedSourceCredentialResolver(
+        application.state_store,
+        secret_provider,
+        workload_principal_id="workload:alpaca-source-adapter",
+        environment="development",
+        clock=lambda: wall_time[0],
+    )
+    resolve_arguments = {
+        "trace_id": "trace-nonrenewable-lease",
+        "request_id": "request-nonrenewable-lease",
+        "work_id": "work-nonrenewable-lease",
+        "source_id": "alpaca-us-stock-bars",
+    }
+
+    first = resolver.resolve_valid("alpaca-market-data-basic", **resolve_arguments)
+    repeated = resolver.resolve_valid("alpaca-market-data-basic", **resolve_arguments)
+    assert repeated is first
+    assert first.issued_at == datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    assert first.expires_at == datetime(2026, 8, 15, 8, 5, tzinfo=UTC)
+    assert len(secret_provider.checkout_calls) == 1
+
+    wall_time[0] += timedelta(minutes=4)
+    monotonic_time[0] += 240
+    restarted_resolver = ManagedSourceCredentialResolver(
+        application.state_store,
+        secret_provider,
+        workload_principal_id="workload:alpaca-source-adapter",
+        environment="development",
+        clock=lambda: wall_time[0],
+    )
+    restarted = restarted_resolver.resolve_valid("alpaca-market-data-basic", **resolve_arguments)
+    assert restarted.issued_at == datetime(2026, 8, 15, 8, 4, tzinfo=UTC)
+    assert restarted.expires_at == datetime(2026, 8, 15, 8, 5, tzinfo=UTC)
+
+    monotonic_time[0] += 60
+    with pytest.raises(KeyError, match="source_credential_lease_expired"):
+        restarted.credential_fields()
 
 
 def test_each_failed_secret_checkout_has_a_distinct_terminal_audit(
@@ -1358,7 +1536,7 @@ def test_revoked_credential_can_be_reapplied_through_the_write_only_rest_seam(
     assert application.secret_provider.checkout(
         SecretRef(reapplied.json()["secret_ref_id"]),
         _direct_secret_context(credential_version=reapplied.json()["version"]),
-    ).credential_fields(accessed_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC)) == {
+    ).credential_fields() == {
         "api_key_id": "PK-REAPPLIED",
         "api_secret_key": "reapplied-secret",
     }
@@ -1774,7 +1952,10 @@ def test_validation_projects_a_corrupt_encrypted_secret_as_fail_closed(
         )
     )
     secret_root = tmp_path / "encrypted-source-secrets"
-    secret_provider = EncryptedFilesystemSecretProvider(secret_root)
+    secret_provider = EncryptedFilesystemSecretProvider(
+        secret_root,
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+    )
     application, client, headers = _credential_application(
         tmp_path,
         credential_validator=validator,

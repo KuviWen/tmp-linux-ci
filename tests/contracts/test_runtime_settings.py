@@ -152,12 +152,11 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
         request_id="request-runtime-persistence",
         work_id="work-runtime-persistence",
         credential_version=1,
-        issued_at=accessed_at,
         lease_duration=timedelta(minutes=5),
+        lease_not_before=accessed_at,
+        lease_expires_at=accessed_at + timedelta(minutes=5),
     )
-    assert third.secret_provider.checkout(secret_ref, use_context).credential_fields(
-        accessed_at=accessed_at
-    ) == {
+    assert third.secret_provider.checkout(secret_ref, use_context).credential_fields() == {
         "api_key_id": "PK-RUNTIME-PERSISTENCE",
         "api_secret_key": "runtime-persistence-secret",
     }

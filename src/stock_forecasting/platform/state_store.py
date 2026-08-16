@@ -1232,23 +1232,26 @@ class StateStore:
         event_id = authorization["evaluation_id"]
         if not isinstance(event_id, str):
             raise ValueError("authorization_evaluation_id_required")
-        exists = connection.execute(
-            select(security_audit_events.c.event_id).where(
-                security_audit_events.c.event_id == event_id
+        expected = {
+            "event_id": event_id,
+            "action": authorization["action"],
+            "outcome": outcome,
+            "reason_code": authorization["reason_code"],
+            "trace_id": trace_id,
+            "authorization": authorization,
+        }
+        existing = (
+            connection.execute(
+                select(security_audit_events).where(security_audit_events.c.event_id == event_id)
             )
-        ).scalar_one_or_none()
-        if exists is not None:
-            raise ImmutableStateConflict("immutable_authorization_evaluation_conflict")
-        connection.execute(
-            security_audit_events.insert().values(
-                event_id=event_id,
-                action=authorization["action"],
-                outcome=outcome,
-                reason_code=authorization["reason_code"],
-                trace_id=trace_id,
-                authorization=authorization,
-            )
+            .mappings()
+            .one_or_none()
         )
+        if existing is not None:
+            if any(existing[key] != value for key, value in expected.items()):
+                raise ImmutableStateConflict("immutable_authorization_evaluation_conflict")
+            return
+        connection.execute(security_audit_events.insert().values(**expected))
 
     def get_listing_research(
         self,

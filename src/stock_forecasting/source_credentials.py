@@ -8,6 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, SupportsIndex
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -62,8 +63,9 @@ class SecretUseContext:
     request_id: str
     work_id: str
     credential_version: int
-    issued_at: datetime
     lease_duration: timedelta
+    lease_not_before: datetime
+    lease_expires_at: datetime
 
     def __post_init__(self) -> None:
         text_fields = (
@@ -79,9 +81,12 @@ class SecretUseContext:
             raise ValueError("secret_use_context_invalid")
         if self.credential_version < 1:
             raise ValueError("secret_use_context_invalid")
-        if self.issued_at.tzinfo is None or self.issued_at.utcoffset() is None:
+        lease_times = (self.lease_not_before, self.lease_expires_at)
+        if any(value.tzinfo is None or value.utcoffset() is None for value in lease_times):
             raise ValueError("secret_use_context_invalid")
         if not timedelta(0) < self.lease_duration <= timedelta(hours=1):
+            raise ValueError("secret_use_context_invalid")
+        if self.lease_expires_at <= self.lease_not_before:
             raise ValueError("secret_use_context_invalid")
 
     def as_audit_payload(self) -> dict[str, object]:
@@ -94,7 +99,8 @@ class SecretUseContext:
             "request_id": self.request_id,
             "work_id": self.work_id,
             "credential_version": self.credential_version,
-            "issued_at": self.issued_at.isoformat().replace("+00:00", "Z"),
+            "lease_not_before": self.lease_not_before.isoformat().replace("+00:00", "Z"),
+            "lease_expires_at": self.lease_expires_at.isoformat().replace("+00:00", "Z"),
             "lease_duration_seconds": int(self.lease_duration.total_seconds()),
         }
 
@@ -102,12 +108,14 @@ class SecretUseContext:
 class SecretLease:
     __slots__ = (
         "_credential_fields",
-        "credential_version",
-        "expires_at",
-        "issued_at",
-        "purpose",
+        "_credential_version",
+        "_expires_at",
+        "_issued_at",
+        "_monotonic_clock",
+        "_monotonic_deadline",
+        "_purpose",
         "_revoked",
-        "secret_ref_id",
+        "_secret_ref_id",
     )
 
     def __init__(
@@ -115,14 +123,30 @@ class SecretLease:
         secret_ref: SecretRef,
         credential_fields: Mapping[str, str],
         use_context: SecretUseContext,
+        *,
+        clock: Callable[[], datetime],
+        monotonic_clock: Callable[[], float],
     ) -> None:
-        self.secret_ref_id = secret_ref.secret_ref_id
-        self.credential_version = use_context.credential_version
-        self.issued_at = use_context.issued_at
-        self.expires_at = use_context.issued_at + use_context.lease_duration
-        self.purpose = use_context.purpose
+        issued_at = clock()
+        if issued_at.tzinfo is None or issued_at.utcoffset() is None:
+            raise ValueError("secret_provider_clock_invalid")
+        if issued_at < use_context.lease_not_before:
+            raise SecretUnavailableError("source_credential_lease_not_yet_valid")
+        expires_at = min(
+            issued_at + use_context.lease_duration,
+            use_context.lease_expires_at,
+        )
+        if expires_at <= issued_at:
+            raise SecretUnavailableError("source_credential_lease_expired")
+        self._secret_ref_id = secret_ref.secret_ref_id
+        self._credential_version = use_context.credential_version
+        self._issued_at = issued_at
+        self._expires_at = expires_at
+        self._purpose = use_context.purpose
         self._revoked = False
         self._credential_fields = MappingProxyType(dict(credential_fields))
+        self._monotonic_clock = monotonic_clock
+        self._monotonic_deadline = monotonic_clock() + (expires_at - issued_at).total_seconds()
 
     def __repr__(self) -> str:
         return (
@@ -138,20 +162,36 @@ class SecretLease:
     def revoked(self) -> bool:
         return self._revoked
 
+    @property
+    def secret_ref_id(self) -> str:
+        return self._secret_ref_id
+
+    @property
+    def credential_version(self) -> int:
+        return self._credential_version
+
+    @property
+    def issued_at(self) -> datetime:
+        return self._issued_at
+
+    @property
+    def expires_at(self) -> datetime:
+        return self._expires_at
+
+    @property
+    def purpose(self) -> str:
+        return self._purpose
+
     def __reduce_ex__(self, _protocol: SupportsIndex) -> str | tuple[Any, ...]:
         raise TypeError("secret_lease_not_serializable")
 
     def __getstate__(self) -> object:
         raise TypeError("secret_lease_not_serializable")
 
-    def credential_fields(self, *, accessed_at: datetime) -> dict[str, str]:
+    def credential_fields(self) -> dict[str, str]:
         if self.revoked:
             raise SecretUnavailableError("source_credential_lease_revoked")
-        if accessed_at.tzinfo is None or accessed_at.utcoffset() is None:
-            raise ValueError("secret_lease_access_time_invalid")
-        if accessed_at < self.issued_at:
-            raise SecretUnavailableError("source_credential_lease_not_yet_valid")
-        if accessed_at >= self.expires_at:
+        if self._monotonic_clock() >= self._monotonic_deadline:
             raise SecretUnavailableError("source_credential_lease_expired")
         return dict(self._credential_fields)
 
@@ -376,6 +416,7 @@ def pin_source_credential_lease(
     request_id: str,
     work_id: str,
     lease_duration: timedelta,
+    lease_issued_at: datetime,
 ) -> dict[str, object]:
     event_id = str(
         uuid5(
@@ -411,6 +452,8 @@ def pin_source_credential_lease(
         "credential_version": credential_version,
         "secret_ref_id": secret_ref_id,
         "credential_expires_at": current.get("expires_at"),
+        "lease_not_before": lease_issued_at.isoformat().replace("+00:00", "Z"),
+        "lease_expires_at": (lease_issued_at + lease_duration).isoformat().replace("+00:00", "Z"),
     }
     state_store.record_security_event(
         event_id=event_id,
@@ -487,6 +530,80 @@ class AuditedSecretCheckout:
         return lease
 
 
+class AuditedSecretWrite:
+    def __init__(self, state_store: StateStore, secret_provider: SecretProvider) -> None:
+        self._state_store = state_store
+        self._secret_provider = secret_provider
+
+    def put(
+        self,
+        *,
+        provider_id: str,
+        credential_fields: Mapping[str, str],
+        operation: Literal["set", "rotate"],
+        trace_id: str,
+        authorization: Mapping[str, object],
+        occurred_at: datetime,
+    ) -> SecretRef:
+        attempt_id = str(uuid4())
+        audit_context = {
+            "provider_id": provider_id,
+            "operation": operation,
+            "principal_id": authorization.get("principal_id"),
+            "environment": authorization.get("environment"),
+            "purpose": authorization.get("purpose"),
+            "authorization_decision_id": authorization.get("decision_id"),
+            "authorization_evaluation_id": authorization.get("evaluation_id"),
+            "secret_write_attempt_id": attempt_id,
+        }
+        self._state_store.record_security_event(
+            event_id=str(uuid4()),
+            action="source_credential.write",
+            outcome="attempted",
+            reason_code="source_credential_write_attempted",
+            trace_id=trace_id,
+            authorization=audit_context,
+        )
+        try:
+            secret_ref = self._secret_provider.put(
+                provider_id=provider_id,
+                credential_fields=credential_fields,
+            )
+        except Exception:
+            self._state_store.record_security_event(
+                event_id=str(uuid4()),
+                action="source_credential.write",
+                outcome="failed",
+                reason_code="source_credential_write_failed",
+                trace_id=trace_id,
+                authorization=audit_context,
+            )
+            raise
+        try:
+            self._state_store.record_security_event(
+                event_id=str(uuid4()),
+                action="source_credential.write",
+                outcome="succeeded",
+                reason_code="source_credential_write_succeeded",
+                trace_id=trace_id,
+                authorization={
+                    **audit_context,
+                    "secret_ref_id": secret_ref.secret_ref_id,
+                },
+            )
+        except Exception:
+            try:
+                self._secret_provider.revoke(secret_ref)
+            except Exception:
+                self._state_store.queue_source_secret_cleanup(
+                    secret_ref_id=secret_ref.secret_ref_id,
+                    provider_id=provider_id,
+                    queued_at=occurred_at.isoformat().replace("+00:00", "Z"),
+                )
+            raise
+        return secret_ref
+
+
 class ManagedSourceCredentialResolver:
     def __init__(
         self,
@@ -502,6 +619,7 @@ class ManagedSourceCredentialResolver:
         self._workload_principal_id = workload_principal_id
         self._environment = environment
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._leases: dict[tuple[str, str], SecretLease] = {}
 
     def resolve_valid(
         self,
@@ -524,6 +642,7 @@ class ManagedSourceCredentialResolver:
         existing_pin = self._state_store.get_security_event(event_id=pin_event_id)
         if existing_pin is None and current["readiness"] != "valid":
             raise CredentialNotReady(str(current["reason_code"]))
+        evaluated_at = self._clock()
         pinned = pin_source_credential_lease(
             self._state_store,
             provider_id=provider_id,
@@ -537,18 +656,32 @@ class ManagedSourceCredentialResolver:
             request_id=request_id,
             work_id=work_id,
             lease_duration=timedelta(minutes=5),
+            lease_issued_at=evaluated_at,
         )
-        expires_at = pinned.get("credential_expires_at")
+        credential_expires_at = pinned.get("credential_expires_at")
         if (
-            isinstance(expires_at, str)
-            and datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= self._clock()
+            isinstance(credential_expires_at, str)
+            and datetime.fromisoformat(credential_expires_at.replace("Z", "+00:00")) <= evaluated_at
         ):
             raise CredentialNotReady("source_credential_expired")
         credential_version = pinned.get("credential_version")
         secret_ref_id = pinned.get("secret_ref_id")
-        if not isinstance(credential_version, int) or not isinstance(secret_ref_id, str):
+        lease_not_before = pinned.get("lease_not_before")
+        lease_expires_at = pinned.get("lease_expires_at")
+        if (
+            not isinstance(credential_version, int)
+            or not isinstance(secret_ref_id, str)
+            or not isinstance(lease_not_before, str)
+            or not isinstance(lease_expires_at, str)
+        ):
             raise ValueError("source_credential_lease_pin_invalid")
-        issued_at = self._clock()
+        pinned_not_before = datetime.fromisoformat(lease_not_before.replace("Z", "+00:00"))
+        pinned_expires_at = datetime.fromisoformat(lease_expires_at.replace("Z", "+00:00"))
+        if pinned_expires_at <= evaluated_at:
+            raise CredentialNotReady("source_credential_lease_expired")
+        cached_lease = self._leases.get((provider_id, work_id))
+        if cached_lease is not None:
+            return cached_lease
         use_context = SecretUseContext(
             workload_principal_id=self._workload_principal_id,
             environment=self._environment,
@@ -558,24 +691,37 @@ class ManagedSourceCredentialResolver:
             request_id=request_id,
             work_id=work_id,
             credential_version=credential_version,
-            issued_at=issued_at,
             lease_duration=timedelta(minutes=5),
+            lease_not_before=pinned_not_before,
+            lease_expires_at=pinned_expires_at,
         )
         try:
-            return self._secret_checkout.checkout(
+            lease = self._secret_checkout.checkout(
                 secret_ref_id=secret_ref_id,
                 trace_id=trace_id,
                 use_context=use_context,
             )
         except SecretUnavailableError as error:
+            reason_code = str(error.args[0])
+            if reason_code.startswith("source_credential_lease_"):
+                raise CredentialNotReady(reason_code) from error
             raise CredentialNotReady("source_credential_secret_unavailable") from error
         except SecretCorruptError as error:
             raise CredentialNotReady("source_credential_secret_corrupt") from error
+        self._leases[(provider_id, work_id)] = lease
+        return lease
 
 
 class InMemorySecretProvider:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] = monotonic,
+    ) -> None:
         self._secrets: dict[str, dict[str, str]] = {}
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._monotonic_clock = monotonic_clock
 
     def put(self, *, provider_id: str, credential_fields: Mapping[str, str]) -> SecretRef:
         secret_ref_id = f"secret-ref:{provider_id}:{uuid4()}"
@@ -587,7 +733,13 @@ class InMemorySecretProvider:
             credential_fields = self._secrets[secret_ref.secret_ref_id]
         except KeyError as error:
             raise SecretUnavailableError("source_credential_secret_unavailable") from error
-        return SecretLease(secret_ref, credential_fields, use_context)
+        return SecretLease(
+            secret_ref,
+            credential_fields,
+            use_context,
+            clock=self._clock,
+            monotonic_clock=self._monotonic_clock,
+        )
 
     def revoke(self, secret_ref: SecretRef) -> None:
         self._secrets.pop(secret_ref.secret_ref_id, None)
@@ -596,8 +748,16 @@ class InMemorySecretProvider:
 class EncryptedFilesystemSecretProvider:
     _KEY_FILENAME = "master.key"
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        monotonic_clock: Callable[[], float] = monotonic,
+    ) -> None:
         self._root = root
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._monotonic_clock = monotonic_clock
         self._root.mkdir(parents=True, exist_ok=True)
         key_path = self._root / self._KEY_FILENAME
         try:
@@ -637,7 +797,13 @@ class EncryptedFilesystemSecretProvider:
             not isinstance(key, str) or not isinstance(value, str) for key, value in decoded.items()
         ):
             raise SecretCorruptError("source_credential_secret_corrupt")
-        return SecretLease(secret_ref, decoded, use_context)
+        return SecretLease(
+            secret_ref,
+            decoded,
+            use_context,
+            clock=self._clock,
+            monotonic_clock=self._monotonic_clock,
+        )
 
     def revoke(self, secret_ref: SecretRef) -> None:
         with suppress(FileNotFoundError):

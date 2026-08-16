@@ -823,7 +823,7 @@ class AlpacaSourceCollector:
             )
         except CredentialNotReady as error:
             raise SourceCredentialRequired(error.reason_code) from error
-        credential_fields = lease.credential_fields(accessed_at=self._clock())
+        credential_fields = lease.credential_fields()
         if request.source_id != self._source_id:
             raise ValueError("source_adapter_request_mismatch")
         try:

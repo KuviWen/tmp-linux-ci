@@ -18,6 +18,7 @@ from stock_forecasting.data_supply import PRICE_RESEARCH_REQUIRED_USES
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.source_credentials import (
     AuditedSecretCheckout,
+    AuditedSecretWrite,
     CredentialValidationEvidence,
     SecretCorruptError,
     SecretProvider,
@@ -60,6 +61,7 @@ class OperationsControl:
         self._authorization_policy = authorization_policy
         self._secret_provider = secret_provider
         self._secret_checkout = AuditedSecretCheckout(state_store, secret_provider)
+        self._secret_write = AuditedSecretWrite(state_store, secret_provider)
         self._source_credential_validators = source_credential_validators
         self._clock = clock
 
@@ -121,14 +123,23 @@ class OperationsControl:
                 trace_id=trace_id,
             )
             return PolicyDeniedOutcome.from_decision(decision)
+        self._state_store.record_authorization_decision(
+            authorization=authorization,
+            outcome="allowed",
+            trace_id=trace_id,
+        )
         provider = self._provider(provider_id)
         self._drain_secret_cleanup(provider_id=provider_id)
         self._validate_fields(provider, credential_fields)
         canonical_expires_at = self._canonical_expiry(expires_at)
         evaluated_at = self._clock()
-        secret_ref = self._secret_provider.put(
+        secret_ref = self._secret_write.put(
             provider_id=provider_id,
             credential_fields=credential_fields,
+            operation="set",
+            trace_id=trace_id,
+            authorization=authorization,
+            occurred_at=evaluated_at,
         )
         try:
             outcome = self._state_store.publish_source_credential(
@@ -177,14 +188,23 @@ class OperationsControl:
                 trace_id=trace_id,
             )
             return PolicyDeniedOutcome.from_decision(decision)
+        self._state_store.record_authorization_decision(
+            authorization=authorization,
+            outcome="allowed",
+            trace_id=trace_id,
+        )
         provider = self._provider(provider_id)
         self._drain_secret_cleanup(provider_id=provider_id)
         self._validate_fields(provider, credential_fields)
         canonical_expires_at = self._canonical_expiry(expires_at)
         evaluated_at = self._clock()
-        secret_ref = self._secret_provider.put(
+        secret_ref = self._secret_write.put(
             provider_id=provider_id,
             credential_fields=credential_fields,
+            operation="rotate",
+            trace_id=trace_id,
+            authorization=authorization,
+            occurred_at=evaluated_at,
         )
         try:
             outcome, _ = self._state_store.rotate_source_credential(
@@ -304,10 +324,18 @@ class OperationsControl:
                 request_id=trace_id,
                 work_id=trace_id,
                 lease_duration=timedelta(minutes=5),
+                lease_issued_at=evaluated_at,
             )
             credential_version = pinned.get("credential_version")
             secret_ref_id = pinned.get("secret_ref_id")
-            if not isinstance(credential_version, int) or not isinstance(secret_ref_id, str):
+            lease_not_before = pinned.get("lease_not_before")
+            lease_expires_at = pinned.get("lease_expires_at")
+            if (
+                not isinstance(credential_version, int)
+                or not isinstance(secret_ref_id, str)
+                or not isinstance(lease_not_before, str)
+                or not isinstance(lease_expires_at, str)
+            ):
                 raise ValueError("source_credential_lease_pin_invalid")
             expected_version = credential_version
             expected_secret_ref_id = secret_ref_id
@@ -320,8 +348,9 @@ class OperationsControl:
                 request_id=trace_id,
                 work_id=trace_id,
                 credential_version=credential_version,
-                issued_at=evaluated_at,
                 lease_duration=timedelta(minutes=5),
+                lease_not_before=datetime.fromisoformat(lease_not_before.replace("Z", "+00:00")),
+                lease_expires_at=datetime.fromisoformat(lease_expires_at.replace("Z", "+00:00")),
             )
             try:
                 lease = self._secret_checkout.checkout(
@@ -336,7 +365,7 @@ class OperationsControl:
                     authentication_status="not_run",
                 )
             else:
-                credential_fields = lease.credential_fields(accessed_at=evaluated_at)
+                credential_fields = lease.credential_fields()
                 try:
                     validation = validator.validate(credential_fields)
                     serialized_validation = json.dumps(
