@@ -1202,6 +1202,16 @@ def test_passed_live_source_contract_assessment_requires_versioned_universe_iden
         )
 
 
+def test_source_contract_assessment_rejects_non_uuid_listing_evidence() -> None:
+    with pytest.raises(ValueError, match="source_contract_assessment_invalid"):
+        SourceContractAssessment(
+            contract_id="alpaca-ticket-07-live-v1",
+            live_validation="failed",
+            listing_ids=("not-a-uuid",),
+            source_contract_reason_code="source_contract_schema_invalid",
+        )
+
+
 def test_operations_rejects_validator_output_that_echoes_a_credential_value(
     tmp_path: Path,
 ) -> None:

@@ -20,6 +20,15 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "/api/v1/operations/source-credentials/{provider_id}/rotations",
         "/api/v1/operations/source-credentials/{provider_id}/validations",
     }
+    assert contract["paths"]["/api/v1/research/listings/{listing_id}/price-eligibility"]["get"][
+        "responses"
+    ]["200"]["description"] == (
+        "Taiwan and United States price-source research eligibility and immutable lineage."
+    )
+    assert (
+        contract["paths"]["/api/v1/operations/sources"]["get"]["responses"]["200"]["description"]
+        == "Current operational projection of Taiwan and United States price-source eligibility."
+    )
     prediction = contract["components"]["schemas"]["PredictionResult"]
     assert prediction["oneOf"] == [
         {"$ref": "#/components/schemas/AvailablePrediction"},

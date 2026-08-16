@@ -67,7 +67,7 @@ paths:
         - $ref: '#/components/parameters/ListingId'
       responses:
         '200':
-          description: Taiwan price-source research eligibility and immutable lineage.
+          description: Taiwan and United States price-source research eligibility and immutable lineage.
           content:
             application/json:
               schema:
@@ -85,7 +85,7 @@ paths:
         - LocalApiKey: []
       responses:
         '200':
-          description: Current operational projection of Taiwan price-source eligibility.
+          description: Current operational projection of Taiwan and United States price-source eligibility.
           content:
             application/json:
               schema:

@@ -13,7 +13,7 @@ from threading import Lock, Timer
 from time import monotonic
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, SupportsIndex
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -326,9 +326,14 @@ class SourceContractAssessment:
             for value in (self.universe_manifest_id, self.reference_graph_version_id)
         ):
             raise ValueError("source_contract_assessment_invalid")
-        if any(not listing_id.strip() for listing_id in self.listing_ids) or len(
-            set(self.listing_ids)
-        ) != len(self.listing_ids):
+        try:
+            for listing_id in self.listing_ids:
+                if not listing_id.strip():
+                    raise ValueError
+                UUID(listing_id)
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("source_contract_assessment_invalid") from None
+        if len(set(self.listing_ids)) != len(self.listing_ids):
             raise ValueError("source_contract_assessment_invalid")
         if (
             self.source_contract_reason_code is not None
