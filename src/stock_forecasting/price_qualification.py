@@ -142,6 +142,112 @@ class TaiwanPriceQualificationWorkflow:
             authorizations=authorizations,
         )
 
+    def register_zero_fee_source_basis_evidence(
+        self,
+        *,
+        manifest: TaiwanStockPoolManifest,
+        source_id: str,
+        terms_content: bytes,
+        trace_id: str,
+    ) -> str:
+        """Archive and bind the exact terms for an authenticated zero-fee candidate."""
+        authorizations = self._authorize_sources(
+            (source_id,),
+            trace_id=trace_id,
+            operation="register_zero_fee_source_basis_evidence",
+        )
+        basis = manifest.authenticated_source_basis
+        try:
+            authorization = authorizations[0]
+            policy_version_id = authorization.get("source_policy_version_id")
+            policies = (
+                tuple(
+                    policy
+                    for policy in self._authorization_policy.source_policies
+                    if policy.version_id == policy_version_id and policy.dataset_id == source_id
+                )
+                if self._authorization_policy is not None
+                else ()
+            )
+            expected_distributions = {
+                (member.dataset_id, member.distribution_url) for member in basis.members
+            }
+            if (
+                len(policies) != 1
+                or policies[0].access_basis != "zero_fee_plan"
+                or policies[0].source_basis_id != basis.source_basis_id
+                or policies[0].provider_id != basis.provider_id
+                or policies[0].plan_id != basis.plan_id
+                or policies[0].principal_classification != basis.principal_classification
+                or policies[0].credential_kind != basis.credential_kind
+                or policies[0].account_required is not True
+                or policies[0].fee_required is not False
+                or policies[0].terms_url != basis.terms_url
+                or policies[0].terms_content_sha256 != basis.terms_content_sha256
+                or not isinstance(policies[0].license_id, str)
+                or not isinstance(policies[0].attribution, str)
+                or not isinstance(policies[0].terms_content_sha256, str)
+                or {(item.dataset_id, item.distribution_url) for item in policies[0].distributions}
+                != expected_distributions
+                or self._object_repository is None
+                or not terms_content
+                or source_id not in {manifest.current_source_id, manifest.historical_source_id}
+            ):
+                raise ValueError("zero_fee_source_basis_evidence_invalid")
+            policy = policies[0]
+            expected_terms_sha256 = cast(str, policy.terms_content_sha256)
+            terms_sha256 = hashlib.sha256(terms_content).hexdigest()
+            if terms_sha256 != expected_terms_sha256:
+                raise ValueError("source_basis_terms_content_mismatch")
+            terms_object = self._object_repository.put_verified(
+                BytesIO(terms_content),
+                expected_checksum=terms_sha256,
+                metadata={
+                    "object_kind": "zero_fee_plan_terms",
+                    "source_id": source_id,
+                    "terms_url": basis.terms_url,
+                },
+            )
+        except ValueError as error:
+            self._state_store._publish_governance_rejection(
+                payload={
+                    "operation": "register_zero_fee_source_basis_evidence",
+                    "reason_code": str(error),
+                },
+                trace_id=trace_id,
+                authorizations=authorizations,
+            )
+            raise
+        return self._state_store._publish_authorized_governance_artifact(
+            artifact_kind="zero_fee_source_basis_evidence",
+            payload={
+                "source_basis_id": basis.source_basis_id,
+                "source_id": source_id,
+                "verification_status": "verified",
+                "license_id": policy.license_id,
+                "terms_url": basis.terms_url,
+                "terms_content_sha256": terms_sha256,
+                "terms_object_id": terms_object.object_id,
+                "attribution": policy.attribution,
+                "source_policy_version_id": policy.version_id,
+                "provider_id": basis.provider_id,
+                "plan_id": basis.plan_id,
+                "principal_classification": basis.principal_classification,
+                "credential_kind": basis.credential_kind,
+                "account_required": basis.account_required,
+                "fee_required": basis.fee_required,
+                "distributions": [
+                    {
+                        "dataset_id": member.dataset_id,
+                        "distribution_url": member.distribution_url,
+                    }
+                    for member in basis.members
+                ],
+            },
+            trace_id=trace_id,
+            authorizations=authorizations,
+        )
+
     def register_historical_availability_claim(
         self,
         claim: HistoricalAvailabilityClaim,
@@ -214,14 +320,24 @@ class TaiwanPriceQualificationWorkflow:
         evidence_id: str,
         manifest: TaiwanStockPoolManifest | None = None,
         authorization: Mapping[str, object] | None = None,
-    ) -> None:
-        try:
-            payload = self._state_store.get_verified_governance_artifact(
-                artifact_id=evidence_id,
-                artifact_kind="open_data_source_basis_evidence",
-            )
-        except KeyError as error:
-            raise ValueError("formal_gate_requires_verified_source_basis") from error
+    ) -> dict[str, Any]:
+        payload: dict[str, object] | None = None
+        artifact_kind: str | None = None
+        for candidate_kind in (
+            "open_data_source_basis_evidence",
+            "zero_fee_source_basis_evidence",
+        ):
+            try:
+                payload = self._state_store.get_verified_governance_artifact(
+                    artifact_id=evidence_id,
+                    artifact_kind=candidate_kind,
+                )
+                artifact_kind = candidate_kind
+                break
+            except KeyError:
+                continue
+        if payload is None or artifact_kind is None:
+            raise ValueError("formal_gate_requires_verified_source_basis")
         evidence = cast(dict[str, Any], payload)
         distributions = evidence.get("distributions")
         evidence_fields = (
@@ -233,11 +349,8 @@ class TaiwanPriceQualificationWorkflow:
             "source_policy_version_id",
         )
         if (
-            evidence.get("source_basis_id") != "TWSE-OGDL-OPEN-DATA-01"
-            or evidence.get("source_id") != source_id
+            evidence.get("source_id") != source_id
             or evidence.get("verification_status") != "verified"
-            or evidence.get("license_id") != "OGDL-1.0"
-            or evidence.get("terms_url") != "https://data.gov.tw/license"
             or len(str(evidence.get("terms_content_sha256", ""))) != 64
             or not isinstance(distributions, list)
             or not distributions
@@ -254,6 +367,37 @@ class TaiwanPriceQualificationWorkflow:
             )
         ):
             raise ValueError("formal_gate_requires_verified_source_basis")
+        if artifact_kind == "open_data_source_basis_evidence":
+            if (
+                (
+                    evidence.get("source_basis_id") != manifest.source_basis.source_basis_id
+                    if manifest is not None
+                    else evidence.get("source_basis_id") != "TWSE-OGDL-OPEN-DATA-01"
+                )
+                or evidence.get("license_id") != "OGDL-1.0"
+                or evidence.get("terms_url") != "https://data.gov.tw/license"
+            ):
+                raise ValueError("formal_gate_requires_verified_source_basis")
+        else:
+            zero_fee_fields = (
+                "provider_id",
+                "plan_id",
+                "principal_classification",
+                "credential_kind",
+            )
+            if (
+                manifest is None
+                or evidence.get("source_basis_id")
+                != manifest.authenticated_source_basis.source_basis_id
+                or any(
+                    evidence.get(field) != getattr(manifest.authenticated_source_basis, field)
+                    for field in zero_fee_fields
+                )
+                or evidence.get("account_required") is not True
+                or evidence.get("fee_required") is not False
+                or evidence.get("terms_url") != manifest.authenticated_source_basis.terms_url
+            ):
+                raise ValueError("formal_gate_requires_verified_source_basis")
         try:
             if self._object_repository is None:
                 raise ValueError
@@ -265,12 +409,17 @@ class TaiwanPriceQualificationWorkflow:
         except (KeyError, OSError, ObjectIntegrityError, ValueError):
             raise ValueError("formal_gate_requires_verified_source_basis") from None
         if manifest is not None:
+            basis_members = (
+                manifest.source_basis.datasets
+                if artifact_kind == "open_data_source_basis_evidence"
+                else manifest.authenticated_source_basis.members
+            )
             expected_distributions = [
                 {
-                    "dataset_id": dataset.dataset_id,
-                    "distribution_url": dataset.distribution_url,
+                    "dataset_id": item.dataset_id,
+                    "distribution_url": item.distribution_url,
                 }
-                for dataset in manifest.source_basis.datasets
+                for item in basis_members
             ]
             if distributions != expected_distributions:
                 raise ValueError("formal_gate_requires_verified_source_basis")
@@ -287,7 +436,12 @@ class TaiwanPriceQualificationWorkflow:
             )
             if (
                 len(policies) != 1
-                or policies[0].access_basis != "open_data_terms"
+                or policies[0].access_basis
+                != (
+                    "open_data_terms"
+                    if artifact_kind == "open_data_source_basis_evidence"
+                    else "zero_fee_plan"
+                )
                 or evidence["source_policy_version_id"] != policy_version_id
                 or evidence["license_id"] != policies[0].license_id
                 or evidence["terms_url"] != policies[0].terms_url
@@ -295,9 +449,23 @@ class TaiwanPriceQualificationWorkflow:
                 or evidence["attribution"] != policies[0].attribution
                 or {(item["dataset_id"], item["distribution_url"]) for item in distributions}
                 != {(item.dataset_id, item.distribution_url) for item in policies[0].distributions}
-                or authorization.get("source_entitlement_version_id") is not None
             ):
                 raise ValueError("formal_gate_requires_verified_source_basis")
+            if artifact_kind == "open_data_source_basis_evidence":
+                if authorization.get("source_entitlement_version_id") is not None:
+                    raise ValueError("formal_gate_requires_verified_source_basis")
+            elif (
+                authorization.get("source_entitlement_version_id") is None
+                or evidence["source_basis_id"] != policies[0].source_basis_id
+                or evidence["provider_id"] != policies[0].provider_id
+                or evidence["plan_id"] != policies[0].plan_id
+                or evidence["principal_classification"] != policies[0].principal_classification
+                or evidence["credential_kind"] != policies[0].credential_kind
+                or evidence["account_required"] != policies[0].account_required
+                or evidence["fee_required"] != policies[0].fee_required
+            ):
+                raise ValueError("formal_gate_requires_verified_source_basis")
+        return evidence
 
     def formal_qualification_available(
         self,
@@ -335,7 +503,7 @@ class TaiwanPriceQualificationWorkflow:
             source_basis_evidence_id = gate_payload.get("source_basis_evidence_id")
             if not isinstance(source_basis_evidence_id, str):
                 return False
-            self._validate_source_basis_evidence(
+            source_basis_evidence = self._validate_source_basis_evidence(
                 source_id=manifest.historical_source_id,
                 evidence_id=source_basis_evidence_id,
                 manifest=manifest,
@@ -343,7 +511,7 @@ class TaiwanPriceQualificationWorkflow:
         except (KeyError, ValueError):
             return False
         return gate_payload == {
-            "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",
+            "source_basis_id": source_basis_evidence["source_basis_id"],
             "manifest_id": manifest.manifest_id,
             "current_source_id": manifest.current_source_id,
             "historical_source_id": manifest.historical_source_id,
@@ -413,7 +581,7 @@ class TaiwanPriceQualificationWorkflow:
                 for authorization in authorizations
                 if authorization["dataset_id"] == manifest.historical_source_id
             )
-            self._validate_source_basis_evidence(
+            source_basis_evidence = self._validate_source_basis_evidence(
                 source_id=manifest.historical_source_id,
                 evidence_id=source_basis_evidence_id,
                 manifest=manifest,
@@ -432,7 +600,7 @@ class TaiwanPriceQualificationWorkflow:
         return self._state_store._publish_authorized_governance_artifact(
             artifact_kind="taiwan_price_qualification_gate",
             payload={
-                "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",
+                "source_basis_id": source_basis_evidence["source_basis_id"],
                 "manifest_id": manifest.manifest_id,
                 "current_source_id": manifest.current_source_id,
                 "historical_source_id": manifest.historical_source_id,

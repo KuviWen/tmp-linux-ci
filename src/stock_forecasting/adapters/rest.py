@@ -589,6 +589,19 @@ def create_web_app(application: Application) -> FastAPI:
         for provider in outcome:
             provider_id = escape(str(provider["provider_id"]), quote=True)
             base_endpoint = f"/api/v1/operations/source-credentials/{provider_id}"
+            required_fields = provider.get("required_fields")
+            if not isinstance(required_fields, list) or any(
+                not isinstance(field_name, str) for field_name in required_fields
+            ):
+                raise ValueError("source_credential_provider_contract_invalid")
+            credential_inputs = "".join(
+                '<label><span class="credential-field">'
+                f"{escape(field_name.replace('_', ' ').title())}</span> "
+                '<input type="password" '
+                f'name="{escape(field_name, quote=True)}" '
+                'autocomplete="new-password" required></label>'
+                for field_name in required_fields
+            )
             provider_sections.append(
                 '<section class="panel" data-provider-id="'
                 f'{provider_id}"><h2>{escape(str(provider["display_name"]))}</h2>'
@@ -604,10 +617,7 @@ def create_web_app(application: Application) -> FastAPI:
                 f'{escape(str(provider["key_management_url"]), quote=True)}">'
                 "管理／重新發行 key</a></p>"
                 f'<form data-endpoint="{base_endpoint}">'
-                '<label>API key ID <input type="password" name="api_key_id" '
-                'autocomplete="new-password" required></label>'
-                '<label>API secret key <input type="password" name="api_secret_key" '
-                'autocomplete="new-password" required></label>'
+                f"{credential_inputs}"
                 '<label>到期時間（選填） <input type="datetime-local" name="expires_at"></label>'
                 '<p><button type="button" data-operation="set">儲存</button> '
                 '<button type="button" data-operation="rotate">輪替</button> '

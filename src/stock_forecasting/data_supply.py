@@ -25,6 +25,10 @@ from stock_forecasting.platform.object_repository import (
     ObjectIntegrityError,
 )
 from stock_forecasting.platform.state_store import StateStore
+from stock_forecasting.zero_fee_source import (
+    ZeroFeeAuthenticatedSourceBasis,
+    source_bundle_member_from_payload,
+)
 
 StockPoolCoverageCase = Literal[
     "ordinary_share",
@@ -1644,6 +1648,7 @@ class TaiwanStockPoolManifest:
     evidence: tuple[ListingSelectionEvidence, ...]
     listing_relationships: tuple[ListingSelectionRelationship, ...]
     source_basis: OpenDataSourceBasis
+    authenticated_source_basis: ZeroFeeAuthenticatedSourceBasis
     current_source_id: str
     historical_source_id: str
     formal_qualification_artifact_id: str | None
@@ -1843,6 +1848,9 @@ def load_taiwan_stock_pool_manifest(
     relationship_payloads = cast(list[dict[str, object]], payload["listing_relationships"])
     calendar_payload = cast(dict[str, object], payload["market_calendar_evidence"])
     source_basis_payload = cast(dict[str, object], payload["taiwan_source_basis"])
+    authenticated_source_basis_payload = cast(
+        dict[str, object], payload["taiwan_authenticated_source_basis"]
+    )
     market_calendar_cases = cast(
         list[Literal["half_day_session"]], payload["market_calendar_cases"]
     )
@@ -1988,6 +1996,41 @@ def load_taiwan_stock_pool_manifest(
                     ),
                 )
                 for dataset in cast(list[dict[str, object]], source_basis_payload["datasets"])
+            ),
+        ),
+        authenticated_source_basis=ZeroFeeAuthenticatedSourceBasis(
+            source_basis_id=str(authenticated_source_basis_payload["source_basis_id"]),
+            basis_type="zero_fee_plan",
+            provider_id=str(authenticated_source_basis_payload["provider_id"]),
+            plan_id=str(authenticated_source_basis_payload["plan_id"]),
+            principal_classification=str(
+                authenticated_source_basis_payload["principal_classification"]
+            ),
+            credential_kind=cast(
+                Literal["api_key_pair", "bearer_token"],
+                authenticated_source_basis_payload["credential_kind"],
+            ),
+            account_required=True,
+            fee_required=False,
+            terms_url=str(authenticated_source_basis_payload["terms_url"]),
+            terms_content_sha256=cast(
+                str | None,
+                authenticated_source_basis_payload["terms_content_sha256"],
+            ),
+            qualification_status="candidate_terms_not_archived",
+            members=tuple(
+                source_bundle_member_from_payload(member)
+                for member in cast(
+                    list[dict[str, object]],
+                    authenticated_source_basis_payload["members"],
+                )
+            ),
+            supplemental_references=tuple(
+                source_bundle_member_from_payload(member)
+                for member in cast(
+                    list[dict[str, object]],
+                    authenticated_source_basis_payload["supplemental_references"],
+                )
             ),
         ),
         current_source_id=source_ids["current"],

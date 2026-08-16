@@ -18,6 +18,7 @@ from stock_forecasting.data_supply import (
     PRICE_RESEARCH_REQUIRED_USES,
     load_taiwan_stock_pool_manifest,
 )
+from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_DISTRIBUTIONS
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
@@ -91,7 +92,16 @@ class PriceEligibilityQuery:
         else:
             manifest = load_taiwan_stock_pool_manifest(self._object_repository)
             market = "XTAI"
-            source_basis = manifest.source_basis.as_payload()
+            finmind_source_ids = {
+                distribution.policy_dataset_id for distribution in FINMIND_PROVIDER_DISTRIBUTIONS
+            }
+            finmind_selected = any(
+                str(source["source_id"]) in finmind_source_ids for source in sources
+            )
+            selected_basis = (
+                manifest.authenticated_source_basis if finmind_selected else manifest.source_basis
+            )
+            source_basis = selected_basis.as_payload()
             try:
                 formal_evidence_available = TaiwanPriceQualificationWorkflow(
                     self._state_store,
@@ -102,7 +112,18 @@ class PriceEligibilityQuery:
                 )
             except ValueError:
                 formal_evidence_available = False
-            credential_reason = None
+            if finmind_selected:
+                credential = project_source_credential_readiness(
+                    self._state_store.get_source_credential(
+                        provider_id=manifest.authenticated_source_basis.provider_id
+                    ),
+                    evaluated_at=evaluated_at,
+                )
+                credential_reason = (
+                    None if credential["readiness"] == "valid" else str(credential["reason_code"])
+                )
+            else:
+                credential_reason = None
         current_source_rights_denied = any(
             isinstance((current := source.get("current_policy_decision")), dict)
             and current.get("outcome") == "denied"

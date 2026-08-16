@@ -314,7 +314,11 @@ def test_alpaca_credential_readiness_is_visible_without_a_secret(tmp_path: Path)
     )
 
     assert response.status_code == 200
-    provider = response.json()["items"][0]
+    provider = next(
+        item
+        for item in response.json()["items"]
+        if item["provider_id"] == "alpaca-market-data-basic"
+    )
     assert {
         key: provider[key]
         for key in (
@@ -373,6 +377,76 @@ def test_alpaca_credential_readiness_is_visible_without_a_secret(tmp_path: Path)
     assert all(member["rights_status"] == "unverified" for member in source_basis["members"])
 
 
+def test_finmind_token_readiness_uses_the_same_operations_contract(tmp_path: Path) -> None:
+    _, client, headers = _credential_application(tmp_path)
+
+    response = client.get(
+        "/api/v1/operations/source-credentials",
+        headers={**headers, "X-Trace-Id": "trace-p2-finmind-credential-missing"},
+    )
+
+    assert response.status_code == 200
+    provider = next(
+        item for item in response.json()["items"] if item["provider_id"] == "finmind-free-api"
+    )
+    assert {
+        key: provider[key]
+        for key in (
+            "display_name",
+            "credential_kind",
+            "required_fields",
+            "readiness",
+            "reason_code",
+            "registration_url",
+            "key_management_url",
+        )
+    } == {
+        "display_name": "FinMind Free API",
+        "credential_kind": "bearer_token",
+        "required_fields": ["token"],
+        "readiness": "missing",
+        "reason_code": "source_credential_missing",
+        "registration_url": "https://finmindtrade.com/analysis/#/register",
+        "key_management_url": "https://finmindtrade.com/analysis/#/user",
+    }
+    assert provider["source_basis"]["source_basis_id"] == ("FINMIND-FREE-TAIWAN-MARKET-DATA-01")
+    assert provider["source_basis"]["credential_kind"] == "bearer_token"
+    assert provider["source_basis"]["terms_content_sha256"] is None
+
+
+def test_finmind_token_is_write_only_and_uses_the_common_credential_page(tmp_path: Path) -> None:
+    _, client, headers = _credential_application(tmp_path)
+    token = "finmind-ticket-06-write-only-token"
+
+    configured = client.put(
+        "/api/v1/operations/source-credentials/finmind-free-api",
+        headers={**headers, "X-Trace-Id": "trace-p2-finmind-credential-set"},
+        json={"credential_fields": {"token": token}},
+    )
+    listed = client.get(
+        "/api/v1/operations/source-credentials",
+        headers={**headers, "X-Trace-Id": "trace-p2-finmind-credential-list-after-set"},
+    )
+    page = client.get(
+        "/operations/source-credentials",
+        headers={**headers, "X-Trace-Id": "trace-p2-finmind-credential-page"},
+    )
+
+    assert configured.status_code == 200
+    assert configured.json()["readiness"] == "configured"
+    assert configured.json()["reason_code"] == "source_credential_not_validated"
+    finmind = next(
+        item for item in listed.json()["items"] if item["provider_id"] == "finmind-free-api"
+    )
+    assert finmind["required_fields"] == ["token"]
+    assert finmind["readiness"] == "configured"
+    assert token not in configured.text + listed.text + page.text
+    assert 'data-provider-id="finmind-free-api"' in page.text
+    assert 'name="token"' in page.text
+    assert page.text.count('name="api_key_id"') == 1
+    assert page.text.count('name="api_secret_key"') == 1
+
+
 def test_operations_page_exposes_write_only_credential_controls_and_provider_links(
     tmp_path: Path,
 ) -> None:
@@ -391,7 +465,7 @@ def test_operations_page_exposes_write_only_credential_controls_and_provider_lin
     assert 'href="https://app.alpaca.markets/paper/dashboard/overview"' in response.text
     assert 'name="api_key_id"' in response.text
     assert 'name="api_secret_key"' in response.text
-    assert response.text.count('type="password"') == 2
+    assert response.text.count('type="password"') == 3
     assert 'data-operation="set"' in response.text
     assert 'data-operation="rotate"' in response.text
     assert 'data-operation="validate"' in response.text

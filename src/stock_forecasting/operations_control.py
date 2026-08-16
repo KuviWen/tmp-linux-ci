@@ -5,10 +5,6 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
-from stock_forecasting.alpaca_provider_contract import (
-    ALPACA_PROVIDER_DISTRIBUTIONS,
-    ALPACA_PROVIDER_ID,
-)
 from stock_forecasting.authorization import (
     AuthorizationAction,
     AuthorizationDecision,
@@ -34,20 +30,9 @@ from stock_forecasting.source_credentials import (
     pin_source_credential_lease,
     project_source_credential_readiness,
 )
-from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
-
-_ALPACA_SOURCE_BASIS = load_us_stock_pool_manifest().source_basis.as_payload()
-_SOURCE_CREDENTIAL_PROVIDERS: tuple[dict[str, object], ...] = (
-    {
-        "provider_id": ALPACA_PROVIDER_ID,
-        "display_name": "Alpaca Market Data Basic",
-        "credential_kind": "api_key_pair",
-        "source_basis": _ALPACA_SOURCE_BASIS,
-        "required_uses": sorted(PRICE_RESEARCH_REQUIRED_USES),
-        "required_fields": ["api_key_id", "api_secret_key"],
-        "registration_url": "https://app.alpaca.markets/signup",
-        "key_management_url": "https://app.alpaca.markets/paper/dashboard/overview",
-    },
+from stock_forecasting.source_provider_registry import (
+    source_credential_provider_contract,
+    source_credential_provider_contracts,
 )
 
 
@@ -92,8 +77,9 @@ class OperationsControl:
         if not decision.allowed:
             return PolicyDeniedOutcome.from_decision(decision)
         results: list[dict[str, object]] = []
-        for provider in _SOURCE_CREDENTIAL_PROVIDERS:
-            provider_id = str(provider["provider_id"])
+        for contract in source_credential_provider_contracts():
+            provider = contract.as_payload()
+            provider_id = contract.provider_id
             readiness = self._state_store.get_source_credential(provider_id=provider_id)
             result = {
                 **provider,
@@ -468,7 +454,8 @@ class OperationsControl:
         policy_loader = self._source_adapter_authorization_policy
         if context is None or policy_loader is None:
             raise ValueError("source_adapter_identity_unavailable")
-        if provider_id != ALPACA_PROVIDER_ID:
+        provider = source_credential_provider_contract(provider_id)
+        if provider is None:
             raise ValueError("source_credential_provider_unknown")
         try:
             policy = policy_loader()
@@ -478,7 +465,7 @@ class OperationsControl:
                 source_policies=(),
                 source_entitlements=(),
             )
-        for distribution in ALPACA_PROVIDER_DISTRIBUTIONS:
+        for distribution in provider.distributions:
             decision = policy.evaluate(
                 context,
                 OperationIntent(
@@ -528,10 +515,8 @@ class OperationsControl:
 
     @staticmethod
     def _provider(provider_id: str) -> dict[str, object]:
-        provider = next(
-            (item for item in _SOURCE_CREDENTIAL_PROVIDERS if item["provider_id"] == provider_id),
-            None,
-        )
+        contract = source_credential_provider_contract(provider_id)
+        provider = contract.as_payload() if contract is not None else None
         if provider is None:
             raise KeyError(provider_id)
         return provider

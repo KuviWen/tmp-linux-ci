@@ -17,11 +17,11 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from stock_forecasting.alpaca_provider_contract import (
-    ALPACA_VALIDATION_DATASET_IDS,
-    alpaca_validation_contract,
-)
 from stock_forecasting.authorization import SourceAccessMode
+from stock_forecasting.market_data_provider_contract import (
+    provider_validation_contract,
+    provider_validation_dataset_ids,
+)
 from stock_forecasting.platform.state_store import StateStore
 
 _CREDENTIAL_VALIDATION_REASON_CODES = frozenset(
@@ -309,7 +309,7 @@ class SourceContractAssessment:
         if self.live_validation not in {"not_run", "passed", "failed"}:
             raise ValueError("source_contract_assessment_invalid")
         validation_contract = (
-            alpaca_validation_contract(self.contract_id) if self.contract_id is not None else None
+            provider_validation_contract(self.contract_id) if self.contract_id is not None else None
         )
         if self.contract_id is not None and validation_contract is None:
             raise ValueError("source_contract_assessment_invalid")
@@ -317,7 +317,7 @@ class SourceContractAssessment:
             raise ValueError("source_contract_assessment_invalid")
         if self.pagination_pages is not None and self.pagination_pages < 0:
             raise ValueError("source_contract_assessment_invalid")
-        if any(dataset not in ALPACA_VALIDATION_DATASET_IDS for dataset in self.datasets):
+        if any(dataset not in provider_validation_dataset_ids() for dataset in self.datasets):
             raise ValueError("source_contract_assessment_invalid")
         if self.symbol_lifecycle_probe not in {None, "passed"}:
             raise ValueError("source_contract_assessment_invalid")

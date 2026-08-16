@@ -1,68 +1,29 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from stock_forecasting.market_data_provider_contract import (
+    ProviderDistributionContract,
+    ProviderUniverseIdentity,
+    ProviderValidationContract,
+)
 
 ALPACA_PROVIDER_ID = "alpaca-market-data-basic"
 ALPACA_CREDENTIAL_PROBE_CONTRACT_ID = "alpaca-credential-probe-v1"
 ALPACA_LIVE_VALIDATION_CONTRACT_ID = "alpaca-ticket-07-live-v1"
 
 
-@dataclass(frozen=True)
-class AlpacaDistributionContract:
-    policy_dataset_id: str
-    distribution_id: str
-    distribution_url: str
+AlpacaDistributionContract = ProviderDistributionContract
+AlpacaValidationContract = ProviderValidationContract
 
 
-@dataclass(frozen=True)
-class AlpacaValidationContract:
-    contract_id: str
-    required_ticker_count: int
-    required_dataset_ids: frozenset[str]
-    minimum_pagination_pages: int | None = None
-    requires_symbol_lifecycle_probe: bool = False
-    requires_versioned_universe: bool = False
+def _alpaca_universe_identity() -> ProviderUniverseIdentity:
+    from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
-    def accepts_passed_evidence(
-        self,
-        *,
-        ticker_count: int | None,
-        pagination_pages: int | None,
-        dataset_ids: tuple[str, ...],
-        symbol_lifecycle_probe: str | None,
-        universe_manifest_id: str | None,
-        reference_graph_version_id: str | None,
-        listing_ids: tuple[str, ...],
-    ) -> bool:
-        if self.requires_versioned_universe:
-            from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
-
-            manifest = load_us_stock_pool_manifest()
-            universe_identity_matches = (
-                universe_manifest_id == manifest.manifest_id
-                and reference_graph_version_id == manifest.selection_evidence_version
-                and listing_ids == tuple(listing.listing_id for listing in manifest.listings)
-            )
-        else:
-            universe_identity_matches = (
-                universe_manifest_id is None
-                and reference_graph_version_id is None
-                and not listing_ids
-            )
-        return (
-            ticker_count == self.required_ticker_count
-            and len(dataset_ids) == len(self.required_dataset_ids)
-            and frozenset(dataset_ids) == self.required_dataset_ids
-            and (
-                self.minimum_pagination_pages is None
-                or (
-                    pagination_pages is not None
-                    and pagination_pages >= self.minimum_pagination_pages
-                )
-            )
-            and (not self.requires_symbol_lifecycle_probe or symbol_lifecycle_probe == "passed")
-            and universe_identity_matches
-        )
+    manifest = load_us_stock_pool_manifest()
+    return ProviderUniverseIdentity(
+        manifest_id=manifest.manifest_id,
+        reference_graph_version_id=manifest.selection_evidence_version,
+        listing_ids=tuple(listing.listing_id for listing in manifest.listings),
+    )
 
 
 ALPACA_BARS_DISTRIBUTION = AlpacaDistributionContract(
@@ -108,7 +69,7 @@ ALPACA_VALIDATION_CONTRACTS = (
         required_dataset_ids=ALPACA_VALIDATION_DATASET_IDS,
         minimum_pagination_pages=2,
         requires_symbol_lifecycle_probe=True,
-        requires_versioned_universe=True,
+        universe_identity_loader=_alpaca_universe_identity,
     ),
 )
 ALPACA_VALIDATION_CONTRACT_IDS = frozenset(

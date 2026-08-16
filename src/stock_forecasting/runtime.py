@@ -17,7 +17,12 @@ from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
     RuntimeEnvironment,
 )
+from stock_forecasting.finmind_market_data import FinMindLiveContractValidator
+from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_ID
 from stock_forecasting.outbox import RelayFault
+from stock_forecasting.provider_http import (
+    UrllibProviderHttpTransport as ProviderUrllibHttpTransport,
+)
 from stock_forecasting.source_credentials import EncryptedFilesystemSecretProvider
 
 
@@ -138,6 +143,9 @@ class RuntimeSettings:
             source_adapter_security_context=source_adapter_security_context,
             secret_provider=EncryptedFilesystemSecretProvider(self.source_secret_root),
             source_credential_validators={
-                ALPACA_PROVIDER_ID: AlpacaLiveContractValidator(UrllibProviderHttpTransport())
+                ALPACA_PROVIDER_ID: AlpacaLiveContractValidator(UrllibProviderHttpTransport()),
+                FINMIND_PROVIDER_ID: FinMindLiveContractValidator(
+                    ProviderUrllibHttpTransport(allowed_hosts=frozenset({"api.finmindtrade.com"}))
+                ),
             },
         )

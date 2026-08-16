@@ -2,19 +2,25 @@
 
 日期：2026-08-16
 
+## 產品決策（取代本研究的隔離路徑建議）
+
+2026-08-16 決定把 FinMind 免費 API 納入台灣行情的**正式資格候選**，沿用 Ticket 07 的 credential-managed provider seam。這表示 FinMind 可以接受正式 source-use、歷史、schema、calendar、action、lifecycle 與 live-contract 審查；不表示目前已正式合格。下列研究所記錄的權利與完整性缺口仍然有效，缺一即在單一正式路徑 fail closed。
+
+Yahoo／`yfinance` 維持排除。產品不採用研究階段曾提出的 `experimental_reference_only` 或 `experimental_forecast` 兩條隔離路徑，也不建立自動 fallback；所有候選只有「通過完整正式 gates」或「在同一正式路徑明示 blocked」兩種結果。本文後段保留隔離路徑分析只作 rejected-alternative 紀錄，不是規格或後續實作要求。
+
 ## 結論
 
 本次評估沒有找到一個零成本、可自行註冊、且能單獨滿足台灣與美國正式價格資格契約的非官方來源。正式資料管線應繼續 fail closed；不能把「僅供參考」當成授權豁免，也不能因正式來源缺席而靜默切換到未合格資料。
 
 最值得繼續驗證的候選如下：
 
-- 台灣：FinMind 是技術覆蓋最強的非官方候選，日價歷史足夠長，也提供下市等資料集；但尚缺逐資料集的上游權利、修訂、更正、名稱／代碼生命週期及內部團體使用證據，因此目前只能列為 `experimental_reference_only` 候選，不能宣告正式合格。
+- 台灣：FinMind 是技術覆蓋最強的非官方候選，日價歷史足夠長，也提供下市等資料集；產品已把它列為正式資格候選，但尚缺逐資料集的上游權利、修訂、更正、名稱／代碼生命週期及內部團體使用證據，因此仍不能宣告正式合格。
 - 美國：Twelve Data Business Basic 是本次新發現中最接近零成本內部團體使用的 EOD 候選；其條款明載 Internal Use、儲存及不可逆 Derived Data 的部分權利，但免費層不含完整 corporate actions 與交易所日曆，且仍須保存當時方案、註冊流程、備份和模型用途的具體證據。
 - 美國：Alpaca Basic 的技術覆蓋最接近既有工程契約，具有 2016 年起歷史、raw adjustment、公司行動和 symbol mapping 能力；然而免費帳戶以 individual／nonprofessional 為主，其對長期備份、內部團體展示、模型訓練及模型產物存續的權利仍不夠明確。
 - 美國：Tiingo 的歷史和公司行動很完整，但免費 Starter 禁止將原始資料寫入任何持久化儲存，且代表組織使用 API 必須採 Commercial plan。不可逆、非替代性的 Derived Products 雖可能免另行書面核准，但無法補足正式管線必需的 raw retention、backup 與重現性，因此不符合本專案「內部團體、零成本、無人工申請」邊界。
 - Yahoo Finance／`yfinance`：不應納入自動化備用項。`yfinance` 的 Apache 程式碼授權不授予 Yahoo 資料權利，而 Yahoo 條款禁止未經事先明示許可的自動擷取。即使加上「僅供參考」標籤，也不能消除這個限制。
 
-可以在需求中新增隔離的 `experimental_reference_only` 狀態，但它只適合合法的差異比對或人工調查，絕不能解鎖正式 ingestion、資料集資格、訓練、模型晉升或預測發布。
+原研究曾建議新增隔離的 `experimental_reference_only` 狀態；產品決策已明確否決，規格與實作不得採用。
 
 ## 評估邊界
 
@@ -38,7 +44,7 @@
 
 | 來源 | 地區／免費歷史 | 免費存取 | 權利與產品限制 | 本次判定 |
 | --- | --- | --- | --- | --- |
-| FinMind | 台灣日價自 1994-10-01；另有下市等資料集 | 匿名 300 次／小時；註冊 token 600 次／小時 | 教育／參考定位；禁止對外 raw redistribution；缺逐資料集上游與修訂契約 | 最強台灣參考候選；未正式合格 |
+| FinMind | 台灣日價自 1994-10-01；另有下市等資料集 | 匿名 300 次／小時；註冊 token 600 次／小時 | 教育／參考定位；禁止對外 raw redistribution；缺逐資料集上游與修訂契約 | 台灣正式資格候選；未正式合格 |
 | Fugle | 台灣歷史 K 線僅一年 | 免費 Basic、token、60 次／分 | 行情僅供參考；成交量／值排除盤後零股與鉅額；交換所規則及轉傳限制 | 只適合近期交叉檢查 |
 | Alpaca Basic | 美國自 2016 年起 | $0、200 次／分 | 個人／開發者與 nonprofessional 邊界；團體、備份、模型權利不足 | 強工程候選；資格 fail closed |
 | Twelve Data Business Basic | 美國 EOD 通常自首次交易；單次最多 5,000 點，可用日期分頁 | $0、8 credits／分、800／日 | Internal Use 與部分 Derived Data 條款較明確；免費層缺完整 actions／calendar；台灣 XTAI 是付費層 | 最值得驗證的美國內部 EOD 候選 |
@@ -58,13 +64,13 @@
 
 FinMind 文件將資料定位為由公共或公開來源彙整；其 disclaimer 對政府資料提到政府資料開放授權條款（OGDL），但不能因此推定每一個 hosted dataset 都有相同權利。正式資格必須把 `TaiwanStockPrice`、公司行動、證券清單、下市及日曆各自對應到明確上游、散布權和修訂語義。[FinMind overview](https://finmind.github.io/en/)；[Disclaimer and data licensing](https://finmind.github.io/Disclaimer/)
 
-`TaiwanStockPrice` 文件列出 1994-10-01 至今的上市、上櫃與興櫃日價欄位，可滿足七年歷史的技術前提；quickstart 說明匿名每小時 300 次、以 email 註冊 token 後每小時 600 次。[TaiwanStockPrice](https://finmind.github.io/tutor/TaiwanMarket/Technical/)；[Quickstart](https://finmind.github.io/en/quickstart/)
+`TaiwanStockPrice` 文件列出 1994-10-01 至今的上市、上櫃與興櫃日價欄位，可滿足七年歷史的技術前提；quickstart 說明匿名每小時 300 次、以 email 註冊 token 後每小時 600 次。官方 OpenAPI 將 data endpoint 定義為 bearer authentication，並以 HTTP 402 表示配額耗盡；實作因此使用 authorization header，且將 402／429 都投影成可重試 quota evidence。[TaiwanStockPrice](https://finmind.github.io/tutor/TaiwanMarket/Technical/)；[Quickstart](https://finmind.github.io/en/quickstart/)；[official OpenAPI](https://github.com/FinMind/FinMind.github.io/blob/master/openapi.yaml)
 
 FinMind 也提供 `TaiwanStockDelisting` 等生命週期相關資料，但現有文件不足以證明名稱歷史、跨 listing-code transition、停牌、公司行動與價格修訂可形成完整 point-in-time 契約。[Taiwan fundamental datasets](https://finmind.github.io/tutor/TaiwanMarket/Fundamental/)
 
 服務條款／隱私頁面的使用定位是教育與參考，並限制 raw data 的公開再散布、鏡像與未授權展示。FinMind repository 的 Apache-2.0 只授權程式碼；它不能替代 hosted data 與各上游資料的使用權。[Privacy policy and terms](https://finmind.github.io/en/PrivacyPolicy/)；[FinMind source repository](https://github.com/FinMind/FinMind)
 
-因此，FinMind 可列為隔離參考層的首選，但只有在保存註冊當時條款並確認本專案的內部團體、留存、備份、模型與展示用途後才能啟用。它目前不能：
+因此，FinMind 可列入正式資格候選，但只有在保存註冊當時條款並確認本專案的內部團體、留存、備份、模型與展示用途後才能正式啟用。它目前不能：
 
 - 補齊正式 canonical partition；
 - 單獨證明七年正式 coverage；
@@ -139,9 +145,9 @@ Yahoo Terms of Service 禁止未經事先明示許可，使用 robots、spiders�
 - 不下載、快取、留存、備份、訓練或展示自動擷取結果；
 - 若產品需要，可保留導向 Yahoo 公開頁面的人工外部連結，但該頁面不得回寫任何正式或參考資料狀態。
 
-## 安全的參考層
+## 已否決的隔離參考層方案（非需求）
 
-若要修改需求，建議新增 `experimental_reference_only`（或 `unqualified_reference`）這個明確狀態，而不是「當正式來源失敗就自動 fallback」。這個狀態本身不授權任何來源；啟用某個 provider 前，仍須有條款證據允許該次自動存取、保留、內部展示或人工調查用途。
+以下是研究階段為比較風險而寫下的原始方案。產品已決定不新增 `experimental_reference_only`（或 `unqualified_reference`），也不在正式來源失敗時自動 fallback；以下內容不得轉成 acceptance criteria 或實作。
 
 允許的行為應限制為：
 
@@ -164,7 +170,7 @@ Yahoo Terms of Service 禁止未經事先明示許可，使用 robots、spiders�
 
 最重要的分界是：若未來希望以某個非官方來源訓練或顯示預測，必須另建明確的實驗 source-use、資料品質與輸出契約；不能只把 `experimental_reference_only` 放寬成訓練來源。只有通過完整正式資格契約的來源，才可進入正式訓練或發布路徑。
 
-### 若備用項的目標是產生實驗預測
+### 已否決的 `experimental_forecast` 方案
 
 如果產品目標不只是差異比對，而是在沒有正式來源時仍提供明確降級的預測，需求應另設 `experimental_forecast`，不要把它混入 `experimental_reference_only`。這條路徑仍須有自己的 source-use gate：當時方案與條款必須明確允許自動存取、必要期間的 raw retention／backup、feature／label 轉換、模型訓練，以及不可逆 prediction／model artifact 的建立、保存與指定內部使用者展示。沒有上述證據時，即使資料可下載或標示「僅供參考」，也不得進入實驗模型。
 
@@ -172,7 +178,7 @@ Yahoo Terms of Service 禁止未經事先明示許可，使用 robots、spiders�
 
 依目前證據，FinMind 與 Twelve Data Business Basic 只值得繼續做這條路徑的權利驗證，尚未通過；Alpaca 的內部團體與模型用途仍不明；Yahoo／`yfinance` 因 automated collection 本身未獲允許，連實驗路徑也不應納入。若僅是單一個人、非團體的本機實驗，Tiingo Starter 的條款可能容許在不持久化 raw data 的前提下即時計算不可逆 forecast／model parameters，但這不符合本專案既有的不可變重現與內部團體邊界，必須視為另一個更窄的產品 profile，而非本專案的預設備援。
 
-## 建議需求文字（僅供後續修改，本研究不修改規格）
+## 已否決的需求文字（不得納入規格）
 
 > 系統 MAY 提供與正式資料管線隔離的 `experimental_reference_only` observation tier。只有當來源的當時方案與條款明確允許該實際操作的自動存取、留存、內部使用及展示時，才可啟用；「僅供參考」標籤不構成授權。
 >
@@ -187,6 +193,6 @@ Yahoo Terms of Service 禁止未經事先明示許可，使用 robots、spiders�
 1. 對 Twelve Data Business Basic 建立 dated plan／terms snapshot，實際走完不含付款方式的註冊，向條款文字逐項對應 raw retention、backup、internal-group display、model training、Derived Data 與終止後模型產物存續；若任何一項只能靠客服或書面核准，立即停用正式資格。
 2. 對 FinMind 每一個所需 dataset 建立 upstream lineage matrix，逐一記錄來源單位、原始授權、歷史起點、revision／correction 行為、名稱／代碼 transition、下市與停牌覆蓋；不可用平台層的 OGDL 概述代替逐資料集證據。
 3. 保留 Alpaca 作為現有美國 provider contract 的工程候選，但在帳戶主體、內部團體、備份和模型用途未取得自助且可保存的明確權利前，正式 eligibility 維持 false。
-4. 若啟用參考層，先用 FinMind 的台灣 price discrepancy 或 Twelve Data 的美國 EOD discrepancy 做最小 read-only observation；不得讓該層改善任何正式 coverage 或 prediction 狀態。
+4. 不建立獨立參考層；FinMind 只透過正式候選 provider contract 接受驗證，任何缺口都不得改善正式 coverage 或 prediction 狀態。
 
-最終建議：正式 qualified pipeline 不變；新增參考層只解決「可觀察、可比較、可調查」，不解決「可訓練、可發布」。目前 Yahoo／`yfinance` 應明確排除；FinMind 是台灣最強參考候選；Twelve Data Business Basic 是美國最值得繼續做權利驗證的內部 EOD 候選；Alpaca 則維持強工程候選但資格 fail closed。
+最終產品決定：正式 qualified pipeline 不變且不新增實驗隔離管線。Yahoo／`yfinance` 明確排除；FinMind 是台灣正式資格候選但資格維持 fail closed，直到逐資料集權利與完整歷史證據真正通過；Twelve Data Business Basic 仍只是美國研究候選，Alpaca 維持強工程候選但資格 fail closed。

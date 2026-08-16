@@ -14,6 +14,8 @@ from typing import Literal, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from stock_forecasting.alpaca_provider_contract import ALPACA_PROVIDER_DISTRIBUTIONS
+from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_DISTRIBUTIONS
+from stock_forecasting.market_data_provider_contract import ProviderDistributionContract
 
 RuntimeEnvironment = Literal["local", "development", "test", "staging", "production"]
 EntitlementStatus = Literal["draft", "under_review", "active", "suspended", "expired", "revoked"]
@@ -1457,7 +1459,11 @@ def build_taiwan_price_blocked_authorization_policy(
     context: SecurityContext,
 ) -> AuthorizationPolicy:
     actions: frozenset[AuthorizationAction] = frozenset(
-        {"market_data.collect", "price_research_eligibility.read"}
+        {
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "source_credential.read",
+        }
     )
     grant_payload: dict[str, object] = {
         "principal_id": context.principal_id,
@@ -1516,15 +1522,88 @@ def build_taiwan_price_blocked_authorization_policy(
         valid_from=context.issued_at,
         valid_to=context.expires_at,
     )
+    credential_policy_payload: dict[str, object] = {
+        "dataset_id": "source-credential-metadata",
+        "allowed_actions": ["source_credential.read"],
+        "purposes": ["source_administration"],
+        "environments": [context.environment],
+        "data_protection_class": "restricted",
+        "resource_states": ["active"],
+        "valid_from": _instant(context.issued_at),
+        "valid_to": _instant(context.expires_at),
+    }
+    credential_policy = SourcePolicyVersion(
+        version_id=_contract_version_id(
+            "ticket-06/credential-source-policy", credential_policy_payload
+        ),
+        dataset_id="source-credential-metadata",
+        allowed_actions=frozenset({"source_credential.read"}),
+        purposes=frozenset({"source_administration"}),
+        environments=frozenset({context.environment}),
+        data_protection_class="restricted",
+        resource_states=frozenset({"active"}),
+        valid_from=context.issued_at,
+        valid_to=context.expires_at,
+    )
+    credential_entitlement_payload: dict[str, object] = {
+        "principal_id": context.principal_id,
+        "dataset_id": "source-credential-metadata",
+        "status": "active",
+        "allowed_actions": ["source_credential.read"],
+        "purposes": ["source_administration"],
+        "environments": [context.environment],
+        "valid_from": _instant(context.issued_at),
+        "valid_to": _instant(context.expires_at),
+    }
+    credential_entitlement = SourceEntitlement(
+        version_id=_contract_version_id(
+            "ticket-06/credential-source-entitlement",
+            credential_entitlement_payload,
+        ),
+        principal_id=context.principal_id,
+        dataset_id="source-credential-metadata",
+        status="active",
+        allowed_actions=frozenset({"source_credential.read"}),
+        purposes=frozenset({"source_administration"}),
+        environments=frozenset({context.environment}),
+        valid_from=context.issued_at,
+        valid_to=context.expires_at,
+    )
     return AuthorizationPolicy(
         action_grants=(grant,),
-        source_policies=(source_policy,),
-        source_entitlements=(entitlement,),
+        source_policies=(source_policy, credential_policy),
+        source_entitlements=(entitlement, credential_entitlement),
     )
 
 
 def build_us_zero_fee_engineering_authorization_policy(
     context: SecurityContext,
+) -> AuthorizationPolicy:
+    return _build_zero_fee_engineering_authorization_policy(
+        context,
+        distributions=ALPACA_PROVIDER_DISTRIBUTIONS,
+        namespace="ticket-07-engineering",
+        source_basis_id="ENGINEERING-ALPACA-CONTRACT-01",
+    )
+
+
+def build_taiwan_finmind_engineering_authorization_policy(
+    context: SecurityContext,
+) -> AuthorizationPolicy:
+    return _build_zero_fee_engineering_authorization_policy(
+        context,
+        distributions=FINMIND_PROVIDER_DISTRIBUTIONS,
+        namespace="ticket-06-finmind-engineering",
+        source_basis_id="ENGINEERING-FINMIND-CONTRACT-01",
+    )
+
+
+def _build_zero_fee_engineering_authorization_policy(
+    context: SecurityContext,
+    *,
+    distributions: tuple[ProviderDistributionContract, ...],
+    namespace: str,
+    source_basis_id: str,
 ) -> AuthorizationPolicy:
     supported_actions: frozenset[AuthorizationAction] = frozenset(
         {
@@ -1553,7 +1632,7 @@ def build_us_zero_fee_engineering_authorization_policy(
     price_research_purposes: frozenset[AuthorizationPurpose] = frozenset({"price_research"})
     engineering_collect_policies = tuple(
         SourcePolicyVersion(
-            version_id=(f"ticket-07-engineering/{distribution.policy_dataset_id}-policy-v1"),
+            version_id=f"{namespace}/{distribution.policy_dataset_id}-policy-v1",
             dataset_id=distribution.policy_dataset_id,
             allowed_actions=bars_actions,
             purposes=frozenset({"price_research"}),
@@ -1564,7 +1643,7 @@ def build_us_zero_fee_engineering_authorization_policy(
             valid_to=context.expires_at,
             allowed_uses=required_uses,
             access_basis="engineering_contract",
-            source_basis_id="ENGINEERING-ALPACA-CONTRACT-01",
+            source_basis_id=source_basis_id,
             distributions=(
                 SourceDistribution(
                     dataset_id=distribution.distribution_id,
@@ -1572,12 +1651,12 @@ def build_us_zero_fee_engineering_authorization_policy(
                 ),
             ),
         )
-        for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
+        for distribution in distributions
     )
     policies = (
         *engineering_collect_policies,
         SourcePolicyVersion(
-            version_id="ticket-07-engineering/price-read-policy-v1",
+            version_id=f"{namespace}/price-read-policy-v1",
             dataset_id="price-research-eligibility",
             allowed_actions=read_actions,
             purposes=frozenset({"price_research"}),
@@ -1588,7 +1667,7 @@ def build_us_zero_fee_engineering_authorization_policy(
             valid_to=context.expires_at,
         ),
         SourcePolicyVersion(
-            version_id="ticket-07-engineering/credential-metadata-policy-v1",
+            version_id=f"{namespace}/credential-metadata-policy-v1",
             dataset_id="source-credential-metadata",
             allowed_actions=credential_actions,
             purposes=frozenset({"source_administration"}),
@@ -1608,7 +1687,7 @@ def build_us_zero_fee_engineering_authorization_policy(
         ...,
     ] = tuple(
         (distribution.policy_dataset_id, bars_actions, price_research_purposes)
-        for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
+        for distribution in distributions
     )
     entitlement_contracts: tuple[
         tuple[
@@ -1628,7 +1707,7 @@ def build_us_zero_fee_engineering_authorization_policy(
     )
     entitlements = tuple(
         SourceEntitlement(
-            version_id=f"ticket-07-engineering/{dataset_id}-entitlement-v1",
+            version_id=f"{namespace}/{dataset_id}-entitlement-v1",
             principal_id=context.principal_id,
             dataset_id=dataset_id,
             status="active",
@@ -1637,7 +1716,11 @@ def build_us_zero_fee_engineering_authorization_policy(
             environments=frozenset({context.environment}),
             valid_from=context.issued_at,
             valid_to=context.expires_at,
-            allowed_uses=(required_uses if dataset_id.startswith("alpaca-us-") else frozenset()),
+            allowed_uses=(
+                required_uses
+                if dataset_id in {distribution.policy_dataset_id for distribution in distributions}
+                else frozenset()
+            ),
         )
         for dataset_id, allowed_actions, purposes in entitlement_contracts
         if allowed_actions & actions
@@ -1645,7 +1728,7 @@ def build_us_zero_fee_engineering_authorization_policy(
     return AuthorizationPolicy(
         action_grants=(
             ActionGrant(
-                version_id="ticket-07-engineering/action-grant-v1",
+                version_id=f"{namespace}/action-grant-v1",
                 principal_id=context.principal_id,
                 actions=actions,
                 environment=context.environment,

@@ -24,9 +24,15 @@ P2 與後續 phases 可以使用官方或非官方提供者的零付費方案。
 
 付費資料、付費試用、付款方式、借用／共享／測試憑證、爬蟲、人工下載、sales／人工 approval、採購及協商契約仍不在必要交付邊界。條款撤回、部署主體不符合方案分類或用途證據不足時一律 fail closed；不得以 fixture、mock credential 或技術成功宣稱正式來源資格。
 
+FinMind 免費 token API 是台灣行情的正式資格候選，使用 Ticket 07 Alpaca 已建立的 provider catalog、Operations REST／UI、local `SecretProvider`、credential metadata、rotation、revocation、validation 與 audit seam。候選 bundle 固定為 `TaiwanStockPrice`、`TaiwanStockTradingDate`、`TaiwanStockDividendResult`、`TaiwanStockDelisting` 及 `TaiwanStockSplitPrice`；`TaiwanStockInfo` 只能補充目前掛牌 reference。註冊、token 有效或 live contract 成功只證明存取／技術介面，不能代替逐資料集的來源使用權、不可變歷史、修訂、更正、日曆、公司行動或 listing lifecycle 證據，因此未滿足時仍維持未合格。
+
+本產品不以 Yahoo Finance／`yfinance` 作自動備援，也不採用 `experimental_reference_only` 或 `experimental_forecast` 兩套隔離路徑。所有 provider 都進入同一正式資格流程：通過既有完整 gates 才能供應正式訓練與發布，否則在同一份營運與研究投影中明示 `credential_required`、`unavailable` 或 `policy_blocked`。這項選擇避免建立第二套資料真相，並不放寬任何來源權利或品質 gate。
+
 ## Consequences
 
 Ticket 07 可以交付完整的認證來源 adapter 與憑證管理垂直切片，即使部署者尚未輸入真實 key；此時外部可觀察結果必須是 `credential_required`，而不是假的 live 成功。提供真實且用途合格的零付費帳號後，同一公共 seam 可執行 opt-in live contract 驗證並建立正式來源證據。
+
+Ticket 06 的 FinMind 候選沿用同一垂直切片，不新增 provider-specific secret storage 或替代治理路徑。這降低憑證管理與 audit 的重複面積；代價是 FinMind 文件或 dataset evidence 未來若仍不足，台灣路徑會誠實保持 blocked，而不以另一條實驗管線產生預測。
 
 來源資格模型比 ADR 0017 更寬，也增加方案條款、帳號分類、credential rotation 與 provider URL 變更的治理負擔。它換取的是不把可自助解決的 authentication 當成產品 blocker，同時維持零採購、秘密不外洩與來源權利 fail-closed。
 

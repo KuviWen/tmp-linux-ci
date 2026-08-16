@@ -246,7 +246,7 @@ components:
       required: true
       schema:
         type: string
-        enum: [alpaca-market-data-basic]
+        enum: [alpaca-market-data-basic, finmind-free-api]
   responses:
     ProblemResponse:
       description: RFC 9457 problem details.
@@ -509,7 +509,7 @@ components:
         provider_id: {type: string, minLength: 1}
         plan_id: {type: string, minLength: 1}
         principal_classification: {type: string, minLength: 1}
-        credential_kind: {type: string, const: api_key_pair}
+        credential_kind: {type: string, enum: [api_key_pair, bearer_token]}
         account_required: {type: boolean, const: true}
         fee_required: {type: boolean, const: false}
         terms_url: {type: string, format: uri}
@@ -768,7 +768,7 @@ components:
       properties:
         provider_id: {type: string}
         display_name: {type: string}
-        credential_kind: {type: string, enum: [api_key_pair]}
+        credential_kind: {type: string, enum: [api_key_pair, bearer_token]}
         required_fields:
           type: array
           items: {type: string}

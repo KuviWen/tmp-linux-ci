@@ -444,6 +444,12 @@ services:
       - market_data.collect
       - --scope
       - price_research_eligibility.read
+      - --scope
+      - source_credential.read
+      - --data-protection-class
+      - internal
+      - --data-protection-class
+      - restricted
 
   ticket-06-authorization-init:
     <<: *application

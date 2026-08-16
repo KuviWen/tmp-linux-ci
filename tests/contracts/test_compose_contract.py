@@ -325,9 +325,13 @@ def test_compose_declares_ticket_06_policy_blocked_deployed_acceptance() -> None
 
     assert services["ticket-06-local-key-init"]["profiles"] == profile
     key_command = services["ticket-06-local-key-init"]["command"]
-    assert key_command.count("--scope") == 2
+    assert key_command.count("--scope") == 3
     assert "market_data.collect" in key_command
     assert "price_research_eligibility.read" in key_command
+    assert "source_credential.read" in key_command
+    assert key_command.count("--data-protection-class") == 2
+    assert "internal" in key_command
+    assert "restricted" in key_command
     assert services["ticket-06-authorization-init"]["profiles"] == profile
     assert "init-ticket-06" in services["ticket-06-authorization-init"]["command"]
     assert services["ticket-06-api"]["profiles"] == profile

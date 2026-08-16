@@ -17,6 +17,15 @@ from stock_forecasting.data_supply import (
     StockPoolListing,
     load_taiwan_stock_pool_manifest,
 )
+from stock_forecasting.finmind_provider_contract import (
+    FINMIND_CREDENTIAL_PROBE_CONTRACT_ID,
+    FINMIND_LIVE_VALIDATION_CONTRACT_ID,
+    FINMIND_PROVIDER_DISTRIBUTIONS,
+    FINMIND_PROVIDER_ID,
+    FINMIND_REQUIRED_BUNDLE_DISTRIBUTIONS,
+    FINMIND_VALIDATION_CONTRACT_IDS,
+    FINMIND_VALIDATION_DATASET_IDS,
+)
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 
 
@@ -136,6 +145,116 @@ def test_taiwan_segment_declares_versioned_ten_listing_qualification_contract() 
     assert manifest.formal_qualification_artifact_id is None
     assert manifest.historical_availability_claim_id is None
     assert manifest.formally_qualified is False
+
+
+def test_taiwan_manifest_declares_finmind_free_authenticated_candidate_bundle() -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+
+    source_basis = manifest.authenticated_source_basis
+    assert source_basis.source_basis_id == "FINMIND-FREE-TAIWAN-MARKET-DATA-01"
+    assert source_basis.provider_id == "finmind-free-api"
+    assert source_basis.plan_id == "free-token-2026-08-16"
+    assert source_basis.principal_classification == "individual_or_internal_group"
+    assert source_basis.credential_kind == "bearer_token"
+    assert source_basis.account_required is True
+    assert source_basis.fee_required is False
+    assert source_basis.terms_url == "https://finmind.github.io/en/PrivacyPolicy/"
+    assert source_basis.terms_content_sha256 is None
+    assert source_basis.qualification_status == "candidate_terms_not_archived"
+    members = {member.dataset_id: member for member in source_basis.members}
+    assert set(members) == {
+        "TaiwanStockDelisting",
+        "TaiwanStockDividendResult",
+        "TaiwanStockPrice",
+        "TaiwanStockSplitPrice",
+        "TaiwanStockTradingDate",
+    }
+    assert members["TaiwanStockPrice"].price_semantics == "unadjusted"
+    assert all(member.provider_id == "finmind-free-api" for member in members.values())
+    assert all(
+        member.distribution_url == "https://api.finmindtrade.com/api/v4/data"
+        for member in members.values()
+    )
+    assert all(member.allowed_uses == frozenset() for member in members.values())
+    assert all(member.rights_status == "unverified" for member in members.values())
+    assert {member.dataset_id for member in source_basis.supplemental_references} == {
+        "TaiwanStockInfo"
+    }
+    assert manifest.formally_qualified is False
+
+
+def test_authenticated_candidate_rejects_a_member_from_another_provider() -> None:
+    basis = load_taiwan_stock_pool_manifest().authenticated_source_basis
+
+    with pytest.raises(ValueError, match="zero_fee_authenticated_source_basis_invalid"):
+        replace(
+            basis,
+            members=(
+                replace(basis.members[0], provider_id="unexpected-provider"),
+                *basis.members[1:],
+            ),
+        )
+
+
+def test_finmind_provider_contract_catalog_matches_taiwan_candidate_manifest() -> None:
+    source_basis = load_taiwan_stock_pool_manifest().authenticated_source_basis
+
+    assert FINMIND_PROVIDER_ID == "finmind-free-api"
+    assert [
+        (
+            distribution.policy_dataset_id,
+            distribution.distribution_id,
+            distribution.distribution_url,
+        )
+        for distribution in FINMIND_PROVIDER_DISTRIBUTIONS
+    ] == [
+        (
+            "finmind-taiwan-stock-price",
+            "TaiwanStockPrice",
+            "https://api.finmindtrade.com/api/v4/data",
+        ),
+        (
+            "finmind-taiwan-trading-date",
+            "TaiwanStockTradingDate",
+            "https://api.finmindtrade.com/api/v4/data",
+        ),
+        (
+            "finmind-taiwan-dividend-result",
+            "TaiwanStockDividendResult",
+            "https://api.finmindtrade.com/api/v4/data",
+        ),
+        (
+            "finmind-taiwan-delisting",
+            "TaiwanStockDelisting",
+            "https://api.finmindtrade.com/api/v4/data",
+        ),
+        (
+            "finmind-taiwan-split-price",
+            "TaiwanStockSplitPrice",
+            "https://api.finmindtrade.com/api/v4/data",
+        ),
+    ]
+    assert source_basis.provider_id == FINMIND_PROVIDER_ID
+    assert [member.dataset_id for member in source_basis.members] == [
+        distribution.distribution_id for distribution in FINMIND_PROVIDER_DISTRIBUTIONS
+    ]
+    assert FINMIND_PROVIDER_DISTRIBUTIONS[1:] == FINMIND_REQUIRED_BUNDLE_DISTRIBUTIONS
+    assert (
+        frozenset(
+            {
+                "TaiwanStockDelisting",
+                "TaiwanStockDividendResult",
+                "TaiwanStockPrice",
+                "TaiwanStockSplitPrice",
+                "TaiwanStockTradingDate",
+            }
+        )
+        == FINMIND_VALIDATION_DATASET_IDS
+    )
+    assert (
+        frozenset({FINMIND_CREDENTIAL_PROBE_CONTRACT_ID, FINMIND_LIVE_VALIDATION_CONTRACT_ID})
+        == FINMIND_VALIDATION_CONTRACT_IDS
+    )
 
 
 def test_taiwan_segment_binds_real_selection_and_calendar_cases_to_official_evidence() -> None:

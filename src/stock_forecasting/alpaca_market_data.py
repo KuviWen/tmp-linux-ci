@@ -3,14 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from email.message import Message
-from typing import Any, Protocol, cast
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from typing import cast
 
 from stock_forecasting.alpaca_provider_contract import (
     ALPACA_BARS_DISTRIBUTION,
@@ -43,6 +38,30 @@ from stock_forecasting.data_supply import (
     SourceUnavailable,
     SymbolIdentityRecord,
 )
+from stock_forecasting.market_data_reference import (
+    MarketCalendarEvidence as AlpacaMarketCalendarEvidence,
+)
+from stock_forecasting.market_data_reference import (
+    MarketDataCompanyActionExpectation as AlpacaCompanyActionExpectation,
+)
+from stock_forecasting.market_data_reference import (
+    MarketDataReferenceGraph as AlpacaReferenceGraph,
+)
+from stock_forecasting.market_data_reference import (
+    MarketDataReferenceListing as AlpacaReferenceListing,
+)
+from stock_forecasting.provider_http import (
+    ProviderHttpRequest as ProviderHttpRequest,
+)
+from stock_forecasting.provider_http import (
+    ProviderHttpResponse as ProviderHttpResponse,
+)
+from stock_forecasting.provider_http import (
+    ProviderHttpTransport as ProviderHttpTransport,
+)
+from stock_forecasting.provider_http import (
+    UrllibProviderHttpTransport as _UrllibProviderHttpTransport,
+)
 from stock_forecasting.source_credentials import (
     CredentialNotReady,
     CredentialValidationEvidence,
@@ -52,152 +71,16 @@ from stock_forecasting.source_credentials import (
 )
 from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
-
-@dataclass(frozen=True)
-class ProviderHttpRequest:
-    method: str
-    url: str
-    query: Mapping[str, str]
-    headers: Mapping[str, str] = field(repr=False)
-
-
-@dataclass(frozen=True)
-class ProviderHttpResponse:
-    status_code: int
-    body: bytes
-    headers: Mapping[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class AlpacaReferenceListing:
-    listing_id: str
-    aliases: tuple[ExternalSecurityAlias, ...]
-    lifecycle: tuple[ListingLifecycleRecord, ...]
-
-    def __post_init__(self) -> None:
-        if (
-            not self.listing_id
-            or not self.aliases
-            or any(event.listing_id != self.listing_id for event in self.lifecycle)
-        ):
-            raise ValueError("alpaca_reference_listing_invalid")
-
-
-@dataclass(frozen=True)
-class AlpacaCompanyActionExpectation:
-    action_id: str
-    listing_id: str
-    effective_date: date
-
-    def __post_init__(self) -> None:
-        if not self.action_id or not self.listing_id:
-            raise ValueError("alpaca_company_action_expectation_invalid")
-
-
-@dataclass(frozen=True)
-class AlpacaReferenceGraph:
-    version_id: str
-    listings: tuple[AlpacaReferenceListing, ...]
-    company_action_expectations: tuple[AlpacaCompanyActionExpectation, ...]
-    lifecycle_complete: bool
-    company_actions_complete: bool
-
-    def __post_init__(self) -> None:
-        listing_ids = {listing.listing_id for listing in self.listings}
-        if (
-            not self.version_id
-            or not self.listings
-            or len(listing_ids) != len(self.listings)
-            or (
-                self.lifecycle_complete
-                and any(
-                    not listing.lifecycle
-                    or not any(event.status == "active" for event in listing.lifecycle)
-                    for listing in self.listings
-                )
-            )
-            or any(
-                expectation.listing_id not in listing_ids
-                for expectation in self.company_action_expectations
-            )
-            or len({item.action_id for item in self.company_action_expectations})
-            != len(self.company_action_expectations)
-        ):
-            raise ValueError("alpaca_reference_graph_invalid")
-
-    def partition_payload(
-        self,
-        *,
-        listing_ids: tuple[str, ...],
-        start_date: date,
-        end_date: date,
-    ) -> dict[str, object]:
-        requested = set(listing_ids)
-        listings = tuple(listing for listing in self.listings if listing.listing_id in requested)
-        if len(listings) != len(requested):
-            raise ValueError("alpaca_reference_graph_listing_missing")
-        expectations = tuple(
-            expectation
-            for expectation in self.company_action_expectations
-            if expectation.listing_id in requested
-            and start_date <= expectation.effective_date <= end_date
-        )
-        return {
-            "version_id": self.version_id,
-            "lifecycle_complete": self.lifecycle_complete,
-            "company_actions_complete": self.company_actions_complete,
-            "listings": [
-                {
-                    "listing_id": listing.listing_id,
-                    "aliases": [
-                        {
-                            "symbol": alias.security_code,
-                            "valid_from": (
-                                alias.valid_from.isoformat()
-                                if alias.valid_from is not None
-                                else None
-                            ),
-                            "valid_to": (
-                                alias.valid_to.isoformat() if alias.valid_to is not None else None
-                            ),
-                        }
-                        for alias in listing.aliases
-                    ],
-                    "lifecycle": [
-                        {
-                            "effective_date": event.effective_date.isoformat(),
-                            "status": event.status,
-                            "source_event_id": event.source_event_id,
-                        }
-                        for event in listing.lifecycle
-                    ],
-                }
-                for listing in listings
-            ],
-            "expected_company_action_ids": sorted(
-                expectation.action_id for expectation in expectations
-            ),
-        }
-
-    def listing(self, listing_id: str) -> AlpacaReferenceListing:
-        try:
-            return next(listing for listing in self.listings if listing.listing_id == listing_id)
-        except StopIteration as error:
-            raise ValueError("alpaca_reference_graph_listing_missing") from error
-
-    def expected_company_action_ids(
-        self,
-        *,
-        listing_ids: tuple[str, ...],
-        start_date: date,
-        end_date: date,
-    ) -> frozenset[str]:
-        payload = self.partition_payload(
-            listing_ids=listing_ids,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        return frozenset(cast(list[str], payload["expected_company_action_ids"]))
+__all__ = [
+    "AlpacaCompanyActionExpectation",
+    "AlpacaMarketCalendarEvidence",
+    "AlpacaReferenceGraph",
+    "AlpacaReferenceListing",
+    "ProviderHttpRequest",
+    "ProviderHttpResponse",
+    "ProviderHttpTransport",
+    "UrllibProviderHttpTransport",
+]
 
 
 def load_candidate_alpaca_reference_graph() -> AlpacaReferenceGraph:
@@ -245,46 +128,6 @@ def load_candidate_alpaca_reference_graph() -> AlpacaReferenceGraph:
     )
 
 
-@dataclass(frozen=True)
-class AlpacaMarketCalendarEvidence:
-    version_id: str
-    coverage_start: date
-    coverage_end: date
-    sessions: tuple[MarketSessionRecord, ...]
-
-    def __post_init__(self) -> None:
-        session_dates = tuple(session.session_date for session in self.sessions)
-        if (
-            not self.version_id
-            or self.coverage_start > self.coverage_end
-            or len(set(session_dates)) != len(session_dates)
-            or any(
-                not self.coverage_start <= session_date <= self.coverage_end
-                for session_date in session_dates
-            )
-        ):
-            raise ValueError("alpaca_market_calendar_evidence_invalid")
-
-    def expected_sessions(
-        self,
-        *,
-        start_date: date,
-        end_date: date,
-    ) -> tuple[MarketSessionRecord, ...] | None:
-        if start_date < self.coverage_start or end_date > self.coverage_end:
-            return None
-        return tuple(
-            sorted(
-                (
-                    session
-                    for session in self.sessions
-                    if start_date <= session.session_date <= end_date
-                ),
-                key=lambda session: session.session_date,
-            )
-        )
-
-
 def load_candidate_alpaca_market_calendar_evidence() -> AlpacaMarketCalendarEvidence:
     from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
@@ -305,110 +148,13 @@ def load_candidate_alpaca_market_calendar_evidence() -> AlpacaMarketCalendarEvid
     )
 
 
-class ProviderHttpTransport(Protocol):
-    def send(self, request: ProviderHttpRequest) -> ProviderHttpResponse: ...
-
-
-class _UrlResponse(Protocol):
-    status: int
-    headers: Message
-
-    def read(self, amount: int | None = None) -> bytes: ...
-
-    def __enter__(self) -> _UrlResponse: ...
-
-    def __exit__(self, *args: object) -> None: ...
-
-
-class _UrlOpener(Protocol):
-    def __call__(self, request: Request, *, timeout: float) -> _UrlResponse: ...
-
-
-class _NoRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        req: Request,
-        fp: Any,
-        code: int,
-        msg: str,
-        headers: Message,
-        newurl: str,
-    ) -> None:
-        return None
-
-
-_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
-
-
-def _open_without_redirects(request: Request, *, timeout: float) -> _UrlResponse:
-    return cast(_UrlResponse, _NO_REDIRECT_OPENER.open(request, timeout=timeout))
-
-
-class UrllibProviderHttpTransport:
-    _ALLOWED_HOSTS = frozenset({"data.alpaca.markets", "paper-api.alpaca.markets"})
-    _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
-
-    def __init__(
-        self,
-        *,
-        opener: _UrlOpener | None = None,
-        timeout_seconds: float = 10.0,
-    ) -> None:
-        if timeout_seconds <= 0:
-            raise ValueError("source_provider_timeout_invalid")
-        self._opener = opener or _open_without_redirects
-        self._timeout_seconds = timeout_seconds
-
-    def send(self, request: ProviderHttpRequest) -> ProviderHttpResponse:
-        parsed = urlsplit(request.url)
-        if (
-            request.method != "GET"
-            or parsed.scheme != "https"
-            or parsed.hostname not in self._ALLOWED_HOSTS
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.port not in {None, 443}
-        ):
-            raise ValueError("source_provider_url_forbidden")
-        query = urlencode(sorted(request.query.items()))
-        url = f"{request.url}?{query}" if query else request.url
-        urllib_request = Request(
-            url,
-            headers=dict(request.headers),
-            method=request.method,
+class UrllibProviderHttpTransport(_UrllibProviderHttpTransport):
+    def __init__(self, **kwargs: object) -> None:
+        kwargs.setdefault(
+            "allowed_hosts",
+            frozenset({"data.alpaca.markets", "paper-api.alpaca.markets"}),
         )
-        try:
-            with self._opener(urllib_request, timeout=self._timeout_seconds) as response:
-                return self._bounded_response(
-                    status_code=response.status,
-                    body=response.read(self._MAX_RESPONSE_BYTES + 1),
-                    headers=dict(response.headers.items()),
-                )
-        except HTTPError as error:
-            return self._bounded_response(
-                status_code=error.code,
-                body=error.read(self._MAX_RESPONSE_BYTES + 1),
-                headers=dict(error.headers.items()) if error.headers is not None else {},
-            )
-        except URLError:
-            return ProviderHttpResponse(
-                status_code=503,
-                body=b'{"message":"provider transport unavailable"}',
-            )
-
-    def _bounded_response(
-        self,
-        *,
-        status_code: int,
-        body: bytes,
-        headers: Mapping[str, str],
-    ) -> ProviderHttpResponse:
-        if len(body) > self._MAX_RESPONSE_BYTES:
-            return ProviderHttpResponse(
-                status_code=502,
-                body=b'{"message":"provider response too large"}',
-            )
-        return ProviderHttpResponse(status_code=status_code, body=body, headers=headers)
+        super().__init__(**kwargs)  # type: ignore[arg-type]
 
 
 class AlpacaCredentialValidator:

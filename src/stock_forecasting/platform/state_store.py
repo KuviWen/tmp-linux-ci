@@ -1038,6 +1038,7 @@ class StateStore:
     ) -> str:
         if artifact_kind not in {
             "open_data_source_basis_evidence",
+            "zero_fee_source_basis_evidence",
             "historical_availability_claim",
             "taiwan_price_qualification_gate",
         }:
@@ -1070,6 +1071,7 @@ class StateStore:
             or payload.get("operation")
             not in {
                 "register_open_data_source_basis_evidence",
+                "register_zero_fee_source_basis_evidence",
                 "register_historical_availability_claim",
                 "register_formal_qualification_gate",
             }

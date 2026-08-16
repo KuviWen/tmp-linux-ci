@@ -152,6 +152,7 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
         first.source_adapter_security_context.principal_id == adapter_identity.context.principal_id
     )
     assert first.source_adapter_security_context.principal_id != first.security_context.principal_id
+    assert first.finmind_price_adapter is not None
     secret_ref = first.secret_provider.put(
         provider_id="alpaca-market-data-basic",
         credential_fields={
@@ -215,6 +216,7 @@ def test_runtime_without_a_source_adapter_key_keeps_the_adapter_path_disabled(
 
     assert application.source_adapter_security_context is None
     assert application.alpaca_price_adapter is None
+    assert application.finmind_price_adapter is None
 
 
 def test_runtime_loads_selected_immutable_policy_set_for_denied_adapter_process(

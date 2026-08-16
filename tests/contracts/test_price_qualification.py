@@ -18,6 +18,7 @@ from stock_forecasting.authorization import (
     SourceUseRight,
 )
 from stock_forecasting.data_supply import (
+    PRICE_RESEARCH_REQUIRED_USES,
     HistoricalAvailabilityClaim,
     TaiwanStockPoolManifest,
     load_taiwan_stock_pool_manifest,
@@ -184,6 +185,124 @@ def test_open_data_source_basis_is_derived_without_qualifying_history(
             terms_content=b"",
             trace_id="trace-open-data-empty-terms",
         )
+
+
+def test_finmind_zero_fee_basis_can_enter_the_same_formal_governance_path(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 16, 1, 0, tzinfo=UTC)
+    terms_content = b"Pinned FinMind free-plan terms for a qualified source policy"
+    terms_sha256 = hashlib.sha256(terms_content).hexdigest()
+    base_manifest = load_taiwan_stock_pool_manifest()
+    basis = replace(
+        base_manifest.authenticated_source_basis,
+        terms_content_sha256=terms_sha256,
+    )
+    source_id = "finmind-taiwan-stock-price"
+    manifest = replace(
+        base_manifest,
+        authenticated_source_basis=basis,
+        current_source_id=source_id,
+        historical_source_id=source_id,
+    )
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-finmind-governor",
+        environment="development",
+        scopes={"price_qualification.govern"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+        principal_classification="individual_or_internal_group",
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-finmind-qualification-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"price_qualification.govern"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=(
+            SourcePolicyVersion(
+                version_id="policy-finmind-history-v1",
+                dataset_id=source_id,
+                allowed_actions=frozenset({"price_qualification.govern"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                allowed_uses=PRICE_RESEARCH_REQUIRED_USES,
+                access_basis="zero_fee_plan",
+                source_basis_id=basis.source_basis_id,
+                license_id="FinMind-Free-Plan-Terms",
+                terms_url=basis.terms_url,
+                terms_content_sha256=terms_sha256,
+                attribution="FinMind",
+                distributions=tuple(
+                    SourceDistribution(
+                        dataset_id=member.dataset_id,
+                        distribution_url=member.distribution_url,
+                    )
+                    for member in basis.members
+                ),
+                provider_id=basis.provider_id,
+                plan_id=basis.plan_id,
+                principal_classification=basis.principal_classification,
+                credential_kind=basis.credential_kind,
+                account_required=True,
+                fee_required=False,
+            ),
+        ),
+        source_entitlements=(
+            SourceEntitlement(
+                version_id="entitlement-finmind-history-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id=source_id,
+                status="active",
+                allowed_actions=frozenset({"price_qualification.govern"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+                allowed_uses=PRICE_RESEARCH_REQUIRED_USES,
+            ),
+        ),
+    )
+    state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
+    workflow = TaiwanPriceQualificationWorkflow(
+        state_store,
+        authorization_policy=policy,
+        security_context=identity.context,
+        clock=lambda: now,
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+    )
+
+    evidence_id = workflow.register_zero_fee_source_basis_evidence(
+        manifest=manifest,
+        source_id=source_id,
+        terms_content=terms_content,
+        trace_id="trace-finmind-source-basis",
+    )
+
+    evidence = state_store.get_verified_governance_artifact(
+        artifact_id=evidence_id,
+        artifact_kind="zero_fee_source_basis_evidence",
+    )
+    assert evidence["source_basis_id"] == "FINMIND-FREE-TAIWAN-MARKET-DATA-01"
+    assert evidence["source_id"] == source_id
+    assert evidence["provider_id"] == "finmind-free-api"
+    assert evidence["credential_kind"] == "bearer_token"
+    assert evidence["terms_content_sha256"] == terms_sha256
+    assert evidence["distributions"] == [
+        {
+            "dataset_id": member.dataset_id,
+            "distribution_url": member.distribution_url,
+        }
+        for member in basis.members
+    ]
 
 
 def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contract(

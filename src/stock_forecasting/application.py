@@ -30,6 +30,16 @@ from stock_forecasting.authorization import (
     build_fixture_authorization_policy,
 )
 from stock_forecasting.authorization_repository import AuthorizationPolicyRepository
+from stock_forecasting.finmind_market_data import (
+    FinMindPriceSourceAdapter,
+    FinMindSourceCollector,
+    FinMindSourceDecoder,
+    load_candidate_finmind_reference_graph,
+)
+from stock_forecasting.finmind_provider_contract import (
+    FINMIND_PRICE_DISTRIBUTION,
+    FINMIND_PROVIDER_ID,
+)
 from stock_forecasting.operations_control import OperationsControl
 from stock_forecasting.outbox import (
     EventCompatibility,
@@ -42,6 +52,9 @@ from stock_forecasting.outbox import (
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
+from stock_forecasting.provider_http import (
+    UrllibProviderHttpTransport as ProviderUrllibHttpTransport,
+)
 from stock_forecasting.research_query import ResearchQuery
 from stock_forecasting.security_audit import SecurityAudit
 from stock_forecasting.source_credentials import (
@@ -152,6 +165,16 @@ class Application:
             if self.source_adapter_security_context is not None
             else None
         )
+        self.finmind_price_adapter = (
+            self.build_finmind_price_adapter(
+                transport=ProviderUrllibHttpTransport(
+                    allowed_hosts=frozenset({"api.finmindtrade.com"})
+                ),
+                source_access_mode="live_provider",
+            )
+            if self.source_adapter_security_context is not None
+            else None
+        )
         self._relay_fault = relay_fault or NoRelayFault()
         self._event_compatibility = event_compatibility or EventCompatibility.current()
         self._relay_clock = relay_clock or SystemRelayClock()
@@ -208,6 +231,44 @@ class Application:
             ),
             decoder=AlpacaSourceDecoder(
                 source_id=ALPACA_BARS_DISTRIBUTION.policy_dataset_id,
+                reference_graph=reference_graph,
+            ),
+        )
+
+    def build_finmind_price_adapter(
+        self,
+        *,
+        transport: ProviderHttpTransport,
+        source_access_mode: SourceAccessMode,
+    ) -> FinMindPriceSourceAdapter:
+        if self.source_adapter_security_context is None:
+            raise ValueError("source_adapter_identity_unavailable")
+        reference_graph = load_candidate_finmind_reference_graph()
+        source_id = FINMIND_PRICE_DISTRIBUTION.policy_dataset_id
+        rate_limit_policy_id = "finmind-free-600-requests-per-hour-v1"
+        return FinMindPriceSourceAdapter(
+            source_id=source_id,
+            mode="historical",
+            adapter_version=f"{FINMIND_PROVIDER_ID}-v1",
+            rate_limit_policy_id=rate_limit_policy_id,
+            source_access_mode=source_access_mode,
+            collector=FinMindSourceCollector(
+                source_id=source_id,
+                provider_id=FINMIND_PROVIDER_ID,
+                reference_graph=reference_graph,
+                credential_resolver=ManagedSourceCredentialResolver(
+                    self.state_store,
+                    self.secret_provider,
+                    workload_principal_id=self.source_adapter_security_context.principal_id,
+                    environment=self.source_adapter_security_context.environment,
+                    clock=lambda: self._fixed_security_time or datetime.now(UTC),
+                ),
+                transport=transport,
+                clock=lambda: self._fixed_security_time or datetime.now(UTC),
+                rate_limit_policy_id=rate_limit_policy_id,
+            ),
+            decoder=FinMindSourceDecoder(
+                source_id=source_id,
                 reference_graph=reference_graph,
             ),
         )

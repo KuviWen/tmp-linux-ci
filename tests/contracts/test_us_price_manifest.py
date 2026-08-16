@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from uuid import UUID
+
+import pytest
 
 from stock_forecasting.alpaca_provider_contract import (
     ALPACA_CREDENTIAL_PROBE_CONTRACT_ID,
@@ -146,6 +149,16 @@ def test_us_manifest_preserves_each_zero_fee_source_bundle_member_and_gap() -> N
     assert manifest.formal_qualification_artifact_id is None
     assert manifest.historical_availability_claim_id is None
     assert manifest.formally_qualified is False
+
+
+def test_us_candidate_still_requires_its_pinned_terms_digest() -> None:
+    manifest = load_us_stock_pool_manifest()
+
+    with pytest.raises(ValueError, match="us_stock_pool_manifest_invalid"):
+        replace(
+            manifest,
+            source_basis=replace(manifest.source_basis, terms_content_sha256=None),
+        )
 
 
 def test_alpaca_provider_contract_catalog_matches_the_source_manifest() -> None:

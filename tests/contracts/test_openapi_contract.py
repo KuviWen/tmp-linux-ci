@@ -139,6 +139,10 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "string",
         "null",
     ]
+    assert zero_fee_basis["properties"]["credential_kind"] == {
+        "type": "string",
+        "enum": ["api_key_pair", "bearer_token"],
+    }
     source = contract["components"]["schemas"]["PriceSourceEligibility"]
     assert source["properties"]["status"]["enum"] == [
         "published",
@@ -221,6 +225,10 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "source_basis",
     }
     assert "credential_fields" not in credential["properties"]
+    assert credential["properties"]["credential_kind"] == {
+        "type": "string",
+        "enum": ["api_key_pair", "bearer_token"],
+    }
     assert set(credential["required"]) == {
         "provider_id",
         "readiness",

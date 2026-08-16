@@ -104,8 +104,27 @@ def run_ticket_06_acceptance(
         path=f"/research/listings/{listing_id}/price-eligibility",
         identity=identity,
     )
+    credential_status, credential_text = _get(
+        base_url=base_url,
+        path="/api/v1/operations/source-credentials",
+        identity=identity,
+    )
+    credential_ui_status, credential_ui_text = _get(
+        base_url=base_url,
+        path="/operations/source-credentials",
+        identity=identity,
+    )
     research = json.loads(research_text)
     operations = json.loads(operations_text)
+    credentials = json.loads(credential_text)
+    finmind = next(
+        (
+            item
+            for item in credentials.get("items", [])
+            if item.get("provider_id") == "finmind-free-api"
+        ),
+        None,
+    )
     checks = {
         "materialization_policy_blocked": all(
             outcome.status == "policy_blocked" for outcome in outcomes
@@ -118,6 +137,20 @@ def run_ticket_06_acceptance(
         "traditional_chinese_ui": ui_status == 200
         and "台股行情研究資格" in ui_text
         and "政策阻擋" in ui_text,
+        "finmind_formal_candidate": credential_status == 200
+        and finmind is not None
+        and finmind.get("credential_kind") == "bearer_token"
+        and finmind.get("readiness") == "missing"
+        and finmind.get("reason_code") == "source_credential_missing"
+        and finmind.get("source_basis", {}).get("source_basis_id")
+        == "FINMIND-FREE-TAIWAN-MARKET-DATA-01"
+        and finmind.get("source_basis", {}).get("qualification_status")
+        == "candidate_terms_not_archived"
+        and "credential_fields" not in finmind,
+        "finmind_write_only_ui": credential_ui_status == 200
+        and "FinMind Free API" in credential_ui_text
+        and 'data-provider-id="finmind-free-api"' in credential_ui_text
+        and 'name="token"' in credential_ui_text,
         "no_false_lineage": all(
             source.get("dataset_version_id") is None and source.get("adjustment_version_id") is None
             for source in research.get("sources", [])

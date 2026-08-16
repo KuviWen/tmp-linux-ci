@@ -329,7 +329,7 @@ def test_complete_reference_graph_requires_an_evidenced_active_event() -> None:
         ),
     )
 
-    with pytest.raises(ValueError, match="alpaca_reference_graph_invalid"):
+    with pytest.raises(ValueError, match="market_data_reference_graph_invalid"):
         AlpacaReferenceGraph(
             version_id="engineering-us-reference-graph-v1",
             listings=(listing,),

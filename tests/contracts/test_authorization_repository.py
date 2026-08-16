@@ -131,7 +131,12 @@ def test_ticket_06_authorization_init_installs_metadata_read_but_no_price_source
     identity = LocalApiKeyIdentity.issue(
         owner="ticket-06-researcher",
         environment="development",
-        scopes={"market_data.collect", "price_research_eligibility.read"},
+        scopes={
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "source_credential.read",
+        },
+        data_protection_classes={"internal", "restricted"},
         issued_at=now,
         expires_at=now.replace(day=16),
     )
@@ -157,10 +162,21 @@ def test_ticket_06_authorization_init_installs_metadata_read_but_no_price_source
         TICKET_06_POLICY_BLOCKED_SET,
         principal_id=identity.context.principal_id,
     )
-    assert [item.dataset_id for item in policy.source_policies] == ["price-research-eligibility"]
-    assert [item.dataset_id for item in policy.source_entitlements] == [
-        "price-research-eligibility"
-    ]
+    assert {item.dataset_id for item in policy.source_policies} == {
+        "price-research-eligibility",
+        "source-credential-metadata",
+    }
+    assert {item.dataset_id for item in policy.source_entitlements} == {
+        "price-research-eligibility",
+        "source-credential-metadata",
+    }
+    assert policy.action_grants[0].actions == frozenset(
+        {
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "source_credential.read",
+        }
+    )
 
 
 def test_ticket_07_authorization_init_installs_zero_fee_and_credential_contracts(
