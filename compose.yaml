@@ -566,6 +566,7 @@ services:
     volumes:
       - fixture-objects:/var/lib/stock-forecasting/objects:ro
       - ticket-06-source-adapter-key:/run/stock-forecasting-source-adapter:ro
+      - ticket-06-source-secrets:/var/lib/stock-forecasting/source-secrets:ro
     command:
       - python
       - -m
@@ -582,11 +583,15 @@ services:
       - *fixture-collection-observed-at
       - --source-adapter-key-file
       - /run/stock-forecasting-source-adapter/local-api-key.json
+      - --source-secret-root
+      - /var/lib/stock-forecasting/source-secrets
     depends_on:
       database-grants:
         condition: service_completed_successfully
       ticket-06-authorization-init:
         condition: service_completed_successfully
+      ticket-06-api:
+        condition: service_healthy
 
   ticket-06-acceptance:
     <<: *application

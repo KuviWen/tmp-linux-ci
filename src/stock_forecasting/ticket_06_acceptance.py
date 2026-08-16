@@ -32,8 +32,8 @@ from stock_forecasting.platform.object_repository import FilesystemObjectReposit
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.provider_http import ProviderHttpRequest
 from stock_forecasting.source_credentials import (
-    CredentialNotReady,
-    SecretLease,
+    EncryptedFilesystemSecretProvider,
+    ManagedSourceCredentialResolver,
 )
 
 
@@ -44,20 +44,6 @@ class _ProviderMustNotBeContacted:
     def send(self, request: ProviderHttpRequest) -> NoReturn:
         self.requests.append(request)
         raise RuntimeError("missing_credential_provider_contacted")
-
-
-class _MissingCredentialResolver:
-    def resolve_valid(
-        self,
-        _provider_id: str,
-        *,
-        trace_id: str,
-        request_id: str,
-        work_id: str,
-        source_id: str,
-    ) -> SecretLease:
-        del trace_id, request_id, work_id, source_id
-        raise CredentialNotReady("source_credential_missing")
 
 
 def _request(
@@ -277,6 +263,7 @@ def run_ticket_06_source_probe(
     database_url: str,
     object_root: Path,
     source_adapter_key_file: Path,
+    source_secret_root: Path,
 ) -> dict[str, object]:
     identity = LocalApiKeyIdentity.load(source_adapter_key_file)
     state_store = StateStore(database_url, create_schema=False)
@@ -288,6 +275,13 @@ def run_ticket_06_source_probe(
     listing_id = manifest.listings[0].listing_id
     transport = _ProviderMustNotBeContacted()
     reference_graph = load_candidate_finmind_reference_graph()
+    credential_resolver = ManagedSourceCredentialResolver(
+        state_store,
+        EncryptedFilesystemSecretProvider(source_secret_root),
+        workload_principal_id=identity.context.principal_id,
+        environment=identity.context.environment,
+        clock=lambda: datetime.now(UTC),
+    )
     outcomes = []
     for mode in ("current", "historical"):
         adapter = FinMindPriceSourceAdapter(
@@ -300,7 +294,7 @@ def run_ticket_06_source_probe(
                 source_id=FINMIND_PRICE_DISTRIBUTION.policy_dataset_id,
                 provider_id=FINMIND_PROVIDER_ID,
                 reference_graph=reference_graph,
-                credential_resolver=_MissingCredentialResolver(),
+                credential_resolver=credential_resolver,
                 transport=transport,
                 clock=lambda: datetime.now(UTC),
                 rate_limit_policy_id="finmind-free-600-requests-per-hour-v1",

@@ -6,8 +6,6 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
-from typing import cast
-from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
@@ -29,7 +27,6 @@ from stock_forecasting.data_supply import (
     CollectedSourcePartition,
     DataSupply,
     DecodedSourcePartition,
-    HistoricalArchiveAttestation,
     HistoricalAvailabilityClaim,
     ListingLifecycleRecord,
     LoadedSourcePartition,
@@ -42,20 +39,14 @@ from stock_forecasting.data_supply import (
 from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_DISTRIBUTIONS
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository, ObjectRef
 from stock_forecasting.platform.state_store import StateStore
-from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
 from stock_forecasting.price_qualification import (
     QualificationAuthorizationError,
     TaiwanPriceQualificationWorkflow,
 )
-from stock_forecasting.source_credentials import (
-    CredentialValidationEvidence,
-    SourceContractAssessment,
-    pin_source_credential_lease,
-)
 
 
 class _QualificationLiteralAdapter:
-    source_access_mode: SourceAccessMode = "live_provider"
+    source_access_mode: SourceAccessMode = "engineering_double"
 
     def __init__(self, loaded: LoadedSourcePartition) -> None:
         self.loaded = loaded
@@ -337,22 +328,17 @@ def test_finmind_zero_fee_basis_can_enter_the_same_formal_governance_path(
     ]
 
 
-def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
+def test_finmind_materialization_cannot_mint_formal_history_without_archive_workflow(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 8, 16, 1, 0, tzinfo=UTC)
-    terms_content = b"Pinned FinMind free-plan terms for full-gate contract evidence"
-    terms_sha256 = hashlib.sha256(terms_content).hexdigest()
+    terms_sha256 = hashlib.sha256(b"Pinned FinMind free-plan terms").hexdigest()
     repository = FilesystemObjectRepository(tmp_path / "objects")
-    archived, _ = _archive_selection_sources(
-        load_taiwan_stock_pool_manifest(),
-        repository=repository,
-        acquired_at=datetime(2026, 8, 15, 1, 0, tzinfo=UTC),
-    )
+    base_manifest = load_taiwan_stock_pool_manifest()
     manifest = replace(
-        archived.for_authenticated_source_path(),
+        base_manifest.for_authenticated_source_path(),
         authenticated_source_basis=replace(
-            archived.authenticated_source_basis,
+            base_manifest.authenticated_source_basis,
             terms_content_sha256=terms_sha256,
         ),
     )
@@ -515,7 +501,6 @@ def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
             reference_graph_lifecycle_verified=True,
             company_action_completeness_verified=True,
             market_calendar_evidence_version_id="engineering-xtai-calendar-2024-01-03-v1",
-            historical_archive_attestation=archive_attestation,
         )
         decoded = DecodedSourcePartition(
             source_id=primary.policy_dataset_id,
@@ -552,99 +537,22 @@ def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
         return LoadedSourcePartition(collection=collection, decoded=decoded)
 
     state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
-    credential_authorization: dict[str, object] = {
-        "evaluation_id": "ticket-06-finmind-test-credential-set",
-        "action": "source_credential.manage",
-        "reason_code": "source_credential_manage_authorized",
-    }
-    configured = state_store.publish_source_credential(
-        provider_id="finmind-free-api",
-        secret_ref_id="secret-ref:finmind-test-contract",
-        readiness="configured",
-        reason_code="source_credential_configured",
-        configured_at=now.isoformat(),
-        expires_at=(now + timedelta(days=1)).isoformat(),
-        authorization=credential_authorization,
-        trace_id="trace-finmind-test-credential-set",
+    literal_live_adapter = _QualificationLiteralAdapter(
+        loaded("finmind-literal-live", "literal-live-v1")
     )
-    contract_assessment = SourceContractAssessment(
-        contract_id="finmind-ticket-06-live-v1",
-        live_validation="passed",
-        ticker_count=10,
-        datasets=tuple(
-            sorted(distribution.distribution_id for distribution in FINMIND_PROVIDER_DISTRIBUTIONS)
-        ),
-        symbol_lifecycle_probe="passed",
-        universe_manifest_id=manifest.manifest_id,
-        reference_graph_version_id=manifest.selection_evidence_version,
-        listing_ids=listing_ids,
-    )
-    validation = state_store.record_source_credential_validation(
-        provider_id="finmind-free-api",
-        readiness="valid",
-        reason_code="source_credential_valid",
-        validated_at=now.isoformat(),
-        expected_version=cast(int, configured["version"]),
-        expected_secret_ref_id=cast(str, configured["secret_ref_id"]),
-        validation_evidence=CredentialValidationEvidence(
-            authentication_status="passed"
-        ).as_payload(),
-        source_contract_assessment=contract_assessment.as_payload(),
-        authorization={
-            "evaluation_id": "ticket-06-finmind-test-credential-validate",
-            "action": "source_credential.manage",
-            "reason_code": "source_credential_manage_authorized",
-        },
-        trace_id="trace-finmind-test-credential-validate",
-    )
-    current_credential = cast(dict[str, object], validation["credential"])
-    pin_source_credential_lease(
-        state_store,
-        provider_id="finmind-free-api",
-        current=current_credential,
-        trace_id="trace-finmind-assessment",
-        workload_principal_id=identity.context.principal_id,
-        environment="development",
-        source_id=primary.policy_dataset_id,
-        destination="finmind-free-api",
-        purpose="price_research_ingest",
-        request_id="finmind-assessment",
-        work_id="finmind-assessment:finmind-collect",
-        lease_duration=timedelta(minutes=5),
-        lease_issued_at=now,
-    )
-    contract_artifact_id = validation["source_contract_assessment_artifact_id"]
-    assert isinstance(contract_artifact_id, str)
-    archive_attestation = HistoricalArchiveAttestation(
-        provider_id="finmind-free-api",
-        archive_id="finmind-historical-reconstruction-contract",
-        archive_version_id="finmind-archive-snapshot-2024-01-03-v1",
-        revision_as_of=now - timedelta(days=1),
-        credential_version=cast(int, current_credential["version"]),
-        credential_lease_pin_event_id=str(
-            uuid5(
-                NAMESPACE_URL,
-                "source-credential-lease-pin:finmind-free-api:finmind-assessment:finmind-collect",
-            )
-        ),
-        source_contract_assessment_artifact_id=contract_artifact_id,
-    )
-    engineering_adapter = _QualificationLiteralAdapter(
-        loaded("finmind-engineering", "engineering-v1")
-    )
-    engineering_adapter.source_access_mode = "engineering_double"
-    engineering_supply = DataSupply(
+    literal_live_adapter.source_access_mode = "live_provider"
+    supply = DataSupply(
         authorization_policy=policy,
         security_context=identity.context,
-        adapters={primary.policy_dataset_id: engineering_adapter},
+        adapters={primary.policy_dataset_id: literal_live_adapter},
         object_repository=repository,
         state_store=state_store,
         clock=lambda: now,
     )
-    engineering_outcome = engineering_supply.materialize(
+    outcome = supply.materialize(
         SourcePartitionRequest(
-            request_id="finmind-engineering",
-            trace_id="trace-finmind-engineering",
+            request_id="finmind-literal-live",
+            trace_id="trace-finmind-literal-live",
             source_id=primary.policy_dataset_id,
             mode="historical",
             listing_ids=listing_ids,
@@ -657,68 +565,16 @@ def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
             bundle_members=bundle_requests,
         )
     )
-    assert engineering_outcome.status == "quarantined"
+    assert outcome.status == "quarantined"
     assert (
         "historical_qualification_assessment"
-        not in state_store.get_trace_evidence("trace-finmind-engineering")["artifact_kinds"]
+        not in state_store.get_trace_evidence("trace-finmind-literal-live")["artifact_kinds"]
     )
-    adapter = _QualificationLiteralAdapter(
-        loaded(
-            "finmind-assessment",
-            "assessment-v1",
-            checkpoint_before="checkpoint:engineering-v1",
-        )
-    )
-    data_supply = DataSupply(
-        authorization_policy=policy,
-        security_context=identity.context,
-        adapters={primary.policy_dataset_id: adapter},
-        object_repository=repository,
-        state_store=state_store,
-        clock=lambda: now,
+    assert (
+        "historical_qualification_evidence"
+        not in state_store.get_trace_evidence("trace-finmind-literal-live")["artifact_kinds"]
     )
 
-    def request(
-        request_id: str,
-        mode: str,
-        *,
-        claim_id: str | None = None,
-        expected_checkpoint: str | None = None,
-    ) -> SourcePartitionRequest:
-        return SourcePartitionRequest(
-            request_id=request_id,
-            trace_id=f"trace-{request_id}",
-            source_id=primary.policy_dataset_id,
-            mode=mode,  # type: ignore[arg-type]
-            listing_ids=listing_ids,
-            start_date=coverage.requested_start,
-            end_date=coverage.requested_end,
-            expected_checkpoint=expected_checkpoint,
-            distribution_id=primary.distribution_id,
-            distribution_url=primary.distribution_url,
-            source_basis_id=manifest.authenticated_source_basis.source_basis_id,
-            bundle_members=bundle_requests,
-            historical_availability_claim_id=claim_id,
-        )
-
-    assessment_outcome = data_supply.materialize(
-        request(
-            "finmind-assessment",
-            "historical",
-            expected_checkpoint="checkpoint:engineering-v1",
-        )
-    )
-    assert assessment_outcome.status == "quarantined"
-    assessment_trace = state_store.get_trace_evidence("trace-finmind-assessment")
-    assessment_id = next(
-        artifact_id
-        for artifact_id, kind in zip(
-            assessment_trace["artifact_ids"],
-            assessment_trace["artifact_kinds"],
-            strict=True,
-        )
-        if kind == "historical_qualification_assessment"
-    )
     workflow = TaiwanPriceQualificationWorkflow(
         state_store,
         authorization_policy=policy,
@@ -726,102 +582,23 @@ def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
         clock=lambda: now,
         object_repository=repository,
     )
-    qualification_evidence_id = workflow.register_historical_qualification_evidence(
-        manifest=manifest,
-        assessment_artifact_id=assessment_id,
-        trace_id="trace-finmind-history-evidence",
-    )
-    assert coverage.observed_start is not None
-    assert coverage.observed_end is not None
-    claim_id = workflow.register_historical_availability_claim(
-        HistoricalAvailabilityClaim(
-            source_id=manifest.historical_source_id,
-            evidence_level="archive_attested",
-            evidence_status="qualified",
-            observed_start=coverage.observed_start,
-            observed_end=coverage.observed_end,
-            schema_version="taiwan-unadjusted-eod-v1",
-            exact_sessions_verified=True,
-            integrity_verified=True,
-            company_actions_verified=True,
-            listing_lifecycle_verified=True,
-            qualification_artifact_id=qualification_evidence_id,
-        ),
-        trace_id="trace-finmind-history-claim",
-    )
-    source_basis_evidence_id = workflow.register_zero_fee_source_basis_evidence(
-        manifest=manifest,
-        source_id=manifest.historical_source_id,
-        terms_content=terms_content,
-        trace_id="trace-finmind-full-source-basis",
-    )
-    gate_id = workflow.register_formal_qualification_gate(
-        manifest=manifest,
-        historical_availability_claim_id=claim_id,
-        source_basis_evidence_id=source_basis_evidence_id,
-        trace_id="trace-finmind-formal-gate",
-    )
-    qualified_manifest = replace(
-        manifest,
-        evidence_status="qualified",
-        historical_availability_claim_id=claim_id,
-        formal_qualification_artifact_id=gate_id,
-    )
-    adapter.loaded = loaded("finmind-current", "current-v1")
-    current_outcome = data_supply.materialize(request("finmind-current", "current"))
-    adapter.loaded = loaded(
-        "finmind-historical",
-        "historical-v1",
-        checkpoint_before="checkpoint:assessment-v1",
-    )
-    historical_outcome = data_supply.materialize(
-        request(
-            "finmind-historical",
-            "historical",
-            claim_id=claim_id,
-            expected_checkpoint="checkpoint:assessment-v1",
+    with pytest.raises(ValueError, match="qualified_claim_requires_historical_evidence"):
+        workflow.register_historical_availability_claim(
+            HistoricalAvailabilityClaim(
+                source_id=primary.policy_dataset_id,
+                evidence_level="archive_attested",
+                evidence_status="qualified",
+                observed_start=coverage.requested_start,
+                observed_end=coverage.requested_end,
+                schema_version="taiwan-unadjusted-eod-v1",
+                exact_sessions_verified=True,
+                integrity_verified=True,
+                company_actions_verified=True,
+                listing_lifecycle_verified=True,
+                qualification_artifact_id=outcome.retrieval_receipt_id,
+            ),
+            trace_id="trace-finmind-no-archive-issuer",
         )
-    )
-
-    sources = state_store.list_price_research_eligibility(listing_id=listing_ids[0])
-    assert [current_outcome.status, historical_outcome.status] == ["published", "published"]
-    assert workflow.formal_qualification_available(qualified_manifest, sources) is True
-    persisted_gate = state_store.find_latest_price_qualification_gate(
-        manifest_id=manifest.manifest_id,
-        source_path_id=manifest.source_path_id,
-    )
-    assert persisted_gate is not None
-    reloaded_manifest = load_taiwan_stock_pool_manifest().for_authenticated_source_path()
-    reloaded_manifest = reloaded_manifest.with_formal_qualification_gate(
-        artifact_id=persisted_gate[0],
-        payload=persisted_gate[1],
-    )
-    assert workflow.formal_qualification_available(reloaded_manifest, sources) is True
-    state_store.revoke_source_credential(
-        provider_id="finmind-free-api",
-        revoked_at=now.isoformat(),
-        authorization={
-            "evaluation_id": "ticket-06-finmind-test-credential-revoke",
-            "action": "source_credential.manage",
-            "reason_code": "source_credential_manage_authorized",
-        },
-        trace_id="trace-finmind-test-credential-revoke",
-    )
-    result = PriceEligibilityQuery(
-        state_store,
-        authorization_policy=policy,
-        authorization_time=now,
-        object_repository=repository,
-    ).get_listing(
-        listing_id=listing_ids[0],
-        trace_id="trace-finmind-qualified-query",
-        security_context=identity.context,
-    )
-    assert isinstance(result, dict)
-    assert result["status"] == "credential_required"
-    assert result["reason_code"] == "source_credential_revoked"
-    assert result["formally_qualified"] is False, result
-    assert result["source_basis_id"] == "FINMIND-FREE-TAIWAN-MARKET-DATA-01"
 
 
 def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contract(

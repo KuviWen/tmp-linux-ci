@@ -289,12 +289,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
             return 0 if report["status"] == "passed" else 1
         if arguments.ticket == "ticket-06-source-probe":
-            if arguments.source_adapter_key_file is None:
-                parser.error("ticket-06-source-probe requires --source-adapter-key-file")
+            if arguments.source_adapter_key_file is None or arguments.source_secret_root is None:
+                parser.error(
+                    "ticket-06-source-probe requires --source-adapter-key-file and "
+                    "--source-secret-root"
+                )
             report = run_ticket_06_source_probe(
                 database_url=arguments.database_url,
                 object_root=arguments.object_root,
                 source_adapter_key_file=arguments.source_adapter_key_file,
+                source_secret_root=arguments.source_secret_root,
             )
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
             return 0 if report["status"] == "passed" else 1

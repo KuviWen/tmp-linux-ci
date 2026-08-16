@@ -193,35 +193,6 @@ class HistoricalAvailabilityClaim:
 
 
 @dataclass(frozen=True)
-class HistoricalArchiveAttestation:
-    provider_id: str
-    archive_id: str
-    archive_version_id: str
-    revision_as_of: datetime
-    credential_version: int
-    credential_lease_pin_event_id: str
-    source_contract_assessment_artifact_id: str
-
-    def __post_init__(self) -> None:
-        if (
-            any(
-                not value.strip()
-                for value in (
-                    self.provider_id,
-                    self.archive_id,
-                    self.archive_version_id,
-                    self.credential_lease_pin_event_id,
-                    self.source_contract_assessment_artifact_id,
-                )
-            )
-            or self.credential_version < 1
-            or self.revision_as_of.tzinfo is None
-            or self.revision_as_of.utcoffset() is None
-        ):
-            raise ValueError("historical_archive_attestation_invalid")
-
-
-@dataclass(frozen=True)
 class CollectedSourceBundleMember:
     dataset_id: str
     distribution_id: str
@@ -253,7 +224,6 @@ class CollectedSourcePartition:
     expected_company_action_ids: frozenset[str] = frozenset()
     market_calendar_evidence_version_id: str | None = None
     revision_kind: SourceRevisionKind = "original"
-    historical_archive_attestation: HistoricalArchiveAttestation | None = None
 
 
 @dataclass(frozen=True)
@@ -838,19 +808,6 @@ class DataSupply:
                     "payload": quarantine_payload,
                 },
             ]
-            historical_assessment = _historical_qualification_assessment_artifact(
-                request=request,
-                collection=collection,
-                decoded=decoded,
-                quarantine_reason=quarantine_reason,
-                raw_object_id=raw_object.object_id,
-                raw_sha256=raw_object.checksum,
-                retrieval_receipt_id=str(retrieval_receipt["artifact_id"]),
-                bundle_member_lineage=member_lineage,
-                source_access_mode=source_access_mode,
-            )
-            if historical_assessment is not None:
-                quarantine_artifacts.append(historical_assessment)
             self._state_store.publish_price_research_evaluation(
                 trace_id=request.trace_id,
                 execution_purpose="price_research",
@@ -1403,98 +1360,6 @@ def _quarantine_reason(
     if observed_listing_ids != requested_listing_ids:
         return "incomplete_coverage"
     return None
-
-
-def _historical_qualification_assessment_artifact(
-    *,
-    request: SourcePartitionRequest,
-    collection: CollectedSourcePartition,
-    decoded: DecodedSourcePartition,
-    quarantine_reason: str,
-    raw_object_id: str,
-    raw_sha256: str,
-    retrieval_receipt_id: str,
-    bundle_member_lineage: list[dict[str, object]],
-    source_access_mode: SourceAccessMode,
-) -> dict[str, object] | None:
-    observed_listing_ids = {
-        item.listing_id
-        for items in (decoded.prices, decoded.company_actions, decoded.listing_lifecycle)
-        for item in items
-    }
-    if (
-        request.mode != "historical"
-        or source_access_mode != "live_provider"
-        or collection.historical_archive_attestation is None
-        or quarantine_reason != "historical_evidence_unverified"
-        or decoded.schema_version not in _APPROVED_PRICE_SCHEMA_VERSIONS
-        or decoded.revision_kind != "original"
-        or decoded.quality_issues
-        or not decoded.identity_assertion_ids
-        or not collection.coverage.complete
-        or collection.coverage.observed_start is None
-        or collection.coverage.observed_end is None
-        or collection.market_calendar_evidence_version_id is None
-        or not collection.reference_graph_lifecycle_verified
-        or not collection.company_action_completeness_verified
-        or observed_listing_ids != set(request.listing_ids)
-        or _bundle_member_quarantine_reason(request, collection) is not None
-        or request.distribution_id is None
-    ):
-        return None
-    integrity_objects = [
-        {"object_id": raw_object_id, "sha256": raw_sha256},
-        *[
-            {
-                "object_id": lineage["raw_object_id"],
-                "sha256": lineage["raw_sha256"],
-            }
-            for lineage in bundle_member_lineage
-        ],
-    ]
-    archive = collection.historical_archive_attestation
-    if archive.revision_as_of > collection.acquired_at:
-        return None
-    payload: dict[str, object] = {
-        "source_id": request.source_id,
-        "source_mode": request.mode,
-        "source_access_mode": source_access_mode,
-        "request_id": request.request_id,
-        "retrieval_receipt_id": retrieval_receipt_id,
-        "acquired_at": _instant(collection.acquired_at),
-        "schema_version": decoded.schema_version,
-        "listing_ids": sorted(request.listing_ids),
-        "observed_dataset_ids": sorted(
-            {
-                request.distribution_id,
-                *(member.distribution_id for member in request.bundle_members),
-            }
-        ),
-        "coverage": _coverage_payload(collection.coverage),
-        "exact_sessions_verified": True,
-        "integrity_objects": integrity_objects,
-        "company_actions_verified": True,
-        "listing_lifecycle_verified": True,
-        "reference_graph_version_id": collection.reference_graph_version_id,
-        "market_calendar_evidence_version_id": (collection.market_calendar_evidence_version_id),
-        "historical_evidence": {
-            "evidence_level": "archive_attested",
-            "provider_id": archive.provider_id,
-            "archive_id": archive.archive_id,
-            "archive_version_id": archive.archive_version_id,
-            "revision_as_of": _instant(archive.revision_as_of),
-            "credential_version": archive.credential_version,
-            "credential_lease_pin_event_id": archive.credential_lease_pin_event_id,
-            "source_contract_assessment_artifact_id": (
-                archive.source_contract_assessment_artifact_id
-            ),
-        },
-    }
-    return {
-        "artifact_id": _artifact_id("historical_qualification_assessment", payload),
-        "artifact_kind": "historical_qualification_assessment",
-        "payload": payload,
-    }
 
 
 def _bundle_member_quarantine_reason(

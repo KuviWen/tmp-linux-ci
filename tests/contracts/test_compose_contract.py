@@ -372,7 +372,12 @@ def test_compose_declares_ticket_06_finmind_credential_lifecycle_acceptance() ->
     assert "ticket-06-source-probe" in source_probe["command"]
     assert "ticket-06-local-key" not in " ".join(source_probe["volumes"])
     assert "ticket-06-source-adapter-key" in " ".join(source_probe["volumes"])
-    assert "ticket-06-source-secrets" not in " ".join(source_probe["volumes"])
+    assert (
+        "ticket-06-source-secrets:/var/lib/stock-forecasting/source-secrets:ro"
+        in source_probe["volumes"]
+    )
+    assert "--source-secret-root" in source_probe["command"]
+    assert source_probe["depends_on"]["ticket-06-api"]["condition"] == "service_healthy"
     assert acceptance["depends_on"]["ticket-06-source-probe"]["condition"] == (
         "service_completed_successfully"
     )
