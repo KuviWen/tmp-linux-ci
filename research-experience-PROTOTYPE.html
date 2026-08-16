@@ -1,0 +1,897 @@
+<!doctype html>
+<!--
+  PROTOTYPE ONLY — synthetic data, no live services, no production dependencies.
+  Plan: three structurally different research experiences, switchable with ?variant=A|B|C,
+  in one throwaway file because this repository does not yet contain a host application.
+-->
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>台美個股趨勢研究介面原型</title>
+  <style>
+    :root {
+      --ink: #111827;
+      --muted: #5d6778;
+      --paper: #f4f1ea;
+      --panel: #fffdf8;
+      --line: #d8d1c4;
+      --navy: #102238;
+      --cyan: #1b7f8c;
+      --up: #16715a;
+      --flat: #a26b08;
+      --down: #b3413a;
+      --soft-up: #e4f3ed;
+      --soft-flat: #fbefd3;
+      --soft-down: #f7e4e1;
+      --focus: #2a6fbb;
+      --shadow: 0 16px 38px rgba(16, 34, 56, .12);
+      color-scheme: light;
+      font-family: "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); }
+    button, input, select { font: inherit; }
+    button, select { cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 3px solid rgba(42,111,187,.35);
+      outline-offset: 2px;
+    }
+    .prototype-warning {
+      background: #17120c;
+      color: #fff4dd;
+      font-size: 12px;
+      letter-spacing: .04em;
+      padding: 8px 18px;
+      text-align: center;
+    }
+    .topbar {
+      align-items: center;
+      background: var(--navy);
+      color: white;
+      display: grid;
+      gap: 18px;
+      grid-template-columns: minmax(230px, 1fr) minmax(300px, 1.5fr) auto;
+      padding: 16px 22px;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+    .brand small { color: #93c7d1; display: block; font-weight: 700; letter-spacing: .12em; }
+    .brand strong { font-family: Georgia, "Noto Serif TC", serif; font-size: 20px; }
+    .search-wrap { position: relative; }
+    .search-wrap input {
+      background: rgba(255,255,255,.98);
+      border: 0;
+      border-radius: 8px;
+      color: var(--ink);
+      padding: 11px 13px;
+      width: 100%;
+    }
+    .controls { align-items: center; display: flex; gap: 8px; }
+    .controls label { color: #bed7dc; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+    .controls select {
+      background: #20374f;
+      border: 1px solid #557087;
+      border-radius: 7px;
+      color: white;
+      padding: 9px 30px 9px 10px;
+    }
+    .focus-row { display: flex; gap: 4px; }
+    .focus-row button {
+      background: transparent;
+      border: 1px solid #607a90;
+      border-radius: 6px;
+      color: #dceaf0;
+      padding: 8px 10px;
+    }
+    .focus-row button.active { background: #f4cb62; border-color: #f4cb62; color: #1a2735; }
+    main { margin: 0 auto; max-width: 1580px; padding: 26px 24px 110px; }
+    .variant-kicker { color: var(--cyan); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .variant-title { font-family: Georgia, "Noto Serif TC", serif; font-size: clamp(28px, 3vw, 43px); margin: 5px 0 4px; }
+    .variant-subtitle { color: var(--muted); margin: 0 0 22px; max-width: 860px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      box-shadow: 0 5px 16px rgba(16,34,56,.05);
+    }
+    .panel-head {
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      padding: 14px 17px;
+    }
+    .panel-head h2, .panel-head h3 { font-size: 15px; margin: 0; }
+    .panel-body { padding: 16px 17px; }
+    .pill {
+      border-radius: 999px;
+      display: inline-flex;
+      font-size: 11px;
+      font-weight: 800;
+      gap: 5px;
+      letter-spacing: .02em;
+      padding: 5px 9px;
+    }
+    .pill.full { background: var(--soft-up); color: var(--up); }
+    .pill.degraded { background: var(--soft-flat); color: #79500a; }
+    .pill.unavailable { background: var(--soft-down); color: var(--down); }
+    .pill.neutral { background: #e8edf2; color: #425366; }
+    .tiny { color: var(--muted); font-size: 11px; }
+    .mono { font-family: Consolas, "SFMono-Regular", monospace; font-size: 11px; }
+    .muted { color: var(--muted); }
+    .up { color: var(--up); }
+    .down { color: var(--down); }
+    .flat { color: var(--flat); }
+    .synthetic-stamp {
+      border: 1px dashed #b89c6a;
+      border-radius: 6px;
+      color: #755c32;
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      padding: 4px 7px;
+      text-transform: uppercase;
+    }
+    .horizon-grid { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0,1fr)); }
+    .forecast-card {
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 15px;
+    }
+    .forecast-card.focused { border: 2px solid var(--focus); padding: 14px; }
+    .forecast-top { align-items: baseline; display: flex; justify-content: space-between; }
+    .forecast-top strong { font-family: Georgia, serif; font-size: 21px; }
+    .prob-main { font-size: 35px; font-weight: 800; line-height: 1; margin: 13px 0 10px; }
+    .probbar {
+      border-radius: 999px;
+      display: flex;
+      height: 9px;
+      margin-bottom: 9px;
+      overflow: hidden;
+    }
+    .probbar .p-up { background: var(--up); }
+    .probbar .p-flat { background: #d29b25; }
+    .probbar .p-down { background: var(--down); }
+    .prob-legend { display: flex; font-size: 11px; justify-content: space-between; }
+    .confidence {
+      border-top: 1px solid #ebe6dc;
+      display: flex;
+      justify-content: space-between;
+      margin-top: 12px;
+      padding-top: 10px;
+    }
+    .no-prediction {
+      align-items: center;
+      background: repeating-linear-gradient(-45deg,#f4f1ea,#f4f1ea 8px,#ebe6dd 8px,#ebe6dd 16px);
+      border-radius: 8px;
+      color: #6a6258;
+      display: flex;
+      font-weight: 700;
+      height: 112px;
+      justify-content: center;
+      margin-top: 12px;
+      text-align: center;
+    }
+    .tabs { display: flex; flex-wrap: wrap; gap: 7px; }
+    .tabs button {
+      background: transparent;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--muted);
+      padding: 7px 10px;
+    }
+    .tabs button.active { background: var(--navy); border-color: var(--navy); color: white; }
+    .factor-list, .source-list, .support-list, .watchlist { display: grid; gap: 8px; }
+    .factor-row {
+      align-items: center;
+      background: #faf8f2;
+      border: 1px solid #e7e1d6;
+      border-radius: 8px;
+      display: grid;
+      gap: 10px;
+      grid-template-columns: 28px 1fr auto;
+      padding: 10px;
+    }
+    .factor-rank {
+      align-items: center;
+      background: #e9e5dd;
+      border-radius: 50%;
+      display: flex;
+      font-size: 11px;
+      font-weight: 800;
+      height: 25px;
+      justify-content: center;
+      width: 25px;
+    }
+    .factor-value { font-family: Consolas, monospace; font-weight: 800; }
+    .source-row, .support-row {
+      border-bottom: 1px solid #e9e3d9;
+      display: grid;
+      gap: 8px;
+      grid-template-columns: 1fr auto;
+      padding: 9px 0;
+    }
+    .source-row:last-child, .support-row:last-child { border-bottom: 0; }
+    .source-row strong, .support-row strong { display: block; font-size: 13px; }
+    .watch-button {
+      align-items: center;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      color: var(--ink);
+      display: grid;
+      gap: 8px;
+      grid-template-columns: 1fr auto;
+      padding: 10px;
+      text-align: left;
+      width: 100%;
+    }
+    .watch-button:hover { background: #f1eee7; }
+    .watch-button.active { background: #e7eef4; border-color: #9ab1c5; }
+    .watch-button strong { display: block; }
+    .watch-prob { color: var(--up); font-weight: 800; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px 9px; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .metric-grid { display: grid; gap: 10px; grid-template-columns: repeat(4, 1fr); }
+    .metric {
+      background: #f6f3ed;
+      border-radius: 8px;
+      padding: 12px;
+    }
+    .metric strong { display: block; font-family: Georgia, serif; font-size: 24px; margin-top: 3px; }
+    .lineage-grid { display: grid; gap: 9px; grid-template-columns: repeat(2,minmax(0,1fr)); }
+    .lineage-card { background: #f6f3ed; border-left: 4px solid #73879a; padding: 11px; }
+    .lineage-card strong { display: block; font-size: 12px; margin-bottom: 4px; }
+    .workbench {
+      display: grid;
+      gap: 14px;
+      grid-template-columns: 230px minmax(520px,1fr) 300px;
+    }
+    .workbench > aside, .workbench > section { min-width: 0; }
+    .workbench-center { display: grid; gap: 14px; }
+    .stock-heading { align-items: flex-start; display: flex; gap: 15px; justify-content: space-between; }
+    .stock-heading h2 { font-family: Georgia, "Noto Serif TC", serif; font-size: 28px; margin: 0 0 3px; }
+    .support-callout {
+      background: #fbefd3;
+      border-left: 4px solid #c1830d;
+      color: #6d4b0c;
+      font-size: 12px;
+      margin: 13px 0 0;
+      padding: 10px 12px;
+    }
+    .dossier-shell { display: grid; gap: 24px; grid-template-columns: minmax(0,1fr) 310px; }
+    .dossier { background: #fffdf8; border-top: 8px solid var(--navy); box-shadow: var(--shadow); padding: 32px clamp(22px,4vw,58px); }
+    .dossier h1 { font-family: Georgia, "Noto Serif TC", serif; font-size: clamp(35px,5vw,64px); letter-spacing: -.03em; line-height: 1.02; margin: 8px 0 12px; }
+    .deck { color: #465261; font-family: Georgia, "Noto Serif TC", serif; font-size: 19px; line-height: 1.6; max-width: 800px; }
+    .decision-band {
+      border-bottom: 1px solid var(--line);
+      border-top: 1px solid var(--line);
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(3,1fr);
+      margin: 28px 0;
+      padding: 18px 0;
+    }
+    .decision-cell { border-right: 1px solid var(--line); padding: 0 18px; }
+    .decision-cell:first-child { padding-left: 0; }
+    .decision-cell:last-child { border-right: 0; }
+    .decision-cell .big { display: block; font-family: Georgia, serif; font-size: 37px; font-weight: 800; }
+    .section-rule { border-top: 3px solid var(--ink); margin-top: 34px; padding-top: 14px; }
+    .section-rule h2 { font-family: Georgia, "Noto Serif TC", serif; font-size: 25px; margin: 0 0 13px; }
+    .evidence-story {
+      border-left: 2px solid #b9c6d1;
+      margin: 14px 0;
+      padding: 2px 0 2px 18px;
+    }
+    .evidence-story blockquote { color: #394758; font-family: Georgia, "Noto Serif TC", serif; font-size: 16px; line-height: 1.65; margin: 7px 0; }
+    .dossier-aside { align-self: start; display: grid; gap: 14px; position: sticky; top: 105px; }
+    .matrix-panel { overflow: hidden; }
+    .matrix-panel table { min-width: 800px; }
+    .matrix-scroll { overflow-x: auto; }
+    .matrix-row { cursor: pointer; }
+    .matrix-row:hover { background: #f1eee7; }
+    .matrix-row.selected { background: #e7eef4; }
+    .matrix-cell {
+      border-radius: 7px;
+      display: grid;
+      gap: 3px;
+      grid-template-columns: auto auto;
+      min-width: 120px;
+      padding: 9px;
+    }
+    .matrix-cell.focused { box-shadow: inset 0 0 0 2px var(--focus); }
+    .matrix-cell strong { font-size: 19px; }
+    .matrix-cell .mini { color: var(--muted); font-size: 10px; }
+    .matrix-cell.up-bg { background: var(--soft-up); }
+    .matrix-cell.flat-bg { background: var(--soft-flat); }
+    .matrix-cell.down-bg { background: var(--soft-down); }
+    .inspector-grid { display: grid; gap: 14px; grid-template-columns: minmax(0,1.2fr) minmax(280px,.8fr); margin-top: 14px; }
+    .spark { height: 86px; width: 100%; }
+    .state-drawer {
+      background: #111827;
+      border: 1px solid #4f6378;
+      bottom: 78px;
+      box-shadow: var(--shadow);
+      color: #d8e5ef;
+      display: none;
+      max-height: 70vh;
+      max-width: 430px;
+      overflow: auto;
+      padding: 17px;
+      position: fixed;
+      right: 18px;
+      width: calc(100vw - 36px);
+      z-index: 60;
+    }
+    .state-drawer.open { display: block; }
+    .state-drawer pre { margin: 0; white-space: pre-wrap; }
+    .variant-switcher {
+      align-items: center;
+      background: #111827;
+      border: 1px solid #506273;
+      border-radius: 14px;
+      bottom: 16px;
+      box-shadow: 0 18px 40px rgba(0,0,0,.3);
+      color: white;
+      display: flex;
+      gap: 8px;
+      left: 50%;
+      padding: 8px;
+      position: fixed;
+      transform: translateX(-50%);
+      z-index: 70;
+    }
+    .variant-switcher button {
+      background: #203249;
+      border: 1px solid #506273;
+      border-radius: 8px;
+      color: white;
+      min-height: 38px;
+      padding: 8px 12px;
+    }
+    .variant-switcher button:hover { background: #2b435d; }
+    .variant-label { min-width: 180px; text-align: center; }
+    .variant-label small { color: #9fb2c4; display: block; font-size: 9px; letter-spacing: .08em; }
+    .variant-label strong { font-size: 13px; }
+    @media (max-width: 1120px) {
+      .topbar { grid-template-columns: 1fr 1fr; }
+      .controls { grid-column: 1 / -1; justify-content: flex-end; }
+      .workbench { grid-template-columns: 190px minmax(450px,1fr); }
+      .workbench > aside:last-child { grid-column: 1 / -1; }
+      .dossier-shell { grid-template-columns: 1fr; }
+      .dossier-aside { grid-template-columns: repeat(2,1fr); position: static; }
+    }
+    @media (max-width: 760px) {
+      .topbar { grid-template-columns: 1fr; position: static; }
+      .controls { grid-column: auto; flex-wrap: wrap; justify-content: flex-start; }
+      main { padding: 20px 14px 115px; }
+      .horizon-grid, .decision-band, .metric-grid, .lineage-grid { grid-template-columns: 1fr; }
+      .workbench { grid-template-columns: 1fr; }
+      .workbench > aside:last-child { grid-column: auto; }
+      .dossier { padding: 24px 18px; }
+      .dossier-aside, .inspector-grid { grid-template-columns: 1fr; }
+      .decision-cell { border-bottom: 1px solid var(--line); border-right: 0; padding: 10px 0; }
+      .variant-switcher { width: calc(100vw - 22px); }
+      .variant-label { flex: 1; min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <aside class="state-drawer" id="state-drawer" aria-label="原型狀態">
+    <pre id="state-output"></pre>
+  </aside>
+  <nav class="variant-switcher" aria-label="原型版本切換器">
+    <button type="button" data-variant-step="-1" aria-label="上一個版本">←</button>
+    <div class="variant-label">
+      <small>PROTOTYPE VARIANT</small>
+      <strong id="variant-label"></strong>
+    </div>
+    <button type="button" data-variant-step="1" aria-label="下一個版本">→</button>
+    <button type="button" id="state-toggle" aria-expanded="false">狀態</button>
+  </nav>
+  <script>
+    (function () {
+      "use strict";
+
+      var VARIANTS = [
+        { id: "A", name: "A · 研究工作台" },
+        { id: "B", name: "B · 證據卷宗" },
+        { id: "C", name: "C · 比較矩陣" }
+      ];
+      var HORIZONS = ["1", "5", "20"];
+      var STOCKS = {
+        "2330.TW": {
+          symbol: "2330.TW", name: "台積電", market: "台灣 · XTAI",
+          probabilities: { "1": [56,25,19], "5": [64,20,16], "20": [48,29,23] }
+        },
+        "2317.TW": {
+          symbol: "2317.TW", name: "鴻海", market: "台灣 · XTAI",
+          probabilities: { "1": [46,30,24], "5": [51,29,20], "20": [43,30,27] }
+        },
+        "AAPL": {
+          symbol: "AAPL", name: "Apple", market: "美國 · XNAS",
+          probabilities: { "1": [52,26,22], "5": [58,23,19], "20": [45,30,25] }
+        },
+        "NVDA": {
+          symbol: "NVDA", name: "NVIDIA", market: "美國 · XNAS",
+          probabilities: { "1": [61,21,18], "5": [68,19,13], "20": [54,24,22] }
+        }
+      };
+      var FACTORS = [
+        { label: "產業相對動能", value: .18, source: "價量特徵快照" },
+        { label: "營收年增率", value: .12, source: "公司公告正規化" },
+        { label: "官方事件影響", value: .09, source: "MOPS／EDGAR 事件" },
+        { label: "匯率趨勢", value: .06, source: "央行／FRED" },
+        { label: "市場寬度", value: .05, source: "市場特徵快照" },
+        { label: "估值分位", value: -.11, source: "基本面特徵" },
+        { label: "20 日波動率", value: -.08, source: "價量特徵快照" },
+        { label: "集中度事件", value: -.07, source: "公司公告事件" },
+        { label: "文字覆蓋缺口", value: -.05, source: "資料支援狀態" },
+        { label: "海外期貨訊號", value: -.04, source: "跨市場特徵" }
+      ];
+      var SOURCES = [
+        { title: "公司月營收公告", meta: "官方文件 · 2026-08-10 18:12 首次觀測", policy: "可保存衍生" },
+        { title: "公司法說簡報", meta: "IR 文件 · 2026-08-08 09:25 首次觀測", policy: "條件式" },
+        { title: "授權新聞摘要", meta: "新聞摘要 · 2026-08-12 07:40 首次觀測", policy: "不保存全文" },
+        { title: "中央銀行利率資料", meta: "總體資料 · 2026-08-09 12:05 首次觀測", policy: "可保存" },
+        { title: "美國產業指標", meta: "官方統計 · 2026-08-11 21:30 首次觀測", policy: "可保存" }
+      ];
+      var HISTORY = [
+        ["2026-08-12", "5 日", "上漲 64%", "待觀測", "trend-shared-v12"],
+        ["2026-08-05", "5 日", "盤整 41%", "上漲", "trend-shared-v12"],
+        ["2026-07-29", "5 日", "上漲 59%", "上漲", "trend-shared-v11"],
+        ["2026-07-22", "5 日", "下跌 46%", "盤整", "trend-shared-v11"],
+        ["2026-07-15", "5 日", "上漲 62%", "上漲", "trend-shared-v10"]
+      ];
+      var STATE = {
+        variant: "A",
+        selectedTicker: "2330.TW",
+        horizon: "5",
+        supportScenario: "degraded",
+        selectedTab: "factors",
+        stateDrawerOpen: false
+      };
+
+      function readUrl() {
+        var params = new URLSearchParams(window.location.search);
+        var variant = (params.get("variant") || "A").toUpperCase();
+        var symbol = (params.get("symbol") || "2330.TW").toUpperCase();
+        var horizon = params.get("horizon") || "5";
+        var scenario = params.get("scenario") || "degraded";
+        STATE.variant = VARIANTS.some(function (v) { return v.id === variant; }) ? variant : "A";
+        STATE.selectedTicker = STOCKS[symbol] ? symbol : "2330.TW";
+        STATE.horizon = HORIZONS.indexOf(horizon) >= 0 ? horizon : "5";
+        STATE.supportScenario = ["full","degraded","unavailable"].indexOf(scenario) >= 0 ? scenario : "degraded";
+      }
+
+      function syncUrl() {
+        var url = new URL(window.location.href);
+        url.searchParams.set("variant", STATE.variant);
+        url.searchParams.set("symbol", STATE.selectedTicker);
+        url.searchParams.set("horizon", STATE.horizon);
+        url.searchParams.set("scenario", STATE.supportScenario);
+        try { window.history.replaceState(null, "", url.href); } catch (error) { /* file URL fallback: state still works */ }
+      }
+
+      function confidence(probabilities) {
+        if (!probabilities) { return null; }
+        var entropy = probabilities.reduce(function (sum, n) {
+          var p = n / 100;
+          return sum - (p ? p * Math.log(p) : 0);
+        }, 0);
+        return Math.max(0, 1 - entropy / Math.log(3));
+      }
+
+      function probabilities(stock, horizon) {
+        if (STATE.supportScenario === "unavailable") { return null; }
+        return stock.probabilities[horizon];
+      }
+
+      function supportStatus() {
+        if (STATE.supportScenario === "full") {
+          return { label: "資料完整", cls: "full", detail: "所有必要模態均達最低覆蓋門檻。" };
+        }
+        if (STATE.supportScenario === "unavailable") {
+          return { label: "不可預測", cls: "unavailable", detail: "價量資料僅 42／252 個交易日，阻斷推論。" };
+        }
+        return { label: "文件降級", cls: "degraded", detail: "新聞／文件只取得 11／15 個允許來源；機率仍輸出，資料支援另行標示。" };
+      }
+
+      function dominant(p) {
+        if (!p) { return { label: "無", value: 0, cls: "unavailable" }; }
+        var values = [
+          { label: "上漲", value: p[0], cls: "up" },
+          { label: "盤整", value: p[1], cls: "flat" },
+          { label: "下跌", value: p[2], cls: "down" }
+        ];
+        values.sort(function (a,b) { return b.value - a.value; });
+        return values[0];
+      }
+
+      function forecastCard(stock, horizon) {
+        var p = probabilities(stock, horizon);
+        var d = dominant(p);
+        var c = confidence(p);
+        if (!p) {
+          return [
+            '<article class="forecast-card ', STATE.horizon === horizon ? "focused" : "", '">',
+              '<div class="forecast-top"><strong>', horizon, ' 日</strong><span class="pill unavailable">阻斷</span></div>',
+              '<div class="no-prediction">不產生機率<br><span class="tiny">必要價量資料不足</span></div>',
+            '</article>'
+          ].join("");
+        }
+        return [
+          '<article class="forecast-card ', STATE.horizon === horizon ? "focused" : "", '">',
+            '<div class="forecast-top"><strong>', horizon, ' 日</strong><span class="tiny">標籤：交易日區間</span></div>',
+            '<div class="prob-main ', d.cls, '">', d.label, ' ', d.value, '%</div>',
+            '<div class="probbar" aria-label="上漲 ', p[0], '%、盤整 ', p[1], '%、下跌 ', p[2], '%">',
+              '<span class="p-up" style="width:', p[0], '%"></span>',
+              '<span class="p-flat" style="width:', p[1], '%"></span>',
+              '<span class="p-down" style="width:', p[2], '%"></span>',
+            '</div>',
+            '<div class="prob-legend"><span class="up">上 ', p[0], '%</span><span class="flat">盤 ', p[1], '%</span><span class="down">下 ', p[2], '%</span></div>',
+            '<div class="confidence"><span class="tiny">信心分數（1 − 正規化熵）</span><strong>', c.toFixed(2), '</strong></div>',
+          '</article>'
+        ].join("");
+      }
+
+      function header() {
+        var options = Object.keys(STOCKS).map(function (symbol) {
+          var s = STOCKS[symbol];
+          return '<option value="' + symbol + '">' + symbol + " · " + s.name + '</option>' +
+            '<option value="' + s.name + '">' + s.name + " · " + symbol + '</option>';
+        }).join("");
+        return [
+          '<div class="prototype-warning">合成示例資料 · 不連接真實行情 · 不是投資建議 · PROTOTYPE ONLY</div>',
+          '<header class="topbar">',
+            '<div class="brand"><small>TWIN MARKET SIGNAL LAB</small><strong>台美個股趨勢研究</strong></div>',
+            '<div class="search-wrap">',
+              '<input id="stock-search" list="stock-options" value="', STATE.selectedTicker, '" aria-label="搜尋股票代碼或名稱" placeholder="搜尋 2330.TW、AAPL、NVDA…">',
+              '<datalist id="stock-options">', options, '</datalist>',
+            '</div>',
+            '<div class="controls">',
+              '<div><label for="scenario-select">資料情境</label><br>',
+                '<select id="scenario-select">',
+                  '<option value="full"', STATE.supportScenario === "full" ? " selected" : "", '>完整</option>',
+                  '<option value="degraded"', STATE.supportScenario === "degraded" ? " selected" : "", '>文件降級</option>',
+                  '<option value="unavailable"', STATE.supportScenario === "unavailable" ? " selected" : "", '>價量不足</option>',
+                '</select>',
+              '</div>',
+              '<div><label>聚焦期間</label><div class="focus-row">',
+                HORIZONS.map(function (h) {
+                  return '<button type="button" data-horizon="' + h + '" class="' + (STATE.horizon === h ? "active" : "") + '">' + h + ' 日</button>';
+                }).join(""),
+              '</div></div>',
+            '</div>',
+          '</header>'
+        ].join("");
+      }
+
+      function stockHeading(stock) {
+        var status = supportStatus();
+        return [
+          '<div class="stock-heading">',
+            '<div><span class="variant-kicker">', stock.market, '</span><h2>', stock.name, ' <span class="mono">', stock.symbol, '</span></h2>',
+              '<span class="tiny">預測時間：2026-08-12 市場收盤後 · 可觀測截止 20:00 UTC</span></div>',
+            '<div><span class="synthetic-stamp">synthetic</span> <span class="pill ', status.cls, '">', status.label, '</span></div>',
+          '</div>',
+          status.cls !== "full" ? '<div class="support-callout">' + status.detail + '</div>' : ""
+        ].join("");
+      }
+
+      function factors(limit) {
+        return '<div class="factor-list">' + FACTORS.slice(0, limit || 10).map(function (factor, index) {
+          return [
+            '<div class="factor-row">',
+              '<span class="factor-rank">', index + 1, '</span>',
+              '<span><strong>', factor.label, '</strong><br><span class="tiny">', factor.source, ' · 模型歸因，非因果</span></span>',
+              '<span class="factor-value ', factor.value >= 0 ? "up" : "down", '">', factor.value >= 0 ? "+" : "", factor.value.toFixed(2), '</span>',
+            '</div>'
+          ].join("");
+        }).join("") + '</div>';
+      }
+
+      function sourceList() {
+        return '<div class="source-list">' + SOURCES.map(function (source) {
+          return [
+            '<div class="source-row"><span><strong>', source.title, '</strong><span class="tiny">', source.meta, '</span></span>',
+            '<span class="pill neutral">', source.policy, '</span></div>'
+          ].join("");
+        }).join("") + '</div>';
+      }
+
+      function supportList() {
+        var scenario = STATE.supportScenario;
+        var rows = [
+          ["價量", scenario === "unavailable" ? "42／252" : "252／252", scenario === "unavailable" ? "unavailable" : "full"],
+          ["基本面", "最新 24 天", "full"],
+          ["總體", "最新 5 天", "full"],
+          ["文件／新聞", scenario === "full" ? "15／15" : scenario === "degraded" ? "11／15" : "0／15", scenario === "full" ? "full" : scenario === "degraded" ? "degraded" : "unavailable"],
+          ["授權策略", scenario === "full" ? "全部允許" : "摘要／衍生限定", scenario === "full" ? "full" : "degraded"]
+        ];
+        return '<div class="support-list">' + rows.map(function (row) {
+          var labels = { full: "完整", degraded: "降級", unavailable: "不足" };
+          return '<div class="support-row"><span><strong>' + row[0] + '</strong><span class="tiny">' + row[1] + '</span></span><span class="pill ' + row[2] + '">' + labels[row[2]] + '</span></div>';
+        }).join("") + '</div>';
+      }
+
+      function historyTable() {
+        return [
+          '<div style="overflow:auto"><table><thead><tr><th>產生時間</th><th>期間</th><th>當時預測</th><th>實現結果</th><th>模型版本</th></tr></thead><tbody>',
+          HISTORY.map(function (row) {
+            return '<tr>' + row.map(function (cell, index) { return '<td class="' + (index === 4 ? "mono" : "") + '">' + cell + '</td>'; }).join("") + '</tr>';
+          }).join(""),
+          '</tbody></table></div>'
+        ].join("");
+      }
+
+      function backtest() {
+        return [
+          '<div class="metric-grid">',
+            '<div class="metric"><span class="tiny">Macro-F1 · 5 日</span><strong>0.412</strong><span class="tiny up">門檻 ≥ 0.39</span></div>',
+            '<div class="metric"><span class="tiny">ECE · 5 日</span><strong>0.047</strong><span class="tiny up">門檻 ≤ 0.06</span></div>',
+            '<div class="metric"><span class="tiny">Rank IC</span><strong>0.083</strong><span class="tiny up">門檻 ≥ 0.06</span></div>',
+            '<div class="metric"><span class="tiny">最大策略回撤</span><strong>−8.6%</strong><span class="tiny">研究指標，不代表報酬</span></div>',
+          '</div>',
+          '<svg class="spark" viewBox="0 0 600 90" role="img" aria-label="八季滾動回測示意">',
+            '<line x1="0" y1="70" x2="600" y2="70" stroke="#d8d1c4"/>',
+            '<polyline points="0,62 75,55 150,59 225,42 300,48 375,30 450,36 525,20 600,24" fill="none" stroke="#1b7f8c" stroke-width="3"/>',
+            '<polyline points="0,66 75,65 150,64 225,63 300,61 375,60 450,59 525,57 600,55" fill="none" stroke="#b3413a" stroke-dasharray="5 4" stroke-width="2"/>',
+          '</svg>',
+          '<p class="tiny">合成八季 walk-forward 結果；所有閾值、成本與公司行動處理均鎖定於回測規格版本。</p>'
+        ].join("");
+      }
+
+      function lineage() {
+        var cards = [
+          ["模型","trend-shared-v12 · sha256:8f2d…"],
+          ["特徵快照","fs-20260812-XTAI-0192"],
+          ["資料清單","dm-7e9a · point-in-time"],
+          ["指派事件","prod-20260801-03"],
+          ["門檻政策","promotion-gate-v1"],
+          ["預測事件","pred-2330-20260812-5d"]
+        ];
+        return '<div class="lineage-grid">' + cards.map(function (card) {
+          return '<div class="lineage-card"><strong>' + card[0] + '</strong><span class="mono">' + card[1] + '</span></div>';
+        }).join("") + '</div><p class="tiny">識別碼在正式系統中可連回不可變事件帳本；此原型只展示資訊層級。</p>';
+      }
+
+      function tabContent() {
+        if (STATE.selectedTab === "history") { return historyTable(); }
+        if (STATE.selectedTab === "backtest") { return backtest(); }
+        if (STATE.selectedTab === "lineage") { return lineage(); }
+        return factors(10);
+      }
+
+      function tabs() {
+        var items = [["factors","影響因素"],["history","歷史預測"],["backtest","滾動回測"],["lineage","版本追溯"]];
+        return '<div class="tabs">' + items.map(function (item) {
+          return '<button type="button" data-tab="' + item[0] + '" class="' + (STATE.selectedTab === item[0] ? "active" : "") + '">' + item[1] + '</button>';
+        }).join("") + '</div>';
+      }
+
+      function variantA(stock) {
+        return [
+          '<main>',
+            '<div class="variant-kicker">Variant A · Command Center</div>',
+            '<h1 class="variant-title">研究工作台</h1>',
+            '<p class="variant-subtitle">先選標的，再在同一視野核對預測、證據、資料支援與版本。適合每日深度研究與例外處理。</p>',
+            '<div class="workbench">',
+              '<aside class="panel"><div class="panel-head"><h2>觀察清單</h2><span class="tiny">4</span></div><div class="panel-body watchlist">',
+                Object.keys(STOCKS).map(function (symbol) {
+                  var s = STOCKS[symbol];
+                  var p = probabilities(s, STATE.horizon);
+                  var d = dominant(p);
+                  return '<button type="button" class="watch-button ' + (symbol === stock.symbol ? "active" : "") + '" data-symbol="' + symbol + '"><span><strong>' + symbol + '</strong><span class="tiny">' + s.name + ' · ' + s.market + '</span></span><span class="watch-prob ' + d.cls + '">' + (p ? d.value + "%" : "—") + '</span></button>';
+                }).join(""),
+              '</div></aside>',
+              '<section class="workbench-center">',
+                '<div class="panel"><div class="panel-body">', stockHeading(stock),
+                  '<div class="horizon-grid" style="margin-top:16px">', HORIZONS.map(function (h) { return forecastCard(stock,h); }).join(""), '</div>',
+                '</div></div>',
+                '<div class="panel"><div class="panel-head"><h2>研究細節</h2>', tabs(), '</div><div class="panel-body">', tabContent(), '</div></div>',
+              '</section>',
+              '<aside style="display:grid;gap:14px;align-content:start">',
+                '<div class="panel"><div class="panel-head"><h2>資料支援</h2><span class="pill ', supportStatus().cls, '">', supportStatus().label, '</span></div><div class="panel-body">', supportList(), '</div></div>',
+                '<div class="panel"><div class="panel-head"><h2>近期證據</h2><span class="tiny">可觀測時間</span></div><div class="panel-body">', sourceList(), '</div></div>',
+                '<div class="panel"><div class="panel-head"><h2>快速追溯</h2></div><div class="panel-body">', lineage(), '</div></div>',
+              '</aside>',
+            '</div>',
+          '</main>'
+        ].join("");
+      }
+
+      function decisionCell(stock, h) {
+        var p = probabilities(stock,h);
+        var d = dominant(p);
+        return [
+          '<div class="decision-cell">',
+            '<span class="tiny">', h, ' 個交易日</span>',
+            p ? '<span class="big ' + d.cls + '">' + d.value + '%</span><strong>' + d.label + '</strong><div class="tiny">信心 ' + confidence(p).toFixed(2) + '</div>' :
+                '<span class="big">—</span><strong>不可預測</strong><div class="tiny">必要資料不足</div>',
+          '</div>'
+        ].join("");
+      }
+
+      function variantB(stock) {
+        var status = supportStatus();
+        return [
+          '<main>',
+            '<div class="variant-kicker">Variant B · Evidence Dossier</div>',
+            '<h1 class="variant-title">證據卷宗</h1>',
+            '<p class="variant-subtitle">把預測當作一份可閱讀、可引用、可追溯的研究文件；適合投資委員會前的完整複核。</p>',
+            '<div class="dossier-shell">',
+              '<article class="dossier">',
+                '<div><span class="synthetic-stamp">synthetic research note</span> <span class="pill ', status.cls, '">', status.label, '</span></div>',
+                '<h1>', stock.name, '<br><span class="mono">', stock.symbol, '</span></h1>',
+                '<p class="deck">三期間訊號並不一致：短中期訊號較集中，長期機率較分散。先閱讀資料支援，再把模型歸因與原始證據分開核對。</p>',
+                '<div class="decision-band">', HORIZONS.map(function (h) { return decisionCell(stock,h); }).join(""), '</div>',
+                status.cls !== "full" ? '<div class="support-callout">' + status.detail + ' 信心分數不因缺資料而重命名；兩者必須並列閱讀。</div>' : "",
+                '<section class="section-rule"><h2>一、主要影響因素</h2><p class="muted">依絕對貢獻排序；正負號代表對目前分類的推動方向，不代表因果關係。</p>', factors(10), '</section>',
+                '<section class="section-rule"><h2>二、證據鏈</h2>',
+                  SOURCES.map(function (source, index) {
+                    return '<div class="evidence-story"><span class="variant-kicker">Evidence ' + (index + 1) + '</span><blockquote>「' + source.title + '」被正規化為可觀測事件；介面保留來源角色、首次觀測時間與授權策略。</blockquote><span class="tiny">' + source.meta + ' · ' + source.policy + '</span></div>';
+                  }).join(""),
+                '</section>',
+                '<section class="section-rule"><h2>三、歷史預測比較</h2>', historyTable(), '</section>',
+                '<section class="section-rule"><h2>四、滾動回測</h2>', backtest(), '</section>',
+                '<section class="section-rule"><h2>五、可復現版本</h2>', lineage(), '</section>',
+              '</article>',
+              '<aside class="dossier-aside">',
+                '<div class="panel"><div class="panel-head"><h2>閱讀順序</h2></div><div class="panel-body">',
+                  '<ol class="tiny" style="line-height:2;margin:0;padding-left:20px"><li>資料支援</li><li>三期間機率</li><li>模型歸因</li><li>來源證據</li><li>歷史與回測</li><li>版本追溯</li></ol>',
+                '</div></div>',
+                '<div class="panel"><div class="panel-head"><h2>資料支援</h2></div><div class="panel-body">', supportList(), '</div></div>',
+                '<div class="panel"><div class="panel-head"><h2>目前焦點</h2></div><div class="panel-body"><strong>', STATE.horizon, ' 日視窗</strong><p class="tiny">可用頁首控制切換；卷宗仍保留三期間全貌。</p></div></div>',
+                '<div class="panel"><div class="panel-head"><h2>研究界線</h2></div><div class="panel-body tiny">不顯示即時價格、不提供買賣指令。所有內容皆為合成資料，用於驗證資訊架構。</div></div>',
+              '</aside>',
+            '</div>',
+          '</main>'
+        ].join("");
+      }
+
+      function matrixCell(stock,h) {
+        var p = probabilities(stock,h);
+        if (!p) {
+          return '<div class="matrix-cell down-bg ' + (STATE.horizon === h ? "focused" : "") + '"><strong>—</strong><span>阻斷</span><span class="mini">資料不足</span></div>';
+        }
+        var d = dominant(p);
+        var bg = d.cls === "up" ? "up-bg" : d.cls === "flat" ? "flat-bg" : "down-bg";
+        return '<div class="matrix-cell ' + bg + ' ' + (STATE.horizon === h ? "focused" : "") + '"><strong class="' + d.cls + '">' + d.value + '%</strong><span>' + d.label + '</span><span class="mini">上 ' + p[0] + ' · 盤 ' + p[1] + ' · 下 ' + p[2] + '</span><span class="mini">信心 ' + confidence(p).toFixed(2) + '</span></div>';
+      }
+
+      function variantC(stock) {
+        var status = supportStatus();
+        return [
+          '<main>',
+            '<div class="variant-kicker">Variant C · Triage Matrix</div>',
+            '<h1 class="variant-title">比較矩陣</h1>',
+            '<p class="variant-subtitle">先跨股票找出分歧、低信心與資料異常，再展開單一標的。適合早會篩選與研究任務分派。</p>',
+            '<section class="panel matrix-panel">',
+              '<div class="panel-head"><h2>跨市場訊號板</h2><span class="tiny">點擊列以檢視 · 藍框為目前聚焦期間</span></div>',
+              '<div class="matrix-scroll"><table><thead><tr><th>標的</th><th>1 日</th><th>5 日</th><th>20 日</th><th>資料支援</th><th>動作</th></tr></thead><tbody>',
+                Object.keys(STOCKS).map(function (symbol) {
+                  var s = STOCKS[symbol];
+                  return [
+                    '<tr class="matrix-row ', symbol === stock.symbol ? "selected" : "", '" data-symbol="', symbol, '">',
+                      '<td><strong>', s.symbol, '</strong><br><span class="tiny">', s.name, ' · ', s.market, '</span></td>',
+                      '<td>', matrixCell(s,"1"), '</td><td>', matrixCell(s,"5"), '</td><td>', matrixCell(s,"20"), '</td>',
+                      '<td><span class="pill ', status.cls, '">', status.label, '</span><br><span class="tiny">', status.detail, '</span></td>',
+                      '<td><button type="button" class="watch-button" data-symbol="', symbol, '"><strong>展開 →</strong></button></td>',
+                    '</tr>'
+                  ].join("");
+                }).join(""),
+              '</tbody></table></div>',
+            '</section>',
+            '<div class="inspector-grid">',
+              '<section class="panel"><div class="panel-body">', stockHeading(stock),
+                '<div style="margin-top:17px">', tabs(), '</div><div style="margin-top:14px">', tabContent(), '</div>',
+              '</div></section>',
+              '<aside style="display:grid;gap:14px;align-content:start">',
+                '<div class="panel"><div class="panel-head"><h2>三期間明細</h2></div><div class="panel-body"><div class="horizon-grid" style="grid-template-columns:1fr">', HORIZONS.map(function (h) { return forecastCard(stock,h); }).join(""), '</div></div></div>',
+                '<div class="panel"><div class="panel-head"><h2>資料支援</h2></div><div class="panel-body">', supportList(), '</div></div>',
+                '<div class="panel"><div class="panel-head"><h2>近期來源</h2></div><div class="panel-body">', sourceList(), '</div></div>',
+              '</aside>',
+            '</div>',
+          '</main>'
+        ].join("");
+      }
+
+      function render() {
+        var stock = STOCKS[STATE.selectedTicker];
+        var body = STATE.variant === "B" ? variantB(stock) : STATE.variant === "C" ? variantC(stock) : variantA(stock);
+        document.getElementById("root").innerHTML = header() + body;
+        document.getElementById("variant-label").textContent = VARIANTS.filter(function (v) { return v.id === STATE.variant; })[0].name;
+        document.getElementById("state-output").textContent = JSON.stringify({
+          variant: STATE.variant,
+          selectedTicker: STATE.selectedTicker,
+          horizon: STATE.horizon + " trading days",
+          supportScenario: STATE.supportScenario,
+          selectedDetailView: STATE.selectedTab,
+          predictionPolicy: STATE.supportScenario === "unavailable" ? "blocked" : "emitted",
+          confidenceDefinition: "1 - normalized entropy",
+          mockAsOf: "2026-08-12T20:00:00Z",
+          dataMode: "synthetic prototype only"
+        }, null, 2);
+        document.getElementById("state-drawer").classList.toggle("open", STATE.stateDrawerOpen);
+        document.getElementById("state-toggle").setAttribute("aria-expanded", String(STATE.stateDrawerOpen));
+        syncUrl();
+      }
+
+      function selectSymbol(raw) {
+        var value = String(raw || "").trim().toUpperCase();
+        var match = STOCKS[value] ? value : Object.keys(STOCKS).find(function (symbol) {
+          return STOCKS[symbol].name.toUpperCase() === value;
+        });
+        if (match) {
+          STATE.selectedTicker = match;
+          render();
+        }
+      }
+
+      document.addEventListener("click", function (event) {
+        var symbolButton = event.target.closest("[data-symbol]");
+        if (symbolButton) {
+          selectSymbol(symbolButton.getAttribute("data-symbol"));
+          return;
+        }
+        var horizonButton = event.target.closest("[data-horizon]");
+        if (horizonButton) {
+          STATE.horizon = horizonButton.getAttribute("data-horizon");
+          render();
+          return;
+        }
+        var tabButton = event.target.closest("[data-tab]");
+        if (tabButton) {
+          STATE.selectedTab = tabButton.getAttribute("data-tab");
+          render();
+          return;
+        }
+        var stepButton = event.target.closest("[data-variant-step]");
+        if (stepButton) {
+          var current = VARIANTS.findIndex(function (v) { return v.id === STATE.variant; });
+          var step = Number(stepButton.getAttribute("data-variant-step"));
+          STATE.variant = VARIANTS[(current + step + VARIANTS.length) % VARIANTS.length].id;
+          render();
+          return;
+        }
+        if (event.target.closest("#state-toggle")) {
+          STATE.stateDrawerOpen = !STATE.stateDrawerOpen;
+          render();
+        }
+      });
+
+      document.addEventListener("change", function (event) {
+        if (event.target.id === "scenario-select") {
+          STATE.supportScenario = event.target.value;
+          render();
+        }
+        if (event.target.id === "stock-search") { selectSymbol(event.target.value); }
+      });
+
+      document.addEventListener("keydown", function (event) {
+        if (event.target.matches("input, select, textarea")) {
+          if (event.target.id === "stock-search" && event.key === "Enter") { selectSymbol(event.target.value); }
+          return;
+        }
+        if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+          var current = VARIANTS.findIndex(function (v) { return v.id === STATE.variant; });
+          var step = event.key === "ArrowRight" ? 1 : -1;
+          STATE.variant = VARIANTS[(current + step + VARIANTS.length) % VARIANTS.length].id;
+          render();
+        }
+      });
+
+      readUrl();
+      render();
+    }());
+  </script>
+</body>
+</html>
