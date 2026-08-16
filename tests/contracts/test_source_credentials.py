@@ -79,6 +79,7 @@ def test_encrypted_filesystem_secret_provider_survives_restart_without_plaintext
     monotonic_time[0] += 300
     with pytest.raises(KeyError, match="source_credential_lease_expired"):
         lease.credential_fields()
+    assert lease.revoked is True
 
     lease.revoke()
     assert lease.revoked is True

@@ -17,6 +17,7 @@ from stock_forecasting.alpaca_market_data import (
 )
 from stock_forecasting.authorization import (
     AuthorizationPolicy,
+    CurrentSourcePrincipalAttributes,
     EntitlementStatus,
     LocalApiKeyIdentity,
     PolicyDeniedOutcome,
@@ -69,12 +70,20 @@ class Application:
         authorization_policy_set_id: str,
         authorization_policy_bootstrap: AuthorizationPolicy | None,
         fixed_security_time: datetime | None,
+        source_adapter_security_context: SecurityContext,
         secret_provider: SecretProvider | None = None,
         source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
         self.local_identity = local_identity
         self.security_context: SecurityContext = local_identity.context
+        if source_adapter_security_context.principal_id == self.security_context.principal_id:
+            raise ValueError("source_adapter_identity_must_be_distinct")
+        if source_adapter_security_context.environment != self.security_context.environment:
+            raise ValueError("source_adapter_identity_environment_mismatch")
+        if source_adapter_security_context.scopes != frozenset({"market_data.collect"}):
+            raise ValueError("source_adapter_identity_scope_invalid")
+        self.source_adapter_security_context = source_adapter_security_context
         self.authorization_policy_repository = AuthorizationPolicyRepository(self.state_store)
         if authorization_policy_bootstrap is not None:
             self.authorization_policy_repository.install(
@@ -103,6 +112,7 @@ class Application:
                     principal_id=principal_id,
                 )
             ),
+            source_principal_attributes=self._source_principal_attributes,
             object_repository=self.object_repository,
         )
         self.security_audit = SecurityAudit(self.state_store)
@@ -115,6 +125,7 @@ class Application:
             secret_provider=self.secret_provider,
             source_credential_validators=source_credential_validators or {},
             clock=lambda: self._fixed_security_time or datetime.now(UTC),
+            source_adapter_security_context=self.source_adapter_security_context,
         )
         self.alpaca_price_adapter = self.build_alpaca_price_adapter(
             transport=UrllibProviderHttpTransport(),
@@ -164,8 +175,8 @@ class Application:
                 credential_resolver=ManagedSourceCredentialResolver(
                     self.state_store,
                     self.secret_provider,
-                    workload_principal_id=self.security_context.principal_id,
-                    environment=self.security_context.environment,
+                    workload_principal_id=self.source_adapter_security_context.principal_id,
+                    environment=self.source_adapter_security_context.environment,
                     clock=lambda: self._fixed_security_time or datetime.now(UTC),
                 ),
                 transport=transport,
@@ -177,6 +188,21 @@ class Application:
                 reference_graph=reference_graph,
             ),
         )
+
+    def _source_principal_attributes(
+        self,
+        principal_id: str,
+    ) -> CurrentSourcePrincipalAttributes:
+        contexts = {
+            self.security_context.principal_id: self.security_context,
+            self.source_adapter_security_context.principal_id: (
+                self.source_adapter_security_context
+            ),
+        }
+        context = contexts.get(principal_id)
+        if context is None:
+            raise KeyError("source_principal_attributes_unavailable")
+        return CurrentSourcePrincipalAttributes.from_verified_security_context(context)
 
     def authenticate_local_request(
         self,
@@ -221,6 +247,7 @@ def build_test_application(
     authorization_time: datetime | None = None,
     authorization_policy_set_id: str | None = None,
     authorization_policy_override: AuthorizationPolicy | None = None,
+    source_adapter_security_context: SecurityContext | None = None,
     secret_provider: SecretProvider | None = None,
     source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
 ) -> Application:
@@ -244,6 +271,18 @@ def build_test_application(
             policy_markets=policy_markets,
         )
     )
+    resolved_source_adapter_context = (
+        source_adapter_security_context
+        or LocalApiKeyIdentity.issue(
+            owner="test-source-adapter",
+            environment=resolved_identity.context.environment,
+            scopes={"market_data.collect"},
+            issued_at=identity_time - timedelta(minutes=1),
+            expires_at=identity_time + timedelta(hours=1),
+            data_protection_classes={"licensed", "secret"},
+            principal_classification="individual_non_commercial",
+        ).context
+    )
     return Application(
         observed_at=observed_at,
         object_root=root,
@@ -257,6 +296,7 @@ def build_test_application(
         authorization_policy_set_id=authorization_policy_set_id or f"test-policy-{uuid4()}",
         authorization_policy_bootstrap=authorization_policy_bootstrap,
         fixed_security_time=authorization_time or observed_at,
+        source_adapter_security_context=resolved_source_adapter_context,
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
     )
@@ -273,9 +313,22 @@ def build_application(
     relay_worker_id: str | None = None,
     local_identity: LocalApiKeyIdentity,
     authorization_policy_set_id: str,
+    source_adapter_security_context: SecurityContext | None = None,
     secret_provider: SecretProvider | None = None,
     source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
 ) -> Application:
+    resolved_source_adapter_context = (
+        source_adapter_security_context
+        or LocalApiKeyIdentity.issue(
+            owner="acceptance-source-adapter",
+            environment=local_identity.context.environment,
+            scopes={"market_data.collect"},
+            issued_at=observed_at - timedelta(minutes=1),
+            expires_at=observed_at + timedelta(hours=1),
+            data_protection_classes={"licensed", "secret"},
+            principal_classification="individual_non_commercial",
+        ).context
+    )
     return Application(
         observed_at=observed_at,
         object_root=object_root,
@@ -289,6 +342,7 @@ def build_application(
         authorization_policy_set_id=authorization_policy_set_id,
         authorization_policy_bootstrap=None,
         fixed_security_time=None,
+        source_adapter_security_context=resolved_source_adapter_context,
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
     )

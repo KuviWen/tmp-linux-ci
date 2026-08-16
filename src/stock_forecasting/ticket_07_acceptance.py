@@ -61,13 +61,16 @@ def run_ticket_07_acceptance(
     object_root: Path,
     base_url: str,
     key_file: Path,
+    source_adapter_key_file: Path,
     source_secret_root: Path,
 ) -> dict[str, object]:
     identity = LocalApiKeyIdentity.load(key_file)
+    source_adapter_identity = LocalApiKeyIdentity.load(source_adapter_key_file)
     state_store = StateStore(database_url, create_schema=False)
-    policy = AuthorizationPolicyRepository(state_store).get(
+    policy_repository = AuthorizationPolicyRepository(state_store)
+    source_adapter_policy = policy_repository.get(
         TICKET_07_ENGINEERING_POLICY_SET,
-        principal_id=identity.context.principal_id,
+        principal_id=source_adapter_identity.context.principal_id,
     )
     manifest = load_us_stock_pool_manifest()
     listing = manifest.listings[0]
@@ -87,8 +90,8 @@ def run_ticket_07_acceptance(
             credential_resolver=ManagedSourceCredentialResolver(
                 state_store,
                 secret_provider,
-                workload_principal_id=identity.context.principal_id,
-                environment=identity.context.environment,
+                workload_principal_id=source_adapter_identity.context.principal_id,
+                environment=source_adapter_identity.context.environment,
             ),
             transport=transport,
             clock=lambda: datetime.now(UTC),
@@ -100,8 +103,8 @@ def run_ticket_07_acceptance(
         ),
     )
     data_supply = DataSupply(
-        authorization_policy=policy,
-        security_context=identity.context,
+        authorization_policy=source_adapter_policy,
+        security_context=source_adapter_identity.context,
         adapters={"alpaca-us-stock-bars": adapter},
         object_repository=FilesystemObjectRepository(object_root),
         state_store=state_store,

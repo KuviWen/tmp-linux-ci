@@ -22,8 +22,9 @@ COPY .github ./.github
 COPY alembic.ini dagster-workspace.yaml ./
 RUN mkdir -p /var/lib/stock-forecasting/objects /var/lib/stock-forecasting/exports \
     /var/lib/stock-forecasting/source-secrets \
-    /var/lib/dagster /run/stock-forecasting \
-    && chown -R app:app /var/lib/stock-forecasting /var/lib/dagster /run/stock-forecasting
+    /var/lib/dagster /run/stock-forecasting /run/stock-forecasting-source-adapter \
+    && chown -R app:app /var/lib/stock-forecasting /var/lib/dagster \
+    /run/stock-forecasting /run/stock-forecasting-source-adapter
 
 USER app
 

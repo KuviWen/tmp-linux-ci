@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -46,6 +47,16 @@ _SOURCE_CONTRACT_REASON_CODES = frozenset(
         "source_contract_unavailable",
     }
 )
+_SECRET_CHECKOUT_UNAVAILABLE_REASONS = frozenset(
+    {
+        "source_credential_lease_expired",
+        "source_credential_lease_not_yet_valid",
+        "source_credential_lease_revoked",
+        "source_credential_secret_unavailable",
+    }
+)
+_SECRET_CHECKOUT_CORRUPT_REASONS = frozenset({"source_credential_secret_corrupt"})
+_MAX_CACHED_SECRET_LEASES = 64
 
 
 @dataclass(frozen=True)
@@ -192,11 +203,17 @@ class SecretLease:
         if self.revoked:
             raise SecretUnavailableError("source_credential_lease_revoked")
         if self._monotonic_clock() >= self._monotonic_deadline:
+            self.revoke()
             raise SecretUnavailableError("source_credential_lease_expired")
         return dict(self._credential_fields)
 
+    @property
+    def active(self) -> bool:
+        return not self.revoked and self._monotonic_clock() < self._monotonic_deadline
+
     def revoke(self) -> None:
         self._revoked = True
+        self._credential_fields = MappingProxyType({})
 
 
 class SecretUnavailableError(KeyError):
@@ -204,6 +221,10 @@ class SecretUnavailableError(KeyError):
 
 
 class SecretCorruptError(ValueError):
+    pass
+
+
+class SecretWriteError(RuntimeError):
     pass
 
 
@@ -493,28 +514,44 @@ class AuditedSecretCheckout:
             trace_id=trace_id,
             authorization=authorization,
         )
+        failure: tuple[type[SecretUnavailableError] | type[SecretCorruptError], str, str] | None = (
+            None
+        )
         try:
             lease = self._secret_provider.checkout(SecretRef(secret_ref_id), use_context)
-        except (SecretUnavailableError, SecretCorruptError) as error:
-            self._state_store.record_security_event(
-                event_id=str(uuid4()),
-                action="source_credential.checkout",
-                outcome="failed",
-                reason_code=str(error.args[0]),
-                trace_id=trace_id,
-                authorization=authorization,
+        except SecretUnavailableError as error:
+            supplied_reason = error.args[0] if error.args else None
+            reason_code = (
+                supplied_reason
+                if supplied_reason in _SECRET_CHECKOUT_UNAVAILABLE_REASONS
+                else "source_credential_secret_unavailable"
             )
-            raise
+            failure = (SecretUnavailableError, str(reason_code), str(reason_code))
+        except SecretCorruptError as error:
+            supplied_reason = error.args[0] if error.args else None
+            reason_code = (
+                supplied_reason
+                if supplied_reason in _SECRET_CHECKOUT_CORRUPT_REASONS
+                else "source_credential_secret_corrupt"
+            )
+            failure = (SecretCorruptError, str(reason_code), str(reason_code))
         except Exception:
+            failure = (
+                SecretUnavailableError,
+                "source_credential_secret_unavailable",
+                "source_credential_checkout_failed",
+            )
+        if failure is not None:
+            error_type, reason_code, audit_reason_code = failure
             self._state_store.record_security_event(
                 event_id=str(uuid4()),
                 action="source_credential.checkout",
                 outcome="failed",
-                reason_code="source_credential_checkout_failed",
+                reason_code=audit_reason_code,
                 trace_id=trace_id,
                 authorization=authorization,
             )
-            raise
+            raise error_type(reason_code) from None
         try:
             self._state_store.record_security_event(
                 event_id=str(uuid4()),
@@ -564,12 +601,15 @@ class AuditedSecretWrite:
             trace_id=trace_id,
             authorization=audit_context,
         )
+        write_failed = False
         try:
             secret_ref = self._secret_provider.put(
                 provider_id=provider_id,
                 credential_fields=credential_fields,
             )
         except Exception:
+            write_failed = True
+        if write_failed:
             self._state_store.record_security_event(
                 event_id=str(uuid4()),
                 action="source_credential.write",
@@ -578,7 +618,7 @@ class AuditedSecretWrite:
                 trace_id=trace_id,
                 authorization=audit_context,
             )
-            raise
+            raise SecretWriteError("source_credential_write_failed") from None
         try:
             self._state_store.record_security_event(
                 event_id=str(uuid4()),
@@ -619,7 +659,7 @@ class ManagedSourceCredentialResolver:
         self._workload_principal_id = workload_principal_id
         self._environment = environment
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._leases: dict[tuple[str, str], SecretLease] = {}
+        self._leases: OrderedDict[tuple[str, str], SecretLease] = OrderedDict()
 
     def resolve_valid(
         self,
@@ -630,6 +670,7 @@ class ManagedSourceCredentialResolver:
         work_id: str,
         source_id: str,
     ) -> SecretLease:
+        self._prune_leases()
         current = self._state_store.get_source_credential(provider_id=provider_id)
         if current is None:
             raise CredentialNotReady("source_credential_missing")
@@ -681,6 +722,7 @@ class ManagedSourceCredentialResolver:
             raise CredentialNotReady("source_credential_lease_expired")
         cached_lease = self._leases.get((provider_id, work_id))
         if cached_lease is not None:
+            self._leases.move_to_end((provider_id, work_id))
             return cached_lease
         use_context = SecretUseContext(
             workload_principal_id=self._workload_principal_id,
@@ -709,7 +751,17 @@ class ManagedSourceCredentialResolver:
         except SecretCorruptError as error:
             raise CredentialNotReady("source_credential_secret_corrupt") from error
         self._leases[(provider_id, work_id)] = lease
+        while len(self._leases) > _MAX_CACHED_SECRET_LEASES:
+            _, evicted = self._leases.popitem(last=False)
+            evicted.revoke()
         return lease
+
+    def _prune_leases(self) -> None:
+        for cache_key, lease in tuple(self._leases.items()):
+            if lease.active:
+                continue
+            lease.revoke()
+            del self._leases[cache_key]
 
 
 class InMemorySecretProvider:

@@ -571,8 +571,6 @@ services:
       - --environment
       - development
       - --scope
-      - market_data.collect
-      - --scope
       - price_research_eligibility.read
       - --scope
       - source_credential.read
@@ -587,6 +585,32 @@ services:
       - --principal-classification
       - individual_non_commercial
 
+  ticket-07-source-adapter-key-init:
+    <<: *application
+    profiles: ["ticket-07-acceptance"]
+    volumes:
+      - ticket-07-source-adapter-key:/run/stock-forecasting-source-adapter
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - local-key
+      - init
+      - --path
+      - /run/stock-forecasting-source-adapter/local-api-key.json
+      - --owner
+      - ticket-07-alpaca-source-adapter
+      - --environment
+      - development
+      - --scope
+      - market_data.collect
+      - --data-protection-class
+      - licensed
+      - --data-protection-class
+      - secret
+      - --principal-classification
+      - individual_non_commercial
+
   ticket-07-authorization-init:
     <<: *application
     profiles: ["ticket-07-acceptance"]
@@ -594,6 +618,7 @@ services:
       - fixture-objects:/var/lib/stock-forecasting/objects
       - dagster-home:/var/lib/dagster
       - ticket-07-local-key:/run/stock-forecasting
+      - ticket-07-source-adapter-key:/run/stock-forecasting-source-adapter:ro
     command:
       - python
       - -m
@@ -604,10 +629,14 @@ services:
       - postgresql+psycopg://postgres@postgres:5432/stock_forecasting
       - --key-file
       - /run/stock-forecasting/local-api-key.json
+      - --source-adapter-key-file
+      - /run/stock-forecasting-source-adapter/local-api-key.json
     depends_on:
       database-grants:
         condition: service_completed_successfully
       ticket-07-local-key-init:
+        condition: service_completed_successfully
+      ticket-07-source-adapter-key-init:
         condition: service_completed_successfully
 
   ticket-07-api:
@@ -622,10 +651,12 @@ services:
       LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
       AUTHORIZATION_POLICY_SET_ID: ticket-07-us-zero-fee-engineering-v1
       SOURCE_SECRET_ROOT: /var/lib/stock-forecasting/source-secrets
+      SOURCE_ADAPTER_API_KEY_FILE: /run/stock-forecasting-source-adapter/local-api-key.json
     volumes:
       - fixture-objects:/var/lib/stock-forecasting/objects
       - dagster-home:/var/lib/dagster
       - ticket-07-local-key:/run/stock-forecasting
+      - ticket-07-source-adapter-key:/run/stock-forecasting-source-adapter:ro
       - ticket-07-source-secrets:/var/lib/stock-forecasting/source-secrets
     command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "127.0.0.1", "--port", "8000"]
     depends_on:
@@ -668,6 +699,7 @@ services:
       - fixture-objects:/var/lib/stock-forecasting/objects
       - dagster-home:/var/lib/dagster
       - ticket-07-local-key:/run/stock-forecasting
+      - ticket-07-source-adapter-key:/run/stock-forecasting-source-adapter:ro
       - ticket-07-source-secrets:/var/lib/stock-forecasting/source-secrets
     command:
       - python
@@ -687,6 +719,8 @@ services:
       - http://ticket-07-api:8080
       - --key-file
       - /run/stock-forecasting/local-api-key.json
+      - --source-adapter-key-file
+      - /run/stock-forecasting-source-adapter/local-api-key.json
       - --source-secret-root
       - /var/lib/stock-forecasting/source-secrets
     depends_on:
@@ -707,4 +741,5 @@ volumes:
   image-provenance:
   ticket-06-local-key:
   ticket-07-local-key:
+  ticket-07-source-adapter-key:
   ticket-07-source-secrets:

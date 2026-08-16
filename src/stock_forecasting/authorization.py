@@ -1524,7 +1524,7 @@ def build_taiwan_price_blocked_authorization_policy(
 def build_us_zero_fee_engineering_authorization_policy(
     context: SecurityContext,
 ) -> AuthorizationPolicy:
-    actions: frozenset[AuthorizationAction] = frozenset(
+    supported_actions: frozenset[AuthorizationAction] = frozenset(
         {
             "market_data.collect",
             "price_research_eligibility.read",
@@ -1532,6 +1532,7 @@ def build_us_zero_fee_engineering_authorization_policy(
             "source_credential.manage",
         }
     )
+    actions = supported_actions & context.scopes
     required_uses: frozenset[SourceUseRight] = frozenset(
         {
             "ingest",
@@ -1643,7 +1644,7 @@ def build_us_zero_fee_engineering_authorization_policy(
             principal_id=context.principal_id,
             dataset_id=dataset_id,
             status="active",
-            allowed_actions=allowed_actions,
+            allowed_actions=allowed_actions & actions,
             purposes=purposes,
             environments=frozenset({context.environment}),
             valid_from=context.issued_at,
@@ -1651,6 +1652,7 @@ def build_us_zero_fee_engineering_authorization_policy(
             allowed_uses=(required_uses if dataset_id.startswith("alpaca-us-") else frozenset()),
         )
         for dataset_id, allowed_actions, purposes in entitlement_contracts
+        if allowed_actions & actions
     )
     return AuthorizationPolicy(
         action_grants=(

@@ -172,7 +172,6 @@ def test_ticket_07_authorization_init_installs_zero_fee_and_credential_contracts
         owner="ticket-07-source-administrator",
         environment="development",
         scopes={
-            "market_data.collect",
             "price_research_eligibility.read",
             "source_credential.read",
             "source_credential.manage",
@@ -183,6 +182,17 @@ def test_ticket_07_authorization_init_installs_zero_fee_and_credential_contracts
     )
     key_file = tmp_path / "ticket-07-local-api-key.json"
     identity.save(key_file)
+    source_adapter_identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-alpaca-source-adapter",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now,
+        expires_at=now.replace(day=16),
+        data_protection_classes={"licensed", "secret"},
+        principal_classification="individual_non_commercial",
+    )
+    source_adapter_key_file = tmp_path / "ticket-07-source-adapter-api-key.json"
+    source_adapter_identity.save(source_adapter_key_file)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ticket-07-authorization.db'}"
     StateStore(database_url, create_schema=True)
 
@@ -194,14 +204,21 @@ def test_ticket_07_authorization_init_installs_zero_fee_and_credential_contracts
             database_url,
             "--key-file",
             str(key_file),
+            "--source-adapter-key-file",
+            str(source_adapter_key_file),
         ]
     )
 
     assert exit_code == 0
-    assert capsys.readouterr().out == '{"policy_set_count": 1, "status": "initialized"}\n'
-    policy = AuthorizationPolicyRepository(StateStore(database_url, create_schema=False)).get(
+    assert capsys.readouterr().out == '{"policy_set_count": 2, "status": "initialized"}\n'
+    repository = AuthorizationPolicyRepository(StateStore(database_url, create_schema=False))
+    policy = repository.get(
         TICKET_07_ENGINEERING_POLICY_SET,
         principal_id=identity.context.principal_id,
+    )
+    source_adapter_policy = repository.get(
+        TICKET_07_ENGINEERING_POLICY_SET,
+        principal_id=source_adapter_identity.context.principal_id,
     )
     policies = {item.dataset_id: item for item in policy.source_policies}
     assert set(policies) == {
@@ -227,3 +244,16 @@ def test_ticket_07_authorization_init_installs_zero_fee_and_credential_contracts
         }
     )
     assert policies["source-credential-metadata"].data_protection_class == "restricted"
+    assert policy.action_grants[0].actions == frozenset(
+        {
+            "price_research_eligibility.read",
+            "source_credential.read",
+            "source_credential.manage",
+        }
+    )
+    assert source_adapter_policy.action_grants[0].actions == frozenset({"market_data.collect"})
+    assert {item.dataset_id for item in source_adapter_policy.source_entitlements} == {
+        "alpaca-us-corporate-actions-v1",
+        "alpaca-us-stock-bars",
+        "alpaca-us-trading-calendar-v2",
+    }

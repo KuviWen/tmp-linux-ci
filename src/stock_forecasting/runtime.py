@@ -31,6 +31,7 @@ class RuntimeSettings:
     public_bind_host: str
     local_api_key_mode: Literal["disabled", "enabled"]
     local_api_key_file: Path | None
+    source_adapter_api_key_file: Path | None
     authorization_policy_set_id: str
 
     @classmethod
@@ -44,6 +45,7 @@ class RuntimeSettings:
         public_bind_host = os.environ.get("PUBLIC_BIND_HOST", "127.0.0.1")
         local_api_key_mode_text = os.environ.get("LOCAL_API_KEY_MODE", "disabled")
         local_api_key_file_text = os.environ.get("LOCAL_API_KEY_FILE")
+        source_adapter_api_key_file_text = os.environ.get("SOURCE_ADAPTER_API_KEY_FILE")
         authorization_policy_set_id = os.environ.get("AUTHORIZATION_POLICY_SET_ID")
         if not database_url:
             raise RuntimeError("DATABASE_URL is required")
@@ -78,6 +80,11 @@ class RuntimeSettings:
                 raise RuntimeError("LOCAL_API_KEY_FILE is required")
             if not Path(local_api_key_file_text).is_file():
                 raise RuntimeError("LOCAL_API_KEY_FILE is unavailable")
+            if (
+                source_adapter_api_key_file_text
+                and not Path(source_adapter_api_key_file_text).is_file()
+            ):
+                raise RuntimeError("SOURCE_ADAPTER_API_KEY_FILE is unavailable")
         return cls(
             database_url=database_url,
             object_root=Path(object_root),
@@ -94,6 +101,11 @@ class RuntimeSettings:
             local_api_key_file=(
                 Path(local_api_key_file_text) if local_api_key_file_text is not None else None
             ),
+            source_adapter_api_key_file=(
+                Path(source_adapter_api_key_file_text)
+                if source_adapter_api_key_file_text is not None
+                else None
+            ),
             authorization_policy_set_id=authorization_policy_set_id,
         )
 
@@ -105,6 +117,16 @@ class RuntimeSettings:
         local_identity = LocalApiKeyIdentity.load(self.local_api_key_file)
         if local_identity.context.environment != self.runtime_environment:
             raise RuntimeError("local_api_key_environment_mismatch")
+        source_adapter_security_context = None
+        if self.source_adapter_api_key_file is not None:
+            source_adapter_identity = LocalApiKeyIdentity.load(self.source_adapter_api_key_file)
+            if source_adapter_identity.context.principal_id == local_identity.context.principal_id:
+                raise RuntimeError("source_adapter_identity_must_be_distinct")
+            if source_adapter_identity.context.environment != self.runtime_environment:
+                raise RuntimeError("source_adapter_identity_environment_mismatch")
+            if source_adapter_identity.context.scopes != frozenset({"market_data.collect"}):
+                raise RuntimeError("source_adapter_identity_scope_invalid")
+            source_adapter_security_context = source_adapter_identity.context
         return build_application(
             database_url=self.database_url,
             object_root=self.object_root,
@@ -112,6 +134,7 @@ class RuntimeSettings:
             relay_fault=relay_fault,
             local_identity=local_identity,
             authorization_policy_set_id=self.authorization_policy_set_id,
+            source_adapter_security_context=source_adapter_security_context,
             secret_provider=EncryptedFilesystemSecretProvider(self.source_secret_root),
             source_credential_validators={
                 "alpaca-market-data-basic": AlpacaLiveContractValidator(

@@ -149,6 +149,7 @@ def _parser() -> argparse.ArgumentParser:
     acceptance.add_argument("--dagster-url")
     acceptance.add_argument("--denied-base-url")
     acceptance.add_argument("--key-file", type=Path)
+    acceptance.add_argument("--source-adapter-key-file", type=Path)
     acceptance.add_argument("--source-secret-root", type=Path)
     acceptance.add_argument("--project-root", type=Path, default=Path.cwd())
     acceptance.add_argument("--git-dir", type=Path, default=Path.cwd() / ".git")
@@ -222,6 +223,11 @@ def _parser() -> argparse.ArgumentParser:
     ticket_07_authorization = authorization_commands.add_parser("init-ticket-07")
     ticket_07_authorization.add_argument("--database-url", required=True)
     ticket_07_authorization.add_argument("--key-file", type=Path, required=True)
+    ticket_07_authorization.add_argument(
+        "--source-adapter-key-file",
+        type=Path,
+        required=True,
+    )
     return parser
 
 
@@ -244,8 +250,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.ticket in {"ticket-06", "ticket-07"}:
             if arguments.base_url is None or arguments.key_file is None:
                 parser.error(f"{arguments.ticket} requires --base-url and --key-file")
-            if arguments.ticket == "ticket-07" and arguments.source_secret_root is None:
-                parser.error("ticket-07 requires --source-secret-root")
+            if arguments.ticket == "ticket-07" and (
+                arguments.source_secret_root is None or arguments.source_adapter_key_file is None
+            ):
+                parser.error(
+                    "ticket-07 requires --source-secret-root and --source-adapter-key-file"
+                )
             report = (
                 run_ticket_06_acceptance(
                     database_url=arguments.database_url,
@@ -259,6 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     object_root=arguments.object_root,
                     base_url=arguments.base_url,
                     key_file=arguments.key_file,
+                    source_adapter_key_file=arguments.source_adapter_key_file,
                     source_secret_root=arguments.source_secret_root,
                 )
             )
@@ -444,6 +455,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "init-ticket-07"
     ):
         identity = LocalApiKeyIdentity.load(arguments.key_file)
+        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
         repository = AuthorizationPolicyRepository(
             StateStore(arguments.database_url, create_schema=False)
         )
@@ -451,7 +463,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             TICKET_07_ENGINEERING_POLICY_SET,
             build_us_zero_fee_engineering_authorization_policy(identity.context),
         )
-        print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
+        repository.install(
+            TICKET_07_ENGINEERING_POLICY_SET,
+            build_us_zero_fee_engineering_authorization_policy(source_adapter_identity.context),
+        )
+        print(json.dumps({"status": "initialized", "policy_set_count": 2}, sort_keys=True))
         return 0
     return 2
 

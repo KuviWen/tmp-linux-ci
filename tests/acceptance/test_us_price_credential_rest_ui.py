@@ -34,9 +34,11 @@ from stock_forecasting.source_credentials import (
     EncryptedFilesystemSecretProvider,
     InMemorySecretProvider,
     ManagedSourceCredentialResolver,
+    SecretCorruptError,
     SecretLease,
     SecretProvider,
     SecretRef,
+    SecretUnavailableError,
     SecretUseContext,
     SourceContractAssessment,
 )
@@ -87,7 +89,10 @@ class RecordingSecretProvider:
         self.fail_put = False
         self.fail_revoke = False
         self.fail_checkout = False
+        self.checkout_exception: Exception | None = None
         self.checkout_calls: list[str] = []
+        self.checkout_contexts: list[SecretUseContext] = []
+        self.leases: list[SecretLease] = []
 
     def put(self, *, provider_id: str, credential_fields: Mapping[str, str]) -> SecretRef:
         if self.fail_put:
@@ -98,9 +103,14 @@ class RecordingSecretProvider:
 
     def checkout(self, secret_ref: SecretRef, use_context: SecretUseContext) -> SecretLease:
         self.checkout_calls.append(secret_ref.secret_ref_id)
+        self.checkout_contexts.append(use_context)
         if self.fail_checkout:
             raise OSError("provider exception contained SHOULD-NOT-BE-AUDITED")
-        return self.delegate.checkout(secret_ref, use_context)
+        if self.checkout_exception is not None:
+            raise self.checkout_exception
+        lease = self.delegate.checkout(secret_ref, use_context)
+        self.leases.append(lease)
+        return lease
 
     def revoke(self, secret_ref: SecretRef) -> None:
         if self.fail_revoke:
@@ -141,6 +151,7 @@ def _credential_application(
     *,
     credential_validator: LiteralCredentialValidator | None = None,
     secret_provider: SecretProvider | None = None,
+    source_adapter_identity: LocalApiKeyIdentity | None = None,
 ) -> tuple[Application, TestClient, dict[str, str]]:
     now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
     identity = LocalApiKeyIdentity.issue(
@@ -201,6 +212,9 @@ def _credential_application(
             else None
         ),
         secret_provider=secret_provider,
+        source_adapter_security_context=(
+            source_adapter_identity.context if source_adapter_identity is not None else None
+        ),
     )
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     return application, client, {"Authorization": identity.credential.authorization_header()}
@@ -402,7 +416,7 @@ def test_secret_write_failure_keeps_allow_and_terminal_audit(
     secret_provider.fail_put = True
     trace_id = f"trace-secret-{operation}-failure"
 
-    with pytest.raises(OSError, match="SHOULD-NOT-BE-AUDITED"):
+    with pytest.raises(RuntimeError, match="source_credential_write_failed") as raised:
         client.request(
             "PUT" if operation == "set" else "POST",
             endpoint if operation == "set" else f"{endpoint}/rotations",
@@ -414,6 +428,11 @@ def test_secret_write_failure_keeps_allow_and_terminal_audit(
                 }
             },
         )
+
+    assert "SHOULD-NOT-BE-AUDITED" not in str(raised.value)
+    assert f"{operation}-failure-secret" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
 
     events = application.state_store.list_audit_events(trace_id=trace_id)
     assert events[0]["action"] == "source_credential.manage"
@@ -751,6 +770,51 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
     ]
     assert "PK-VALIDATE" not in validated.text
     assert "validate-secret-value" not in validated.text
+
+
+def test_validation_checkout_uses_an_injected_source_adapter_identity(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    adapter_identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-alpaca-source-adapter",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(hours=1),
+        data_protection_classes={"licensed", "secret"},
+        principal_classification="individual_non_commercial",
+    )
+    secret_provider = RecordingSecretProvider(clock=lambda: now)
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+        secret_provider=secret_provider,
+        source_adapter_identity=adapter_identity,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-WORKLOAD-SEPARATION",
+                "api_secret_key": "workload-separation-secret",
+            }
+        },
+    )
+
+    response = client.post(f"{endpoint}/validations", headers=headers)
+
+    assert response.status_code == 200
+    checkout_context = secret_provider.checkout_contexts[-1]
+    assert checkout_context.workload_principal_id == adapter_identity.context.principal_id
+    assert checkout_context.workload_principal_id != application.security_context.principal_id
 
 
 def test_credential_validation_rejects_arbitrary_secret_bearing_evidence() -> None:
@@ -1244,6 +1308,82 @@ def test_one_work_id_cannot_renew_its_pinned_lease_window(tmp_path: Path) -> Non
         restarted.credential_fields()
 
 
+def test_resolver_revokes_expired_and_capacity_evicted_plaintext_leases(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    monotonic_time = [100.0]
+    secret_provider = RecordingSecretProvider(
+        clock=lambda: now,
+        monotonic_clock=lambda: monotonic_time[0],
+    )
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+        secret_provider=secret_provider,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-BOUNDED-LEASE-CACHE",
+                "api_secret_key": "bounded-lease-cache-secret",
+            }
+        },
+    )
+    client.post(f"{endpoint}/validations", headers=headers)
+    resolver = ManagedSourceCredentialResolver(
+        application.state_store,
+        secret_provider,
+        workload_principal_id="workload:alpaca-source-adapter",
+        environment="development",
+        clock=lambda: now,
+    )
+
+    expired = resolver.resolve_valid(
+        "alpaca-market-data-basic",
+        trace_id="trace-expiring-cache-lease",
+        request_id="request-expiring-cache-lease",
+        work_id="work-expiring-cache-lease",
+        source_id="alpaca-us-stock-bars",
+    )
+    monotonic_time[0] += 301
+    resolver.resolve_valid(
+        "alpaca-market-data-basic",
+        trace_id="trace-prune-expired-cache-lease",
+        request_id="request-prune-expired-cache-lease",
+        work_id="work-prune-expired-cache-lease",
+        source_id="alpaca-us-stock-bars",
+    )
+    assert expired.revoked is True
+
+    bounded_first = resolver.resolve_valid(
+        "alpaca-market-data-basic",
+        trace_id="trace-bounded-cache-lease-0",
+        request_id="request-bounded-cache-lease-0",
+        work_id="work-bounded-cache-lease-0",
+        source_id="alpaca-us-stock-bars",
+    )
+    for index in range(1, 65):
+        resolver.resolve_valid(
+            "alpaca-market-data-basic",
+            trace_id=f"trace-bounded-cache-lease-{index}",
+            request_id=f"request-bounded-cache-lease-{index}",
+            work_id=f"work-bounded-cache-lease-{index}",
+            source_id="alpaca-us-stock-bars",
+        )
+    assert bounded_first.revoked is True
+
+
 def test_each_failed_secret_checkout_has_a_distinct_terminal_audit(
     tmp_path: Path,
 ) -> None:
@@ -1362,8 +1502,31 @@ def test_successful_checkout_is_not_returned_when_terminal_audit_fails(
     assert len(secret_provider.checkout_calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("provider_error", "public_reason", "audit_reason"),
+    [
+        (
+            OSError("provider exception contained SHOULD-NOT-BE-AUDITED"),
+            "source_credential_secret_unavailable",
+            "source_credential_checkout_failed",
+        ),
+        (
+            SecretUnavailableError("SHOULD-NOT-BE-AUDITED"),
+            "source_credential_secret_unavailable",
+            "source_credential_secret_unavailable",
+        ),
+        (
+            SecretCorruptError("SHOULD-NOT-BE-AUDITED"),
+            "source_credential_secret_corrupt",
+            "source_credential_secret_corrupt",
+        ),
+    ],
+)
 def test_unexpected_secret_provider_failure_has_a_redacted_terminal_audit(
     tmp_path: Path,
+    provider_error: Exception,
+    public_reason: str,
+    audit_reason: str,
 ) -> None:
     secret_provider = RecordingSecretProvider()
     validator = LiteralCredentialValidator(
@@ -1390,7 +1553,7 @@ def test_unexpected_secret_provider_failure_has_a_redacted_terminal_audit(
         },
     )
     client.post(f"{endpoint}/validations", headers=headers)
-    secret_provider.fail_checkout = True
+    secret_provider.checkout_exception = provider_error
     resolver = ManagedSourceCredentialResolver(
         application.state_store,
         secret_provider,
@@ -1399,7 +1562,7 @@ def test_unexpected_secret_provider_failure_has_a_redacted_terminal_audit(
         clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
     )
 
-    with pytest.raises(OSError, match="SHOULD-NOT-BE-AUDITED"):
+    with pytest.raises(CredentialNotReady, match=public_reason) as raised:
         resolver.resolve_valid(
             "alpaca-market-data-basic",
             trace_id="trace-unexpected-checkout-failure",
@@ -1408,10 +1571,14 @@ def test_unexpected_secret_provider_failure_has_a_redacted_terminal_audit(
             source_id="alpaca-us-stock-bars",
         )
 
+    assert "SHOULD-NOT-BE-AUDITED" not in str(raised.value)
+    assert "unexpected-checkout-secret" not in str(raised.value)
+    assert "SHOULD-NOT-BE-AUDITED" not in repr(raised.value.__cause__)
+
     events = application.state_store.list_audit_events(trace_id="trace-unexpected-checkout-failure")
     checkout_events = [event for event in events if event["action"] == "source_credential.checkout"]
     assert [event["outcome"] for event in checkout_events] == ["attempted", "failed"]
-    assert checkout_events[-1]["reason_code"] == "source_credential_checkout_failed"
+    assert checkout_events[-1]["reason_code"] == audit_reason
     assert "SHOULD-NOT-BE-AUDITED" not in str(events)
     assert "unexpected-checkout-secret" not in str(events)
 
@@ -1809,6 +1976,7 @@ def test_validation_result_cannot_be_applied_to_a_concurrently_rotated_secret(
         secret_provider=application.secret_provider,
         source_credential_validators={"alpaca-market-data-basic": validator},
         clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        source_adapter_security_context=application.source_adapter_security_context,
     )
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     client.put(

@@ -56,6 +56,7 @@ class OperationsControl:
         secret_provider: SecretProvider,
         source_credential_validators: Mapping[str, SourceCredentialValidator],
         clock: Callable[[], datetime],
+        source_adapter_security_context: SecurityContext,
     ) -> None:
         self._state_store = state_store
         self._authorization_policy = authorization_policy
@@ -64,6 +65,7 @@ class OperationsControl:
         self._secret_write = AuditedSecretWrite(state_store, secret_provider)
         self._source_credential_validators = source_credential_validators
         self._clock = clock
+        self._source_adapter_security_context = source_adapter_security_context
 
     def list_source_credentials(
         self,
@@ -316,8 +318,8 @@ class OperationsControl:
                 provider_id=provider_id,
                 current=current,
                 trace_id=trace_id,
-                workload_principal_id=security_context.principal_id,
-                environment=security_context.environment,
+                workload_principal_id=self._source_adapter_security_context.principal_id,
+                environment=self._source_adapter_security_context.environment,
                 source_id=provider_id,
                 destination=provider_id,
                 purpose="source_credential_validation",
@@ -340,8 +342,8 @@ class OperationsControl:
             expected_version = credential_version
             expected_secret_ref_id = secret_ref_id
             use_context = SecretUseContext(
-                workload_principal_id=security_context.principal_id,
-                environment=security_context.environment,
+                workload_principal_id=self._source_adapter_security_context.principal_id,
+                environment=self._source_adapter_security_context.environment,
                 source_id=provider_id,
                 destination=provider_id,
                 purpose="source_credential_validation",

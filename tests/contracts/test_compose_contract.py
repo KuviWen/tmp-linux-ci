@@ -35,6 +35,7 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "ticket-06-api-ingress",
         "ticket-06-acceptance",
         "ticket-07-local-key-init",
+        "ticket-07-source-adapter-key-init",
         "ticket-07-authorization-init",
         "ticket-07-api",
         "ticket-07-api-ingress",
@@ -356,19 +357,26 @@ def test_compose_declares_ticket_07_missing_credential_deployed_acceptance() -> 
 
     key_init = services["ticket-07-local-key-init"]
     assert key_init["profiles"] == profile
-    assert key_init["command"].count("--scope") == 4
+    assert key_init["command"].count("--scope") == 3
     assert {
-        "market_data.collect",
         "price_research_eligibility.read",
         "source_credential.read",
         "source_credential.manage",
     } <= set(key_init["command"])
+    assert "market_data.collect" not in key_init["command"]
     assert key_init["command"].count("--data-protection-class") == 3
     assert {"licensed", "restricted", "secret"} <= set(key_init["command"])
+
+    adapter_key_init = services["ticket-07-source-adapter-key-init"]
+    assert adapter_key_init["profiles"] == profile
+    assert adapter_key_init["command"].count("--scope") == 1
+    assert "market_data.collect" in adapter_key_init["command"]
+    assert "source_credential.manage" not in adapter_key_init["command"]
 
     authorization_init = services["ticket-07-authorization-init"]
     assert authorization_init["profiles"] == profile
     assert "init-ticket-07" in authorization_init["command"]
+    assert "--source-adapter-key-file" in authorization_init["command"]
 
     api = services["ticket-07-api"]
     assert api["profiles"] == profile
@@ -376,7 +384,11 @@ def test_compose_declares_ticket_07_missing_credential_deployed_acceptance() -> 
         "ticket-07-us-zero-fee-engineering-v1"
     )
     assert api["environment"]["SOURCE_SECRET_ROOT"] == ("/var/lib/stock-forecasting/source-secrets")
+    assert api["environment"]["SOURCE_ADAPTER_API_KEY_FILE"] == (
+        "/run/stock-forecasting-source-adapter/local-api-key.json"
+    )
     assert "ticket-07-source-secrets:/var/lib/stock-forecasting/source-secrets" in api["volumes"]
+    assert "ticket-07-source-adapter-key:/run/stock-forecasting-source-adapter:ro" in api["volumes"]
     assert services["ticket-07-api-ingress"]["network_mode"] == "service:ticket-07-api"
 
     acceptance = services["ticket-07-acceptance"]
@@ -390,9 +402,11 @@ def test_compose_declares_ticket_07_missing_credential_deployed_acceptance() -> 
     ]
     assert "--base-url" in acceptance["command"]
     assert "--key-file" in acceptance["command"]
+    assert "--source-adapter-key-file" in acceptance["command"]
     assert acceptance["depends_on"]["ticket-07-api"]["condition"] == "service_healthy"
     assert acceptance["depends_on"]["ticket-07-api-ingress"]["condition"] == ("service_healthy")
     assert "ticket-07-source-secrets" in compose["volumes"]
+    assert "ticket-07-source-adapter-key" in compose["volumes"]
 
 
 def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
@@ -403,6 +417,7 @@ def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:
     assert "COPY requirements.lock pyproject.toml ./" in dockerfile
     assert "COPY Dockerfile compose.yaml .dockerignore ./" in dockerfile
     assert "COPY docker ./docker" in dockerfile
+    assert "/run/stock-forecasting-source-adapter" in dockerfile
     assert "COPY .github ./.github" in dockerfile
     assert "/run/stock-forecasting" in dockerfile
     assert "/var/lib/stock-forecasting/source-secrets" in dockerfile
