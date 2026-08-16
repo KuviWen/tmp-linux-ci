@@ -24,7 +24,11 @@ from stock_forecasting.fixture_market import (
     default_fixture_market_adapters,
 )
 from stock_forecasting.fixture_scenarios import FixtureScenario, scenario_policy
-from stock_forecasting.forecasting import FeatureSnapshot, FixtureTrendForecaster, TrendForecaster
+from stock_forecasting.forecasting import (
+    FeatureSnapshot,
+    FixturePredictionForecaster,
+    FixtureTrendForecaster,
+)
 from stock_forecasting.identity import ListingIdentity, TickerAssertion
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository, ObjectRef
 from stock_forecasting.platform.state_store import StateStore
@@ -91,7 +95,7 @@ class FixtureEodWorkflow:
         *,
         observed_at: datetime | None,
         object_repository: FilesystemObjectRepository,
-        forecaster: TrendForecaster | None = None,
+        forecaster: FixturePredictionForecaster | None = None,
         market_adapters: Mapping[FixtureMarket, FixtureMarketAdapter] | None = None,
         security_context: SecurityContext,
         authorization_policy: AuthorizationPolicy,

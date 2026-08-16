@@ -41,6 +41,11 @@ from stock_forecasting.finmind_provider_contract import (
     FINMIND_PRICE_DISTRIBUTION,
     FINMIND_PROVIDER_ID,
 )
+from stock_forecasting.model_governance import (
+    ModelGovernanceQuery,
+    ModelLifecycle,
+    SqlAlchemyLifecycleStore,
+)
 from stock_forecasting.operations_control import OperationsControl
 from stock_forecasting.outbox import (
     EventCompatibility,
@@ -93,6 +98,9 @@ class Application:
         source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
+        self.model_lifecycle_store = SqlAlchemyLifecycleStore(self.state_store.engine)
+        self.model_lifecycle = ModelLifecycle(self.model_lifecycle_store)
+        self.model_governance_query = ModelGovernanceQuery(self.model_lifecycle_store)
         self.local_identity = local_identity
         self.security_context: SecurityContext = local_identity.context
         if source_adapter_security_context is not None:
@@ -314,6 +322,9 @@ class Application:
             environment=self.security_context.environment,
             authenticated_at=self._fixed_security_time or datetime.now(UTC),
         )
+
+    def governance_time(self) -> datetime:
+        return self._fixed_security_time or datetime.now(UTC)
 
     def relay_outbox(self, *, event_id: str | None = None) -> RelayOutcome:
         return self.state_store.relay_outbox(

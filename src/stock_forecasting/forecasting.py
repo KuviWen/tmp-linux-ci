@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import random
 from dataclasses import dataclass
-from math import log
-from typing import Literal, Protocol
+from datetime import date
+from math import exp, log, sqrt
+from typing import Literal, Protocol, cast
 
 from stock_forecasting.contracts import PredictionPayload, ProbabilityVector, UnavailableCode
 
@@ -24,8 +28,329 @@ class FeatureSnapshot:
             raise ValueError("unavailable_feature_snapshot_requires_reason")
 
 
-class TrendForecaster(Protocol):
+class FixturePredictionForecaster(Protocol):
     def predict(self, feature_snapshot: FeatureSnapshot) -> list[PredictionPayload]: ...
+
+
+TrendLabel = Literal["up", "flat", "down"]
+
+
+@dataclass(frozen=True)
+class FeatureRow:
+    row_id: str
+    market: Literal["XTAI", "XNAS"]
+    horizon_sessions: Literal[1, 5, 20]
+    values: tuple[float, ...]
+    label: TrendLabel | None
+    session_date: date | None = None
+
+
+@dataclass(frozen=True)
+class FeatureBatch:
+    feature_batch_id: str
+    source_policy_manifest_id: str
+    label_manifest_id: str
+    fold_manifest_id: str
+    cost_manifest_id: str
+    rows: tuple[FeatureRow, ...]
+
+
+@dataclass(frozen=True)
+class TrainingRequest:
+    feature_batch: FeatureBatch
+    training_row_ids: tuple[str, ...]
+    validation_row_ids: tuple[str, ...]
+    seed: int
+
+
+@dataclass(frozen=True)
+class ModelArtifact:
+    artifact_id: str
+    model_family: str
+    seed: int
+    manifest_ids: tuple[str, str, str, str, str]
+    training_selection_id: str
+    model_parameters_id: str
+    serialized: bytes
+    calibrator_ids: tuple[str, ...] = ()
+    evaluation_report_id: str | None = None
+
+
+@dataclass(frozen=True)
+class PredictionRequest:
+    artifact: ModelArtifact
+    rows: tuple[FeatureRow, ...]
+
+
+@dataclass(frozen=True)
+class ForecastPrediction:
+    row_id: str
+    probabilities: ProbabilityVector
+
+
+@dataclass(frozen=True)
+class ForecastBatch:
+    artifact_id: str
+    predictions: tuple[ForecastPrediction, ...]
+
+
+class TrendForecaster(Protocol):
+    def train(self, request: TrainingRequest) -> ModelArtifact: ...
+
+    def predict(self, request: PredictionRequest) -> ForecastBatch: ...
+
+
+class ClassPriorTrendForecaster:
+    def __init__(self, payload: dict[str, object] | None = None) -> None:
+        self._payload = payload
+
+    def train(self, request: TrainingRequest) -> ModelArtifact:
+        rows_by_id = {row.row_id: row for row in request.feature_batch.rows}
+        labels = [rows_by_id[row_id].label for row_id in request.training_row_ids]
+        if not labels or any(label is None for label in labels):
+            raise ValueError("training_labels_required")
+        typed_labels = cast(list[TrendLabel], labels)
+        class_labels: tuple[TrendLabel, ...] = ("up", "flat", "down")
+        counts = {label: typed_labels.count(label) for label in class_labels}
+        total = len(labels)
+        probabilities = {label: counts[label] / total for label in counts}
+        batch = request.feature_batch
+        manifest_ids = (
+            batch.feature_batch_id,
+            batch.source_policy_manifest_id,
+            batch.label_manifest_id,
+            batch.fold_manifest_id,
+            batch.cost_manifest_id,
+        )
+        training_selection_id = _training_selection_id(request)
+        payload: dict[str, object] = {
+            "model_family": "class_prior",
+            "seed": request.seed,
+            "manifest_ids": manifest_ids,
+            "training_selection_id": training_selection_id,
+            "probabilities": probabilities,
+        }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        artifact_id = f"sha256:{hashlib.sha256(serialized).hexdigest()}"
+        return ModelArtifact(
+            artifact_id=artifact_id,
+            model_family="class_prior",
+            seed=request.seed,
+            manifest_ids=manifest_ids,
+            training_selection_id=training_selection_id,
+            model_parameters_id=artifact_id,
+            serialized=serialized,
+        )
+
+    @classmethod
+    def load(cls, serialized: bytes) -> ClassPriorTrendForecaster:
+        payload = cast(dict[str, object], json.loads(serialized))
+        if payload.get("model_family") != "class_prior":
+            raise ValueError("wrong_model_family")
+        return cls(payload)
+
+    def predict(self, request: PredictionRequest) -> ForecastBatch:
+        if self._payload is None:
+            loaded = self.load(request.artifact.serialized)
+            return loaded.predict(request)
+        expected_id = f"sha256:{hashlib.sha256(request.artifact.serialized).hexdigest()}"
+        if request.artifact.artifact_id != expected_id:
+            raise ValueError("artifact_checksum_mismatch")
+        raw_probabilities = cast(dict[str, float], self._payload["probabilities"])
+        probabilities: ProbabilityVector = {
+            "up": raw_probabilities["up"],
+            "flat": raw_probabilities["flat"],
+            "down": raw_probabilities["down"],
+        }
+        return ForecastBatch(
+            artifact_id=request.artifact.artifact_id,
+            predictions=tuple(
+                ForecastPrediction(row_id=row.row_id, probabilities=probabilities)
+                for row in request.rows
+            ),
+        )
+
+
+class RegularizedMultinomialLogisticTrendForecaster:
+    _labels: tuple[TrendLabel, ...] = ("up", "flat", "down")
+
+    def __init__(self, payload: dict[str, object] | None = None) -> None:
+        self._payload = payload
+
+    def train(self, request: TrainingRequest) -> ModelArtifact:
+        rows_by_id = {row.row_id: row for row in request.feature_batch.rows}
+        rows = [rows_by_id[row_id] for row_id in request.training_row_ids]
+        if not rows or any(row.label is None for row in rows):
+            raise ValueError("training_labels_required")
+        feature_count = len(rows[0].values)
+        if feature_count == 0 or any(len(row.values) != feature_count for row in rows):
+            raise ValueError("consistent_features_required")
+        means = [
+            sum(row.values[index] for row in rows) / len(rows) for index in range(feature_count)
+        ]
+        scales = [
+            sqrt(sum((row.values[index] - means[index]) ** 2 for row in rows) / len(rows))
+            for index in range(feature_count)
+        ]
+        scales = [scale if scale > 1e-12 else 1.0 for scale in scales]
+        normalized = [
+            [(row.values[index] - means[index]) / scales[index] for index in range(feature_count)]
+            + [1.0]
+            for row in rows
+        ]
+        label_counts = {label: sum(row.label == label for row in rows) for label in self._labels}
+        if any(count == 0 for count in label_counts.values()):
+            raise ValueError("all_training_classes_required")
+        class_weights = {
+            label: min(
+                2.0,
+                max(
+                    0.5,
+                    len(rows) / (len(self._labels) * label_counts[label]),
+                ),
+            )
+            for label in self._labels
+        }
+        generator = random.Random(request.seed)
+        weights = [
+            [generator.uniform(-0.01, 0.01) for _ in range(feature_count + 1)] for _ in self._labels
+        ]
+        regularization = 0.05
+        learning_rate = 0.08
+        for _ in range(60):
+            gradients = [[0.0 for _ in range(feature_count + 1)] for _ in self._labels]
+            for vector, row in zip(normalized, rows, strict=True):
+                probabilities = self._softmax(
+                    [
+                        sum(
+                            weight * value
+                            for weight, value in zip(label_weights, vector, strict=True)
+                        )
+                        for label_weights in weights
+                    ]
+                )
+                assert row.label is not None
+                sample_weight = class_weights[row.label]
+                for label_index, label in enumerate(self._labels):
+                    error = (
+                        probabilities[label_index] - (1.0 if row.label == label else 0.0)
+                    ) * sample_weight
+                    for feature_index, value in enumerate(vector):
+                        gradients[label_index][feature_index] += error * value
+            for label_index, label_weights in enumerate(weights):
+                for feature_index in range(feature_count + 1):
+                    penalty = (
+                        regularization * label_weights[feature_index]
+                        if feature_index < feature_count
+                        else 0.0
+                    )
+                    label_weights[feature_index] -= learning_rate * (
+                        gradients[label_index][feature_index] / len(rows) + penalty
+                    )
+        batch = request.feature_batch
+        manifest_ids = (
+            batch.feature_batch_id,
+            batch.source_policy_manifest_id,
+            batch.label_manifest_id,
+            batch.fold_manifest_id,
+            batch.cost_manifest_id,
+        )
+        training_selection_id = _training_selection_id(request)
+        payload: dict[str, object] = {
+            "model_family": "regularized_multinomial_logistic",
+            "seed": request.seed,
+            "manifest_ids": manifest_ids,
+            "training_selection_id": training_selection_id,
+            "normalizer": {"means": means, "scales": scales},
+            "class_weights": class_weights,
+            "regularization": regularization,
+            "weights": weights,
+        }
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        artifact_id = f"sha256:{hashlib.sha256(serialized).hexdigest()}"
+        return ModelArtifact(
+            artifact_id=artifact_id,
+            model_family="regularized_multinomial_logistic",
+            seed=request.seed,
+            manifest_ids=manifest_ids,
+            training_selection_id=training_selection_id,
+            model_parameters_id=artifact_id,
+            serialized=serialized,
+        )
+
+    @classmethod
+    def load(cls, serialized: bytes) -> RegularizedMultinomialLogisticTrendForecaster:
+        payload = cast(dict[str, object], json.loads(serialized))
+        if payload.get("model_family") != "regularized_multinomial_logistic":
+            raise ValueError("wrong_model_family")
+        return cls(payload)
+
+    def predict(self, request: PredictionRequest) -> ForecastBatch:
+        if self._payload is None:
+            loaded = self.load(request.artifact.serialized)
+            return loaded.predict(request)
+        expected_id = f"sha256:{hashlib.sha256(request.artifact.serialized).hexdigest()}"
+        if request.artifact.artifact_id != expected_id:
+            raise ValueError("artifact_checksum_mismatch")
+        normalizer = cast(dict[str, list[float]], self._payload["normalizer"])
+        means = normalizer["means"]
+        scales = normalizer["scales"]
+        weights = cast(list[list[float]], self._payload["weights"])
+        predictions: list[ForecastPrediction] = []
+        for row in request.rows:
+            if len(row.values) != len(means):
+                raise ValueError("feature_count_mismatch")
+            vector = [
+                (value - means[index]) / scales[index] for index, value in enumerate(row.values)
+            ] + [1.0]
+            raw_probabilities = self._softmax(
+                [
+                    sum(weight * value for weight, value in zip(label_weights, vector, strict=True))
+                    for label_weights in weights
+                ]
+            )
+            probabilities: ProbabilityVector = {
+                "up": raw_probabilities[0],
+                "flat": raw_probabilities[1],
+                "down": raw_probabilities[2],
+            }
+            predictions.append(ForecastPrediction(row_id=row.row_id, probabilities=probabilities))
+        return ForecastBatch(
+            artifact_id=request.artifact.artifact_id,
+            predictions=tuple(predictions),
+        )
+
+    @staticmethod
+    def _softmax(scores: list[float]) -> list[float]:
+        maximum = max(scores)
+        exponentials = [exp(score - maximum) for score in scores]
+        total = sum(exponentials)
+        return [value / total for value in exponentials]
+
+
+def _training_selection_id(request: TrainingRequest) -> str:
+    serialized = json.dumps(
+        {
+            "feature_batch_id": request.feature_batch.feature_batch_id,
+            "fold_manifest_id": request.feature_batch.fold_manifest_id,
+            "training_row_ids": request.training_row_ids,
+            "validation_row_ids": request.validation_row_ids,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(b'training-selection' + serialized).hexdigest()}"
 
 
 def _confidence(probabilities: ProbabilityVector) -> float:

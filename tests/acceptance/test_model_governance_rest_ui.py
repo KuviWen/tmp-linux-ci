@@ -1,0 +1,172 @@
+from datetime import UTC, datetime, timedelta
+
+from fastapi.testclient import TestClient
+
+from stock_forecasting.adapters.rest import create_web_app
+from stock_forecasting.application import Application, build_test_application
+from stock_forecasting.authorization import LocalApiKeyIdentity
+from stock_forecasting.model_governance import (
+    EvaluateBootstrapCandidate,
+    HardGateEvidence,
+    RecordCandidate,
+)
+
+
+def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
+    now = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="model-governance-reader",
+        environment="development",
+        scopes={"model_governance.read", "model_governance.approve"},
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(hours=2),
+    )
+    application = build_test_application(
+        observed_at=now,
+        local_identity=identity,
+    )
+    application.model_lifecycle.execute(
+        RecordCandidate(
+            command_id="record-research-candidate",
+            model_family_id="dual-market-price-baseline-v1",
+            candidate_id="candidate-research",
+            model_family="regularized_multinomial_logistic",
+            artifact_id="sha256:research-artifact",
+            evaluation_report_id="sha256:research-evaluation",
+            training_intent_id="intent-research",
+            intent_initiator="model-operator-a",
+            training_executor="model-operator-b",
+            improvement_percentage_points=47.9,
+            calibrator_statuses=("sufficient_data",) * 6,
+            expected_version=0,
+            occurred_at=now - timedelta(hours=1),
+            class_prior_equal_cell_macro_f1=0.333,
+            logistic_equal_cell_macro_f1=0.812,
+            fold_count=16,
+            formal_qualification=False,
+        )
+    )
+    application.model_lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-research-candidate",
+            model_family_id="dual-market-price-baseline-v1",
+            candidate_id="candidate-research",
+            policy_version_id="bootstrap-gate-policy-v1",
+            hard_gates=HardGateEvidence(
+                qualification=True,
+                point_in_time=True,
+                leakage=True,
+                calibration=True,
+                economics=True,
+                stability=True,
+                coverage=True,
+                operational=True,
+                security=True,
+                reproducibility=True,
+            ),
+            expected_version=1,
+            occurred_at=now,
+        )
+    )
+    return application, identity
+
+
+def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> None:
+    application, identity = _governance_application()
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    headers = {"Authorization": identity.credential.authorization_header()}
+
+    rest = client.get(
+        "/api/v1/research/model-families/dual-market-price-baseline-v1/backtests",
+        headers=headers,
+    )
+    page = client.get(
+        "/research/model-families/dual-market-price-baseline-v1/backtests",
+        headers=headers,
+    )
+
+    assert rest.status_code == 200
+    assert rest.json() == {
+        "model_family_id": "dual-market-price-baseline-v1",
+        "candidate": {
+            "candidate_id": "candidate-research",
+            "model_family": "regularized_multinomial_logistic",
+            "artifact_id": "sha256:research-artifact",
+            "formal_qualification": False,
+        },
+        "baseline": {
+            "model_family": "class_prior",
+            "equal_cell_macro_f1": 0.333,
+        },
+        "evaluation": {
+            "evaluation_report_id": "sha256:research-evaluation",
+            "logistic_equal_cell_macro_f1": 0.812,
+            "improvement_percentage_points": 47.9,
+        },
+        "calibration": {"sufficient": 6, "required": 6},
+        "support": {"fold_count": 16},
+        "gate": {
+            "status": "passed",
+            "policy_version_id": "bootstrap-gate-policy-v1",
+            "failed_gates": [],
+        },
+        "approval": {"status": "awaiting_approval"},
+        "shadow": {"eligible_cycle_count": 0, "required": 5},
+        "serving": {
+            "status": "blocked",
+            "production_assignment_id": None,
+        },
+    }
+    assert page.status_code == 200
+    assert "regularized_multinomial_logistic" in page.text
+    assert "class_prior" in page.text
+    assert "6 / 6" in page.text
+    assert "Gate passed" in page.text
+    assert "Serving blocked" in page.text
+    assert "0 / 5" in page.text
+
+
+def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> None:
+    application, identity = _governance_application()
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    headers = {
+        "Authorization": identity.credential.authorization_header(),
+        "Idempotency-Key": "approve-research-candidate",
+        "If-Match": '"2"',
+    }
+    body = {
+        "model_family_id": "dual-market-price-baseline-v1",
+        "candidate_id": "candidate-research",
+        "artifact_id": "sha256:research-artifact",
+        "evaluation_report_id": "sha256:research-evaluation",
+        "policy_version_id": "bootstrap-gate-policy-v1",
+        "decision": "approved",
+        "reason": "Exact bootstrap evidence reviewed for shadow only.",
+        "expected_assignment": "production:dual-market-price-baseline-v1",
+    }
+
+    first = client.post(
+        "/api/v1/governance/approval-decisions",
+        headers=headers,
+        json=body,
+    )
+    replay = client.post(
+        "/api/v1/governance/approval-decisions",
+        headers=headers,
+        json=body,
+    )
+    read_model = client.get(
+        "/api/v1/research/model-families/dual-market-price-baseline-v1/backtests",
+        headers={"Authorization": identity.credential.authorization_header()},
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert first.json() == replay.json()
+    assert first.json()["status"] == "approved"
+    assert first.json()["decision"]["approver_id"] == identity.context.principal_id
+    assert first.json()["decision"]["artifact_id"] == "sha256:research-artifact"
+    assert first.json()["decision"]["expected_assignment"] == (
+        "production:dual-market-price-baseline-v1"
+    )
+    assert read_model.json()["approval"] == {"status": "approved"}

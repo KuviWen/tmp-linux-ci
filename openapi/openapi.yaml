@@ -197,6 +197,57 @@ paths:
         '403': {$ref: '#/components/responses/ProblemResponse'}
         '404': {$ref: '#/components/responses/ProblemResponse'}
         '409': {$ref: '#/components/responses/ProblemResponse'}
+  /api/v1/research/model-families/{model_family_id}/backtests:
+    get:
+      operationId: getModelGovernanceBacktest
+      security:
+        - LocalApiKey: []
+      parameters:
+        - name: model_family_id
+          in: path
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+      responses:
+        '200':
+          description: Immutable candidate, baseline, calibration, support, gate, approval and shadow evidence.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelGovernanceBacktest'}
+        '401': {$ref: '#/components/responses/ProblemResponse'}
+        '403': {$ref: '#/components/responses/ProblemResponse'}
+        '404': {$ref: '#/components/responses/ProblemResponse'}
+  /api/v1/governance/approval-decisions:
+    post:
+      operationId: decideModelApproval
+      security:
+        - LocalApiKey: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 128}
+        - name: If-Match
+          in: header
+          required: true
+          description: Quoted expected lifecycle aggregate version.
+          schema: {type: string, pattern: '^"[0-9]+"$'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ApprovalDecisionRequest'}
+      responses:
+        '201':
+          description: Immutable approval or rejection decision bound to exact evidence.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApprovalDecisionResponse'}
+        '400': {$ref: '#/components/responses/ProblemResponse'}
+        '401': {$ref: '#/components/responses/ProblemResponse'}
+        '403': {$ref: '#/components/responses/ProblemResponse'}
+        '409': {$ref: '#/components/responses/ProblemResponse'}
+        '413': {$ref: '#/components/responses/ProblemResponse'}
+        '422': {$ref: '#/components/responses/ProblemResponse'}
   /api/v1/operations/health:
     get:
       operationId: listCanonicalHealth
@@ -871,6 +922,146 @@ components:
             maxLength: 4096
             writeOnly: true
         expires_at: {type: [string, 'null'], format: date-time, maxLength: 64}
+    ModelGovernanceBacktest:
+      type: object
+      additionalProperties: false
+      required:
+        - model_family_id
+        - candidate
+        - baseline
+        - evaluation
+        - calibration
+        - support
+        - gate
+        - approval
+        - shadow
+        - serving
+      properties:
+        model_family_id: {type: string}
+        candidate:
+          type: object
+          additionalProperties: false
+          required: [candidate_id, model_family, artifact_id, formal_qualification]
+          properties:
+            candidate_id: {type: string}
+            model_family: {type: string, const: regularized_multinomial_logistic}
+            artifact_id: {type: string}
+            formal_qualification: {type: boolean}
+        baseline:
+          type: object
+          additionalProperties: false
+          required: [model_family, equal_cell_macro_f1]
+          properties:
+            model_family: {type: string, const: class_prior}
+            equal_cell_macro_f1: {type: number, minimum: 0, maximum: 1}
+        evaluation:
+          type: object
+          additionalProperties: false
+          required:
+            - evaluation_report_id
+            - logistic_equal_cell_macro_f1
+            - improvement_percentage_points
+          properties:
+            evaluation_report_id: {type: string}
+            logistic_equal_cell_macro_f1: {type: number, minimum: 0, maximum: 1}
+            improvement_percentage_points: {type: number}
+        calibration:
+          type: object
+          additionalProperties: false
+          required: [sufficient, required]
+          properties:
+            sufficient: {type: integer, minimum: 0, maximum: 6}
+            required: {type: integer, const: 6}
+        support:
+          type: object
+          additionalProperties: false
+          required: [fold_count]
+          properties:
+            fold_count: {type: integer, minimum: 0}
+        gate:
+          type: object
+          required: [status]
+          properties:
+            status: {type: string, enum: [not_evaluated, passed, failed]}
+            policy_version_id: {type: string}
+            failed_gates:
+              type: array
+              items: {type: string}
+        approval:
+          type: object
+          additionalProperties: false
+          required: [status]
+          properties:
+            status: {type: string, enum: [awaiting_approval, approved, rejected]}
+        shadow:
+          type: object
+          additionalProperties: false
+          required: [eligible_cycle_count, required]
+          properties:
+            eligible_cycle_count: {type: integer, minimum: 0, maximum: 5}
+            required: {type: integer, const: 5}
+        serving:
+          type: object
+          additionalProperties: false
+          required: [status, production_assignment_id]
+          properties:
+            status: {type: string, enum: [blocked, assigned]}
+            production_assignment_id: {type: [string, 'null']}
+    ApprovalDecisionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - model_family_id
+        - candidate_id
+        - artifact_id
+        - evaluation_report_id
+        - policy_version_id
+        - decision
+        - reason
+        - expected_assignment
+      properties:
+        model_family_id: {type: string, minLength: 1, maxLength: 128}
+        candidate_id: {type: string, minLength: 1, maxLength: 128}
+        artifact_id: {type: string, minLength: 1, maxLength: 128}
+        evaluation_report_id: {type: string, minLength: 1, maxLength: 128}
+        policy_version_id: {type: string, minLength: 1, maxLength: 128}
+        decision: {type: string, enum: [approved, rejected]}
+        reason: {type: string, minLength: 1, maxLength: 1000}
+        expected_assignment: {type: string, minLength: 1, maxLength: 256}
+    ApprovalDecisionResponse:
+      type: object
+      additionalProperties: false
+      required: [status, version, decision]
+      properties:
+        status: {type: string, enum: [approved, approval_rejected]}
+        version: {type: integer, minimum: 1}
+        decision:
+          type: object
+          additionalProperties: false
+          required:
+            - approval_decision_id
+            - candidate_id
+            - artifact_id
+            - evaluation_report_id
+            - policy_version_id
+            - approver_id
+            - decision
+            - reason
+            - expected_assignment
+            - expires_at
+            - invalidated_reason
+          properties:
+            approval_decision_id: {type: string}
+            candidate_id: {type: string}
+            artifact_id: {type: string}
+            evaluation_report_id: {type: string}
+            policy_version_id: {type: string}
+            approver_id: {type: string}
+            decision: {type: string, enum: [approved, rejected]}
+            reason: {type: string}
+            expected_assignment: {type: string}
+            expires_at: {type: string, format: date-time}
+            invalidated_reason: {type: [string, 'null']}
     ProblemDetails:
       type: object
       additionalProperties: false

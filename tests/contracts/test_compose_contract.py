@@ -47,6 +47,11 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "ticket-08-api",
         "ticket-08-api-ingress",
         "ticket-08-acceptance",
+        "ticket-09-local-key-init",
+        "ticket-09-authorization-init",
+        "ticket-09-api",
+        "ticket-09-api-ingress",
+        "ticket-09-acceptance",
     }
     assert services["postgres"]["image"] == "postgres:17-alpine"
     assert services["postgres"]["environment"] == {
@@ -478,6 +483,39 @@ def test_compose_declares_ticket_08_historical_reconstruction_acceptance() -> No
     assert acceptance["depends_on"]["ticket-08-api"]["condition"] == "service_healthy"
     assert acceptance["depends_on"]["ticket-08-api-ingress"]["condition"] == ("service_healthy")
     assert "ticket-08-local-key" in compose["volumes"]
+
+
+def test_compose_declares_ticket_09_bootstrap_governance_acceptance() -> None:
+    compose = yaml.safe_load((REPOSITORY_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    profile = ["ticket-09-acceptance"]
+
+    key_init = services["ticket-09-local-key-init"]
+    assert key_init["profiles"] == profile
+    assert "model_governance.read" in key_init["command"]
+    assert "model_governance.approve" in key_init["command"]
+    assert services["ticket-09-authorization-init"]["profiles"] == profile
+    assert "init-ticket-09" in services["ticket-09-authorization-init"]["command"]
+    api = services["ticket-09-api"]
+    assert api["profiles"] == profile
+    assert api["environment"]["AUTHORIZATION_POLICY_SET_ID"] == (
+        "ticket-09-bootstrap-governance-engineering-v1"
+    )
+    assert services["ticket-09-api-ingress"]["network_mode"] == ("service:ticket-09-api")
+    acceptance = services["ticket-09-acceptance"]
+    assert acceptance["profiles"] == profile
+    assert acceptance["command"][:5] == [
+        "python",
+        "-m",
+        "stock_forecasting.cli",
+        "acceptance",
+        "ticket-09",
+    ]
+    assert "--base-url" in acceptance["command"]
+    assert "--key-file" in acceptance["command"]
+    assert acceptance["depends_on"]["ticket-09-api"]["condition"] == "service_healthy"
+    assert acceptance["depends_on"]["ticket-09-api-ingress"]["condition"] == ("service_healthy")
+    assert "ticket-09-local-key" in compose["volumes"]
 
 
 def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:

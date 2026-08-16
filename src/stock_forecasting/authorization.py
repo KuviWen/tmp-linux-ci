@@ -28,6 +28,8 @@ AuthorizationAction = Literal[
     "price_qualification.govern",
     "source_credential.read",
     "source_credential.manage",
+    "model_governance.read",
+    "model_governance.approve",
 ]
 AuthorizationPurpose = Literal["fixture_research", "price_research", "source_administration"]
 AuthorizationResourceState = Literal["active"]
@@ -359,6 +361,8 @@ class LocalApiKeyIdentity:
                         "price_qualification.govern",
                         "source_credential.read",
                         "source_credential.manage",
+                        "model_governance.read",
+                        "model_governance.approve",
                     }
                     for scope in scopes
                 )

@@ -946,6 +946,137 @@ services:
       ticket-08-authorization-init:
         condition: service_completed_successfully
 
+  ticket-09-local-key-init:
+    <<: *application
+    profiles: ["ticket-09-acceptance"]
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects
+      - dagster-home:/var/lib/dagster
+      - ticket-09-local-key:/run/stock-forecasting
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - local-key
+      - init
+      - --path
+      - /run/stock-forecasting/local-api-key.json
+      - --owner
+      - ticket-09-model-approver
+      - --environment
+      - development
+      - --scope
+      - model_governance.read
+      - --scope
+      - model_governance.approve
+      - --data-protection-class
+      - internal
+
+  ticket-09-authorization-init:
+    <<: *application
+    profiles: ["ticket-09-acceptance"]
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects
+      - dagster-home:/var/lib/dagster
+      - ticket-09-local-key:/run/stock-forecasting
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - authorization
+      - init-ticket-09
+      - --database-url
+      - postgresql+psycopg://postgres@postgres:5432/stock_forecasting
+      - --key-file
+      - /run/stock-forecasting/local-api-key.json
+    depends_on:
+      database-grants:
+        condition: service_completed_successfully
+      ticket-09-local-key-init:
+        condition: service_completed_successfully
+
+  ticket-09-api:
+    <<: *application
+    profiles: ["ticket-09-acceptance"]
+    build:
+      context: .
+      args:
+        SOURCE_DATE_EPOCH: "0"
+    environment:
+      <<: *application-environment
+      LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
+      AUTHORIZATION_POLICY_SET_ID: ticket-09-bootstrap-governance-engineering-v1
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects
+      - dagster-home:/var/lib/dagster
+      - ticket-09-local-key:/run/stock-forecasting
+    command: ["uvicorn", "stock_forecasting.asgi:app", "--host", "127.0.0.1", "--port", "8000"]
+    depends_on:
+      ticket-09-authorization-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  ticket-09-api-ingress:
+    image: nginx:1.29.1-alpine
+    profiles: ["ticket-09-acceptance"]
+    network_mode: service:ticket-09-api
+    volumes:
+      - ./docker/nginx/api-loopback.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      ticket-09-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/livez"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  ticket-09-acceptance:
+    <<: *application
+    profiles: ["ticket-09-acceptance"]
+    environment:
+      <<: *application-environment
+      LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
+      AUTHORIZATION_POLICY_SET_ID: ticket-09-bootstrap-governance-engineering-v1
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects
+      - ticket-09-local-key:/run/stock-forecasting:ro
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - acceptance
+      - ticket-09
+      - --database-url
+      - postgresql+psycopg://stock@postgres:5432/stock_forecasting
+      - --object-root
+      - /var/lib/stock-forecasting/objects
+      - --information-cutoff
+      - *fixture-information-cutoff
+      - --observed-at
+      - *fixture-collection-observed-at
+      - --base-url
+      - http://ticket-09-api:8080
+      - --key-file
+      - /run/stock-forecasting/local-api-key.json
+    depends_on:
+      ticket-09-api:
+        condition: service_healthy
+      ticket-09-api-ingress:
+        condition: service_healthy
+      database-grants:
+        condition: service_completed_successfully
+      ticket-09-authorization-init:
+        condition: service_completed_successfully
+
 volumes:
   postgres-data:
   fixture-objects:
@@ -959,3 +1090,4 @@ volumes:
   ticket-07-source-adapter-key:
   ticket-07-source-secrets:
   ticket-08-local-key:
+  ticket-09-local-key:

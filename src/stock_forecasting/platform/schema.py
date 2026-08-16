@@ -144,3 +144,21 @@ production_prediction_records = Table(
     Column("horizon_sessions", Integer, nullable=False),
     Column("payload", JSON, nullable=False),
 )
+
+model_lifecycle_events = Table(
+    "model_lifecycle_events",
+    metadata,
+    Column("sequence", Integer, primary_key=True, autoincrement=True),
+    Column("event_id", String(72), nullable=False, unique=True),
+    Column("command_id", String(128), nullable=False, unique=True),
+    Column("model_family_id", String(128), nullable=False),
+    Column("aggregate_version", Integer, nullable=False),
+    Column("event_kind", String(64), nullable=False),
+    Column("payload", JSON, nullable=False),
+    Column("occurred_at", String(32), nullable=False),
+    UniqueConstraint(
+        "model_family_id",
+        "aggregate_version",
+        name="uq_model_lifecycle_family_version",
+    ),
+)

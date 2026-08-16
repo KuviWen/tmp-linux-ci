@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, Literal, cast
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -27,6 +27,7 @@ from stock_forecasting.authorization import (
     SecurityContext,
 )
 from stock_forecasting.contracts import PredictionPayload
+from stock_forecasting.model_governance import DecideApproval, LifecycleConflict
 from stock_forecasting.platform.state_store import ImmutableStateConflict
 
 OPENAPI_SOURCE = Path(__file__).parents[3] / "openapi" / "openapi.yaml"
@@ -53,6 +54,19 @@ class SourceCredentialWriteRequest(BaseModel):
         Field(min_length=1, max_length=8),
     ]
     expires_at: Annotated[str, StringConstraints(max_length=64)] | None = None
+
+
+class ApprovalDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_family_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    candidate_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    artifact_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    evaluation_report_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    policy_version_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
+    decision: Literal["approved", "rejected"]
+    reason: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    expected_assignment: Annotated[str, StringConstraints(min_length=1, max_length=256)]
 
 
 class _RequestBodyTooLarge(Exception):
@@ -354,6 +368,130 @@ def create_web_app(application: Application) -> FastAPI:
     @app.get("/api/v1/operations/health")
     def list_health(scope: str = Query(...)) -> dict[str, object]:
         return {"items": application.operations_control.list_health(scope=scope)}
+
+    @app.get(
+        "/api/v1/research/model-families/{model_family_id}/backtests",
+        response_model=None,
+    )
+    def get_model_family_backtest(
+        model_family_id: str,
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object]:
+        if "model_governance.read" not in security_context.scopes:
+            raise HTTPException(status_code=403, detail="model_governance_read_required")
+        try:
+            return application.model_governance_query.get_backtest(model_family_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="model_family_not_found") from error
+
+    @app.post(
+        "/api/v1/governance/approval-decisions",
+        status_code=201,
+        response_model=None,
+    )
+    def post_approval_decision(
+        body: ApprovalDecisionRequest,
+        idempotency_key: str = Header(..., alias="Idempotency-Key"),
+        if_match: str = Header(..., alias="If-Match"),
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object]:
+        if "model_governance.approve" not in security_context.scopes:
+            raise HTTPException(status_code=403, detail="model_governance_approve_required")
+        if len(idempotency_key) > 128:
+            raise HTTPException(status_code=422, detail="idempotency_key_too_long")
+        try:
+            expected_version = int(if_match.strip('"'))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="invalid_if_match") from error
+        try:
+            result = application.model_lifecycle.execute(
+                DecideApproval(
+                    command_id=idempotency_key,
+                    model_family_id=body.model_family_id,
+                    candidate_id=body.candidate_id,
+                    artifact_id=body.artifact_id,
+                    evaluation_report_id=body.evaluation_report_id,
+                    policy_version_id=body.policy_version_id,
+                    approver_id=security_context.principal_id,
+                    decision=body.decision,
+                    reason=body.reason,
+                    expected_assignment=body.expected_assignment,
+                    expected_version=expected_version,
+                    occurred_at=application.governance_time(),
+                )
+            )
+        except (LifecycleConflict, KeyError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        decision = result.approval_decision
+        if decision is None:
+            raise RuntimeError("approval_decision_missing")
+        return {
+            "status": result.status,
+            "version": result.version,
+            "decision": {
+                "approval_decision_id": decision.approval_decision_id,
+                "candidate_id": decision.candidate_id,
+                "artifact_id": decision.artifact_id,
+                "evaluation_report_id": decision.evaluation_report_id,
+                "policy_version_id": decision.policy_version_id,
+                "approver_id": decision.approver_id,
+                "decision": decision.decision,
+                "reason": decision.reason,
+                "expected_assignment": decision.expected_assignment,
+                "expires_at": decision.expires_at.isoformat(),
+                "invalidated_reason": decision.invalidated_reason,
+            },
+        }
+
+    @app.get(
+        "/research/model-families/{model_family_id}/backtests",
+        response_class=HTMLResponse,
+        response_model=None,
+    )
+    def model_family_backtest_page(
+        model_family_id: str,
+        security_context: SecurityContext = research_authentication,
+    ) -> str:
+        if "model_governance.read" not in security_context.scopes:
+            raise HTTPException(status_code=403, detail="model_governance_read_required")
+        try:
+            report = application.model_governance_query.get_backtest(model_family_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="model_family_not_found") from error
+        candidate = cast(dict[str, object], report["candidate"])
+        baseline = cast(dict[str, object], report["baseline"])
+        evaluation = cast(dict[str, object], report["evaluation"])
+        calibration = cast(dict[str, object], report["calibration"])
+        support = cast(dict[str, object], report["support"])
+        gate = cast(dict[str, object], report["gate"])
+        approval = cast(dict[str, object], report["approval"])
+        shadow = cast(dict[str, object], report["shadow"])
+        serving = cast(dict[str, object], report["serving"])
+        formal_qualification = escape(str(candidate["formal_qualification"]))
+        body = (
+            "<main><header><h1>模型治理回測</h1>"
+            f"<p>{escape(model_family_id)}</p></header>"
+            '<section class="panel"><h2>Candidate vs baseline</h2><dl>'
+            f"<dt>Candidate</dt><dd>{escape(str(candidate['model_family']))}</dd>"
+            f"<dt>Artifact</dt><dd>{escape(str(candidate['artifact_id']))}</dd>"
+            f"<dt>Formal qualification</dt><dd>{formal_qualification}</dd>"
+            f"<dt>Baseline</dt><dd>{escape(str(baseline['model_family']))}</dd>"
+            f"<dt>Baseline macro-F1</dt><dd>{baseline['equal_cell_macro_f1']}</dd>"
+            f"<dt>Candidate macro-F1</dt><dd>{evaluation['logistic_equal_cell_macro_f1']}</dd>"
+            f"<dt>Improvement</dt><dd>{evaluation['improvement_percentage_points']} pp</dd>"
+            "</dl></section>"
+            '<section class="panel"><h2>Calibration and support</h2><dl>'
+            f"<dt>Calibrators</dt><dd>{calibration['sufficient']} / {calibration['required']}</dd>"
+            f"<dt>Walk-forward folds</dt><dd>{support['fold_count']}</dd>"
+            "</dl></section>"
+            '<section class="panel"><h2>Governance</h2><dl>'
+            f"<dt>Gate</dt><dd>Gate {escape(str(gate['status']))}</dd>"
+            f"<dt>Approval</dt><dd>{escape(str(approval['status']))}</dd>"
+            f"<dt>Shadow</dt><dd>{shadow['eligible_cycle_count']} / {shadow['required']}</dd>"
+            f"<dt>Serving</dt><dd>Serving {escape(str(serving['status']))}</dd>"
+            "</dl></section></main>"
+        )
+        return _page("模型治理回測", body)
 
     @app.get("/api/v1/research/predictions", response_model=None)
     def list_predictions(

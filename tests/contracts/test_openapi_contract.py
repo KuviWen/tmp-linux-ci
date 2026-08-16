@@ -19,6 +19,25 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "/api/v1/operations/source-credentials/{provider_id}",
         "/api/v1/operations/source-credentials/{provider_id}/rotations",
         "/api/v1/operations/source-credentials/{provider_id}/validations",
+        "/api/v1/research/model-families/{model_family_id}/backtests",
+        "/api/v1/governance/approval-decisions",
+    }
+    backtests = contract["paths"]["/api/v1/research/model-families/{model_family_id}/backtests"][
+        "get"
+    ]
+    assert backtests["responses"]["200"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ModelGovernanceBacktest"
+    }
+    approval = contract["paths"]["/api/v1/governance/approval-decisions"]["post"]
+    assert {parameter["name"] for parameter in approval["parameters"]} == {
+        "Idempotency-Key",
+        "If-Match",
+    }
+    assert approval["requestBody"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ApprovalDecisionRequest"
+    }
+    assert approval["responses"]["201"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ApprovalDecisionResponse"
     }
     assert contract["paths"]["/api/v1/research/listings/{listing_id}/price-eligibility"]["get"][
         "responses"
