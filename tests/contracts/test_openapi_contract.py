@@ -234,7 +234,23 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "pagination_pages",
         "datasets",
         "symbol_lifecycle_probe",
+        "universe_manifest_id",
+        "reference_graph_version_id",
+        "listing_ids",
         "source_contract_reason_code",
+    }
+    assert source_contract_assessment["properties"]["universe_manifest_id"] == {
+        "type": ["string", "null"],
+        "minLength": 1,
+    }
+    assert source_contract_assessment["properties"]["reference_graph_version_id"] == {
+        "type": ["string", "null"],
+        "minLength": 1,
+    }
+    assert source_contract_assessment["properties"]["listing_ids"] == {
+        "type": "array",
+        "items": {"type": "string", "format": "uuid"},
+        "uniqueItems": True,
     }
     validation_response = contract["components"]["schemas"]["SourceCredentialValidationResponse"]
     assert validation_response["additionalProperties"] is False

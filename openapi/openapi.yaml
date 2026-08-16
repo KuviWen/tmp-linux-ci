@@ -811,6 +811,9 @@ components:
         - pagination_pages
         - datasets
         - symbol_lifecycle_probe
+        - universe_manifest_id
+        - reference_graph_version_id
+        - listing_ids
         - source_contract_reason_code
       properties:
         contract_id: {type: [string, 'null']}
@@ -823,6 +826,16 @@ components:
         symbol_lifecycle_probe:
           type: [string, 'null']
           enum: [passed, null]
+        universe_manifest_id:
+          type: [string, 'null']
+          minLength: 1
+        reference_graph_version_id:
+          type: [string, 'null']
+          minLength: 1
+        listing_ids:
+          type: array
+          items: {type: string, format: uuid}
+          uniqueItems: true
         source_contract_reason_code:
           type: [string, 'null']
     SourceCredentialValidationResponse:
