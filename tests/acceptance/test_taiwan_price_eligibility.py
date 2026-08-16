@@ -903,6 +903,9 @@ def test_independently_qualified_claim_unlocks_historical_data_supply(
         },
         "public_terms_url": "https://example.test/taiwan-platform-terms",
         "calendar_version": "xtai-realized-calendar-v1",
+        "adjustment_rule_version": "internal-price-adjustment/v1",
+        "label_rule_version": "trend-label-rule/v1",
+        "code_provenance": "git:ticket-08-data-supply-test",
         "listings": [
             {
                 "listing_id": listing_id,
@@ -946,6 +949,9 @@ def test_independently_qualified_claim_unlocks_historical_data_supply(
     calendar_content = json.dumps(
         {
             "schema_version": "historical-realized-calendar/v1",
+            "source_reference": (
+                f"https://archive.example.test/{loaded.collection.source_id}.json"
+            ),
             "market": "XTAI",
             "version": evidence["calendar_version"],
             "sessions": listing_evidence["sessions"],
@@ -961,6 +967,9 @@ def test_independently_qualified_claim_unlocks_historical_data_supply(
     reference_content = json.dumps(
         {
             "schema_version": "historical-listing-reference/v1",
+            "source_reference": (
+                f"https://archive.example.test/{loaded.collection.source_id}.json"
+            ),
             "listing": {
                 key: listing_evidence[key]
                 for key in (

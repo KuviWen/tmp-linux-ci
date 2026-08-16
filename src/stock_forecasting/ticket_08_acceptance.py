@@ -42,6 +42,7 @@ def _realized_weekdays(*, start: date, count: int) -> list[str]:
 
 def _engineering_archive(
     *,
+    source_id: str,
     listing_id: str,
     market: str,
     security_id: str,
@@ -59,7 +60,7 @@ def _engineering_archive(
         "evidence_version": f"ticket-08-{market.lower()}-engineering-archive-v1",
         "revision": "rev-1",
         "observation_kind": "official_archive",
-        "observation_reference": f"https://archive.example.test/{market}/engineering.json",
+        "observation_reference": f"https://archive.example.test/{source_id}.json",
         "observed_at": observed_at.isoformat(),
         "coverage": {"start": sessions[0], "end": sessions[-1]},
         "validity": {
@@ -289,6 +290,7 @@ def run_ticket_08_acceptance(
     for listing_id, market, security_id, symbol in inputs:
         source_id = f"ticket-08-{market.lower()}-engineering-archive"
         evidence = _engineering_archive(
+            source_id=source_id,
             listing_id=listing_id,
             market=market,
             security_id=security_id,
@@ -304,6 +306,7 @@ def run_ticket_08_acceptance(
             repository,
             {
                 "schema_version": "historical-realized-calendar/v1",
+                "source_reference": f"https://archive.example.test/{source_id}.json",
                 "market": market,
                 "version": evidence["calendar_version"],
                 "sessions": listing["sessions"],
@@ -313,6 +316,7 @@ def run_ticket_08_acceptance(
             repository,
             {
                 "schema_version": "historical-listing-reference/v1",
+                "source_reference": f"https://archive.example.test/{source_id}.json",
                 "listing": {
                     key: listing[key]
                     for key in (

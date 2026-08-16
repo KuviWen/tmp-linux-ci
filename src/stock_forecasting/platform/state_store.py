@@ -1323,6 +1323,8 @@ class StateStore:
             "source_access_basis",
             "collection_authorization_decision_ids",
             "collector_principal_ids",
+            "distribution_bindings",
+            "first_observed_at",
             "attested_at",
         }
         if (
@@ -1343,6 +1345,22 @@ class StateStore:
             != sorted(str(authorization.get("decision_id")) for authorization in authorizations)
             or payload.get("collector_principal_ids")
             != sorted({str(authorization.get("principal_id")) for authorization in authorizations})
+            or payload.get("distribution_bindings")
+            != sorted(
+                [
+                    {
+                        "distribution_id": str(authorization["distribution_id"]),
+                        "distribution_url": str(authorization["distribution_url"]),
+                    }
+                    for authorization in authorizations
+                    if isinstance(authorization.get("distribution_id"), str)
+                    and isinstance(authorization.get("distribution_url"), str)
+                ],
+                key=lambda binding: (
+                    binding["distribution_id"],
+                    binding["distribution_url"],
+                ),
+            )
         ):
             raise ValueError("historical_evidence_attestation_invalid")
         return self._publish_trace_artifact(
@@ -1351,6 +1369,46 @@ class StateStore:
             payload=payload,
             trace_id=trace_id,
             authorization_outcomes=[(authorization, "allowed") for authorization in authorizations],
+        )
+
+    def _publish_historical_policy_blocked(
+        self,
+        *,
+        payload: dict[str, object],
+        trace_id: str,
+        authorizations: list[dict[str, object]],
+    ) -> str:
+        if (
+            payload.get("qualification_report_schema_version")
+            != "historical-qualification-report/v1"
+            or payload.get("status") != "policy_blocked"
+            or not isinstance(payload.get("listing_id"), str)
+            or not isinstance(payload.get("market"), str)
+            or not isinstance(payload.get("source_id"), str)
+            or not isinstance(payload.get("reason_code"), str)
+            or not authorizations
+            or not any(
+                authorization.get("reason_code") != "authorized" for authorization in authorizations
+            )
+            or any(
+                authorization.get("action") != "price_qualification.govern"
+                or authorization.get("dataset_id") != payload.get("source_id")
+                for authorization in authorizations
+            )
+        ):
+            raise ValueError("historical_policy_blocked_report_invalid")
+        return self._publish_trace_artifact(
+            artifact_kind="historical_qualification_report",
+            execution_purpose="governance",
+            payload=payload,
+            trace_id=trace_id,
+            authorization_outcomes=[
+                (
+                    authorization,
+                    "allowed" if authorization.get("reason_code") == "authorized" else "denied",
+                )
+                for authorization in authorizations
+            ],
         )
 
     def list_historical_claim_impacts(self, *, claim_id: str) -> list[dict[str, object]]:

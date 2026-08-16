@@ -558,7 +558,11 @@ class TaiwanPriceQualificationWorkflow:
                 or claim.source_id != manifest.historical_source_id
             ):
                 return False
-            self._validate_historical_evidence(claim, claim_id=claim_id)
+            if self._clock is None or not QualifiedHistoricalAvailabilityClaimVerifier(
+                self._state_store,
+                evaluated_at=self._clock(),
+            ).is_formally_reconstructable(claim_id=claim_id, claim=claim):
+                return False
             gate_payload = self._state_store.get_verified_governance_artifact(
                 artifact_id=gate_id,
                 artifact_kind="taiwan_price_qualification_gate",
@@ -630,20 +634,27 @@ class TaiwanPriceQualificationWorkflow:
                 or claim.source_id != manifest.historical_source_id
             ):
                 raise ValueError("formal_gate_requires_qualified_historical_claim")
-            self._validate_historical_evidence(
-                claim,
+            if self._clock is None or not QualifiedHistoricalAvailabilityClaimVerifier(
+                self._state_store,
+                evaluated_at=self._clock(),
+            ).is_formally_reconstructable(
                 claim_id=historical_availability_claim_id,
-            )
+                claim=claim,
+            ):
+                raise ValueError("formal_gate_requires_complete_historical_reconstruction")
         except (KeyError, ValueError) as error:
+            reason_code = str(error)
+            if reason_code != "formal_gate_requires_complete_historical_reconstruction":
+                reason_code = "formal_gate_requires_qualified_historical_claim"
             self._state_store._publish_governance_rejection(
                 payload={
                     "operation": "register_formal_qualification_gate",
-                    "reason_code": "formal_gate_requires_qualified_historical_claim",
+                    "reason_code": reason_code,
                 },
                 trace_id=trace_id,
                 authorizations=authorizations,
             )
-            raise ValueError("formal_gate_requires_qualified_historical_claim") from error
+            raise ValueError(reason_code) from error
         try:
             if source_basis_evidence_id is None:
                 raise ValueError("formal_gate_requires_verified_source_basis")

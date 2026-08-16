@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -22,6 +23,7 @@ from stock_forecasting.authorization import (
 from stock_forecasting.historical_evidence import (
     HistoricalEvidenceAttestationCommand,
     HistoricalEvidenceAttestationIssuer,
+    HistoricalEvidenceAuthorizationError,
     HistoricalEvidenceCommand,
     HistoricalEvidenceWorkflow,
 )
@@ -80,6 +82,7 @@ def _price_read_policy(identity: LocalApiKeyIdentity, now: datetime) -> Authoriz
 
 def _archive_evidence(
     *,
+    source_id: str,
     listing_id: str,
     market: str,
     security_id: str,
@@ -96,7 +99,7 @@ def _archive_evidence(
         "evidence_version": f"engineering-{market.lower()}-archive-v1",
         "revision": "rev-1",
         "observation_kind": "official_archive",
-        "observation_reference": f"https://archive.example.test/{market}/engineering.json",
+        "observation_reference": f"https://archive.example.test/{source_id}.json",
         "observed_at": "2026-08-15T22:00:00+00:00",
         "coverage": {"start": sessions[0], "end": sessions[-1]},
         "validity": {
@@ -184,6 +187,7 @@ def test_historical_reconstruction_is_visible_without_becoming_production_predic
     )
     source_id = f"engineering-{market.lower()}-archive"
     evidence = _archive_evidence(
+        source_id=source_id,
         listing_id=listing_id,
         market=market,
         security_id=security_id,
@@ -195,6 +199,7 @@ def test_historical_reconstruction_is_visible_without_becoming_production_predic
         application.object_repository,
         {
             "schema_version": "historical-realized-calendar/v1",
+            "source_reference": f"https://archive.example.test/{source_id}.json",
             "market": market,
             "version": evidence["calendar_version"],
             "sessions": listing["sessions"],
@@ -204,6 +209,7 @@ def test_historical_reconstruction_is_visible_without_becoming_production_predic
         application.object_repository,
         {
             "schema_version": "historical-listing-reference/v1",
+            "source_reference": f"https://archive.example.test/{source_id}.json",
             "listing": {
                 key: listing[key]
                 for key in (
@@ -375,3 +381,91 @@ def test_historical_reconstruction_is_visible_without_becoming_production_predic
     assert quarantined_ui.status_code == 200
     assert "quarantined" in quarantined_ui.text
     assert "未建立" in quarantined_ui.text
+
+    denied_policy = AuthorizationPolicy(
+        action_grants=governance_policy.action_grants,
+        source_policies=tuple(
+            replace(policy, allowed_actions=frozenset({"market_data.collect"}))
+            for policy in governance_policy.source_policies
+        ),
+        source_entitlements=governance_policy.source_entitlements,
+    )
+    denied_workflow = HistoricalEvidenceWorkflow(
+        application.state_store,
+        object_repository=application.object_repository,
+        observed_at=now,
+        authorization_policy=denied_policy,
+        security_context=governor.context,
+    )
+    with pytest.raises(
+        HistoricalEvidenceAuthorizationError,
+        match="source_policy_action_denied",
+    ):
+        denied_workflow.execute(
+            HistoricalEvidenceCommand(
+                action="qualify",
+                listing_id=listing_id,
+                market=market,
+                source_id=source_id,
+                trace_id=f"trace-ticket-08-{market.lower()}-policy-blocked",
+                attestation_id=attestation_id,
+            )
+        )
+    blocked_research_response = client.get(
+        f"/api/v1/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+    blocked_operations_response = client.get(
+        "/api/v1/operations/sources",
+        headers=headers,
+    )
+    blocked_ui = client.get(
+        f"/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+    assert blocked_research_response.status_code == 200
+    assert blocked_research_response.json()["historical_reconstruction"]["status"] == (
+        "policy_blocked"
+    )
+    assert blocked_research_response.json()["historical_reconstruction"]["reason_code"] == (
+        "source_policy_action_denied"
+    )
+    assert blocked_operations_response.status_code == 200
+    assert any(
+        item["status"] == "policy_blocked" and item["source_id"] == source_id
+        for item in blocked_operations_response.json()["items"]
+    )
+    assert blocked_ui.status_code == 200
+    assert "policy_blocked" in blocked_ui.text
+    assert "source_policy_action_denied" in blocked_ui.text
+
+    unknown_policy_workflow = HistoricalEvidenceWorkflow(
+        application.state_store,
+        object_repository=application.object_repository,
+        observed_at=now,
+        authorization_policy=AuthorizationPolicy(
+            action_grants=governance_policy.action_grants,
+            source_policies=(),
+            source_entitlements=governance_policy.source_entitlements,
+        ),
+        security_context=governor.context,
+    )
+    unknown_trace_id = f"trace-ticket-08-{market.lower()}-unknown-policy"
+    with pytest.raises(HistoricalEvidenceAuthorizationError, match="source_policy_unknown"):
+        unknown_policy_workflow.execute(
+            HistoricalEvidenceCommand(
+                action="qualify",
+                listing_id=listing_id,
+                market=market,
+                source_id=source_id,
+                trace_id=unknown_trace_id,
+                attestation_id=attestation_id,
+            )
+        )
+    unknown_trace = application.state_store.get_trace_evidence(unknown_trace_id)
+    assert unknown_trace["artifact_kinds"] == [
+        "qualification_governance_rejection",
+        "historical_qualification_report",
+    ]
+    assert unknown_trace["audit_events"][0]["outcome"] == "denied"
+    assert unknown_trace["audit_events"][0]["reason_code"] == "source_policy_unknown"

@@ -21,8 +21,9 @@ Status: ready-for-agent
 
 ## Implementation notes
 
-- 公共 seam：`HistoricalEvidenceAttestationIssuer.issue` 以具 `market_data.collect` 權限的 collector 將 evidence／calendar／reference 物件與來源政策、distribution authorization 綁定；不同 principal 的 `HistoricalEvidenceWorkflow.execute` 再以 `price_qualification.govern` 權限執行資格化與 append-only 影響證據。Research eligibility REST/UI 與 `OperationsControl.list_historical_qualifications` 負責外部投影；Compose `ticket-08-acceptance` 驗證部署邊界。
+- 公共 seam：`HistoricalEvidenceAttestationIssuer.issue` 以具 `market_data.collect` 權限的 collector 將 evidence／calendar／reference 物件、權威 `first_observed_at` 與來源政策的 distribution authorization 綁定；三份證據的來源引用必須符合授權 distribution。不同 principal 的 `HistoricalEvidenceWorkflow.execute` 再以 `price_qualification.govern` 權限執行資格化與 append-only 影響證據。Research eligibility REST/UI 與 `OperationsControl.list_historical_qualifications` 負責外部投影；Compose `ticket-08-acceptance` 驗證部署邊界。
 - 歷史資料以 `listing_id`／`security_id` 保存身分，ticker 僅是具有效期的 symbol；資格化逐一比對 immutable realized calendar、listing reference、生命週期、公司行動與 checksum。來源資料、內部調整值及成熟標籤留在 content-addressed object repository，治理 artifact 只保存安全的物件引用與 lineage。
-- 正式 qualification gate 另外要求 HistoricalAvailabilityClaim 的 `source_policy_id` 必須屬於已驗證 source-basis evidence；engineering contract 產生的 claim 不得藉由另一份正式來源證據升格。
+- 正式 qualification gate 除要求 HistoricalAvailabilityClaim 的 `source_policy_id` 屬於已驗證 source-basis evidence，也驗證該 claim 唯一的 qualification report 與 dataset／adjustment／mature-label／FeatureSnapshot／fold-manifest 完整鏈；engineering contract 產生的 claim 不得藉由另一份正式來源證據升格。
+- 缺少、衝突或拒絕的 source policy 會先記錄 denied authorization audit，再發布可由 REST／UI／OperationsControl 觀察的 `policy_blocked` report；content-addressed object metadata 只保存內容固有屬性，policy lineage 留在 governance artifacts，避免相同 bytes 被 first-writer policy 污染。
 - 驗證：ticket-focused 測試 38 passed；非 PostgreSQL 全套 368 passed／1 deselected；PostgreSQL 1 passed／368 deselected；`mypy src tests`、`ruff check .`、`ruff format --check .`、Compose config、wheel build 均通過。
 - 部署 acceptance：`docker compose -f compose.yaml --profile ticket-08-acceptance run --build --rm ticket-08-acceptance` 回傳 `status=passed`，六項 checks 全為 true；輸出標示 `evidence_kind=engineering_acceptance` 與 `formal_source_qualification=not_claimed`，不宣稱 fixture 為正式來源資格。

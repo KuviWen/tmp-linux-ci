@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -151,6 +152,12 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
     )
     state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
     listing_id = manifest.listings[0].listing_id
+    sessions: list[str] = []
+    candidate_session = date(2026, 5, 4)
+    while len(sessions) < 41:
+        if candidate_session.weekday() < 5:
+            sessions.append(candidate_session.isoformat())
+        candidate_session += timedelta(days=1)
     evidence: dict[str, object] = {
         "schema_version": "historical-reconstruction-evidence/v1",
         "price_schema_version": "taiwan-unadjusted-eod-v1",
@@ -159,13 +166,16 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         "observation_kind": "platform_observation",
         "observation_reference": "platform://ticket-08/formal-taiwan-history",
         "observed_at": "2026-08-15T22:00:00+00:00",
-        "coverage": {"start": "2019-08-14", "end": "2026-08-14"},
+        "coverage": {"start": sessions[0], "end": sessions[-1]},
         "validity": {
             "valid_from": "2026-08-15T22:00:00+00:00",
             "valid_until": "2026-09-15T22:00:00+00:00",
         },
         "public_terms_url": "https://data.gov.tw/license",
         "calendar_version": "xtai-realized-calendar-v1",
+        "adjustment_rule_version": "internal-price-adjustment/v1",
+        "label_rule_version": "trend-label-rule/v1",
+        "code_provenance": "git:ticket-08-formal-test",
         "listings": [
             {
                 "listing_id": listing_id,
@@ -178,10 +188,9 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
                         "valid_to": None,
                     }
                 ],
-                "sessions": ["2019-08-14", "2026-08-14"],
+                "sessions": sessions,
                 "unadjusted_prices": [
-                    {"session_date": "2019-08-14", "close": "100.00"},
-                    {"session_date": "2026-08-14", "close": "200.00"},
+                    {"session_date": session, "close": "100.00"} for session in sessions
                 ],
                 "company_actions": [],
                 "company_actions_status": "complete",
@@ -202,9 +211,11 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         metadata={"content_type": "application/json"},
     ).object_id
     listing_evidence = cast(list[dict[str, object]], evidence["listings"])[0]
+    historical_distribution_url = manifest.source_basis.datasets[0].distribution_url
     calendar_content = json.dumps(
         {
             "schema_version": "historical-realized-calendar/v1",
+            "source_reference": historical_distribution_url,
             "market": "XTAI",
             "version": evidence["calendar_version"],
             "sessions": listing_evidence["sessions"],
@@ -220,6 +231,7 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
     reference_content = json.dumps(
         {
             "schema_version": "historical-listing-reference/v1",
+            "source_reference": historical_distribution_url,
             "listing": {
                 key: listing_evidence[key]
                 for key in (
@@ -240,13 +252,14 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
         expected_checksum=hashlib.sha256(reference_content).hexdigest(),
         metadata={"content_type": "application/json"},
     ).object_id
-    attestation_id = HistoricalEvidenceAttestationIssuer(
+    history_issuer = HistoricalEvidenceAttestationIssuer(
         state_store,
         object_repository=repository,
         authorization_policy=policy,
         security_context=collector.context,
         clock=lambda: now,
-    ).issue(
+    )
+    attestation_id = history_issuer.issue(
         HistoricalEvidenceAttestationCommand(
             listing_id=listing_id,
             market="XTAI",
@@ -258,13 +271,14 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
             trace_id="trace-ticket-08-formal-attestation",
         )
     )
-    claim = HistoricalEvidenceWorkflow(
+    history_workflow = HistoricalEvidenceWorkflow(
         state_store,
         object_repository=repository,
         observed_at=now,
         authorization_policy=policy,
         security_context=identity.context,
-    ).execute(
+    )
+    claim = history_workflow.execute(
         HistoricalEvidenceCommand(
             action="qualify",
             listing_id=listing_id,
@@ -323,12 +337,106 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
     ]
     assert workflow.formal_qualification_available(qualified_manifest, sources) is True
 
+    incomplete_evidence = deepcopy(evidence)
+    for field_name in (
+        "adjustment_rule_version",
+        "label_rule_version",
+        "code_provenance",
+    ):
+        incomplete_evidence.pop(field_name)
+    incomplete_content = json.dumps(
+        incomplete_evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    incomplete_object_id = repository.put_verified(
+        BytesIO(incomplete_content),
+        expected_checksum=hashlib.sha256(incomplete_content).hexdigest(),
+        metadata={"content_type": "application/json"},
+    ).object_id
+    incomplete_attestation_id = history_issuer.issue(
+        HistoricalEvidenceAttestationCommand(
+            listing_id=listing_id,
+            market="XTAI",
+            source_id=manifest.historical_source_id,
+            evidence_level="platform_observed",
+            evidence_object_id=incomplete_object_id,
+            calendar_object_id=calendar_object_id,
+            reference_object_id=reference_object_id,
+            trace_id="trace-ticket-08-incomplete-formal-attestation",
+        )
+    )
+    incomplete_claim = history_workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id=listing_id,
+            market="XTAI",
+            source_id=manifest.historical_source_id,
+            trace_id="trace-ticket-08-incomplete-formal-claim",
+            attestation_id=incomplete_attestation_id,
+        )
+    )
+    assert incomplete_claim.claim_id is not None
+    with pytest.raises(
+        ValueError,
+        match="formal_gate_requires_complete_historical_reconstruction",
+    ):
+        workflow.register_formal_qualification_gate(
+            manifest=archived_manifest,
+            historical_availability_claim_id=incomplete_claim.claim_id,
+            source_basis_evidence_id=source_basis_id,
+            trace_id="trace-ticket-08-incomplete-formal-gate",
+        )
+
     engineering_collector, engineering_governor, engineering_policy = (
         build_ticket_08_engineering_governance(
             observed_at=now,
             source_ids=(manifest.historical_source_id,),
         )
     )
+    engineering_distribution_url = (
+        f"https://archive.example.test/{manifest.historical_source_id}.json"
+    )
+    engineering_calendar_content = json.dumps(
+        {
+            "schema_version": "historical-realized-calendar/v1",
+            "source_reference": engineering_distribution_url,
+            "market": "XTAI",
+            "version": evidence["calendar_version"],
+            "sessions": listing_evidence["sessions"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    engineering_calendar_object_id = repository.put_verified(
+        BytesIO(engineering_calendar_content),
+        expected_checksum=hashlib.sha256(engineering_calendar_content).hexdigest(),
+        metadata={"content_type": "application/json"},
+    ).object_id
+    engineering_reference_content = json.dumps(
+        {
+            "schema_version": "historical-listing-reference/v1",
+            "source_reference": engineering_distribution_url,
+            "listing": {
+                key: listing_evidence[key]
+                for key in (
+                    "listing_id",
+                    "market",
+                    "security_id",
+                    "symbols",
+                    "lifecycle",
+                    "company_actions",
+                )
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    engineering_reference_object_id = repository.put_verified(
+        BytesIO(engineering_reference_content),
+        expected_checksum=hashlib.sha256(engineering_reference_content).hexdigest(),
+        metadata={"content_type": "application/json"},
+    ).object_id
     engineering_attestation_id = HistoricalEvidenceAttestationIssuer(
         state_store,
         object_repository=repository,
@@ -342,8 +450,8 @@ def test_independently_verified_claim_can_create_formal_qualification_gate(
             source_id=manifest.historical_source_id,
             evidence_level="platform_observed",
             evidence_object_id=evidence_object_id,
-            calendar_object_id=calendar_object_id,
-            reference_object_id=reference_object_id,
+            calendar_object_id=engineering_calendar_object_id,
+            reference_object_id=engineering_reference_object_id,
             trace_id="trace-ticket-08-engineering-attestation",
         )
     )

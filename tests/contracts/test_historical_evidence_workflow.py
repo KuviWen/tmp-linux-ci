@@ -29,7 +29,7 @@ from stock_forecasting.historical_evidence import (
     QualifiedHistoricalAvailabilityClaimVerifier,
     SubmittedHistoricalEvidenceLevel,
 )
-from stock_forecasting.platform.object_repository import FilesystemObjectRepository
+from stock_forecasting.platform.object_repository import FilesystemObjectRepository, ObjectRef
 from stock_forecasting.platform.state_store import StateStore
 
 
@@ -244,6 +244,7 @@ def _attest(
         object_repository,
         {
             "schema_version": "historical-realized-calendar/v1",
+            "source_reference": f"https://archive.example.test/{source_id}.json",
             "market": market,
             "version": evidence["calendar_version"],
             "sessions": listing["sessions"],
@@ -253,6 +254,7 @@ def _attest(
         object_repository,
         {
             "schema_version": "historical-listing-reference/v1",
+            "source_reference": f"https://archive.example.test/{source_id}.json",
             "listing": {
                 key: listing[key]
                 for key in (
@@ -436,6 +438,7 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
 
     assert outcome.status == "qualified"
     assert outcome.reason_code == "historical_evidence_qualified"
+    assert outcome.use_scope == ("production",)
     assert outcome.claim_id is not None
     assert "verification" in outcome.artifact_ids
     claim = state_store.get_verified_governance_artifact(
@@ -458,6 +461,7 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         "observation_kind": "platform_observation",
         "observation_reference": "platform://raw-price-partition/2026-08-15",
         "evidence_observed_at": "2026-08-15T22:00:00+00:00",
+        "first_observed_at": "2026-08-16T02:00:00+00:00",
         "observed_start": "2026-08-14",
         "observed_end": "2026-08-15",
         "source_policy_id": "ticket-08/platform-us-prices-policy-v1",
@@ -475,7 +479,7 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         "supersedes_claim_id": None,
     }
     parsed_claim = HistoricalAvailabilityClaim.from_payload(claim)
-    assert QualifiedHistoricalAvailabilityClaimVerifier(
+    assert not QualifiedHistoricalAvailabilityClaimVerifier(
         state_store,
         evaluated_at=datetime(2026, 8, 16, 2, 0, tzinfo=UTC),
     ).is_usable(claim_id=outcome.claim_id, claim=parsed_claim)
@@ -561,6 +565,31 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
     report_payload = cast(dict[str, object], report["payload"])
     assert report_payload["status"] == "quarantined"
 
+    future_observation = deepcopy(evidence)
+    future_observation["observed_at"] = "2026-08-17T02:00:00+00:00"
+    future_observation_attestation = _attest(
+        issuer,
+        object_repository,
+        future_observation,
+        source_id="platform-us-prices",
+        listing_id="listing-us-xnas-meta",
+        market="XNAS",
+        evidence_level="platform_observed",
+        trace_id="trace-ticket-08-future-observation-attestation",
+    )
+    future = workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="platform-us-prices",
+            trace_id="trace-ticket-08-future-observation",
+            attestation_id=future_observation_attestation,
+        )
+    )
+    assert future.status == "quarantined"
+    assert future.reason_code == "historical_evidence_observation_chronology_invalid"
+
     listing = cast(list[dict[str, object]], evidence["listings"])[0]
     mismatched_calendar_attestation = issuer.issue(
         HistoricalEvidenceAttestationCommand(
@@ -573,6 +602,7 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
                 object_repository,
                 {
                     "schema_version": "historical-realized-calendar/v1",
+                    "source_reference": ("https://archive.example.test/platform-us-prices.json"),
                     "market": "XNAS",
                     "version": evidence["calendar_version"],
                     "sessions": ["2026-08-14"],
@@ -582,6 +612,7 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
                 object_repository,
                 {
                     "schema_version": "historical-listing-reference/v1",
+                    "source_reference": ("https://archive.example.test/platform-us-prices.json"),
                     "listing": {
                         key: listing[key]
                         for key in (
@@ -699,7 +730,7 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
         "evidence_version": "archive-bundle-2026-08-15",
         "revision": "archive-rev-4",
         "observation_kind": "official_archive",
-        "observation_reference": "https://archive.example.test/us/eod/rev-4.json",
+        "observation_reference": "https://archive.example.test/official-us-archive.json",
         "observed_at": "2026-08-15T22:00:00+00:00",
         "coverage": {"start": sessions[0], "end": sessions[-1]},
         "validity": {
@@ -758,6 +789,16 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
         evidence_level="archive_attested",
         trace_id="trace-ticket-08-archive-attestation",
     )
+    attestation = state_store.get_verified_governance_artifact(
+        artifact_id=attestation_id,
+        artifact_kind="historical_evidence_attestation",
+    )
+    assert attestation["distribution_bindings"] == [
+        {
+            "distribution_id": "official-us-archive-archive",
+            "distribution_url": "https://archive.example.test/official-us-archive.json",
+        }
+    ]
 
     outcome = workflow.execute(
         HistoricalEvidenceCommand(
@@ -772,6 +813,30 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
 
     assert outcome.status == "qualified"
     assert outcome.use_scope == ("historical_reconstruction",)
+
+    unbound_evidence = deepcopy(evidence)
+    unbound_evidence["observation_reference"] = "https://untrusted.example.test/archive.json"
+    unbound = workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="official-us-archive",
+            trace_id="trace-ticket-08-unbound-archive-reference",
+            attestation_id=_attest(
+                issuer,
+                object_repository,
+                unbound_evidence,
+                source_id="official-us-archive",
+                listing_id="listing-us-xnas-meta",
+                market="XNAS",
+                evidence_level="archive_attested",
+                trace_id="trace-ticket-08-unbound-archive-reference-attestation",
+            ),
+        )
+    )
+    assert unbound.status == "quarantined"
+    assert unbound.reason_code == "historical_evidence_distribution_mismatch"
     assert set(outcome.artifact_ids) == {
         "claim",
         "verification",
@@ -841,6 +906,21 @@ def test_archive_attestation_builds_reproducible_reconstruction_artifacts(
     assert report["display_mode"] == "historical_reconstruction"
     assert report["production_prediction"] is False
     assert report["exclusion_reasons"] == []
+    dataset_lineage = state_store.get_canonical_artifact(outcome.artifact_ids["dataset"])["payload"]
+    assert isinstance(dataset_lineage, dict)
+    dataset_object_id = str(dataset_lineage["dataset_object_id"])
+    dataset_checksum = dataset_object_id.removeprefix("sha256:")
+    dataset_stat = object_repository.stat(
+        ObjectRef(
+            object_id=dataset_object_id,
+            checksum=dataset_checksum,
+            uri=str(tmp_path / "objects" / "sha256" / dataset_checksum[:2] / dataset_checksum),
+        )
+    )
+    assert dataset_stat["metadata"] == {
+        "content_type": "application/json",
+        "object_kind": "historical_reconstruction_dataset",
+    }
     for artifact_name, forbidden_fields in (
         ("dataset", {"sessions", "symbols", "lifecycle", "unadjusted_prices"}),
         ("adjustment_version", {"adjusted_prices", "company_action_ids"}),
@@ -1075,7 +1155,7 @@ def test_missing_exact_label_endpoint_is_not_shifted_to_next_available_price(
         "evidence_version": "archive-missing-endpoint-v1",
         "revision": "rev-1",
         "observation_kind": "official_archive",
-        "observation_reference": "https://archive.example.test/us/missing-endpoint.json",
+        "observation_reference": "https://archive.example.test/official-us-archive.json",
         "observed_at": "2026-08-15T22:00:00+00:00",
         "coverage": {"start": sessions[0], "end": sessions[-1]},
         "validity": {
@@ -1225,7 +1305,9 @@ def test_reconstruction_preserves_security_identity_and_realized_session_gaps(
         "evidence_version": "ticker-reuse-realized-calendar-v1",
         "revision": "rev-1",
         "observation_kind": "official_archive",
-        "observation_reference": "https://archive.example.test/us/reused-symbol.json",
+        "observation_reference": (
+            "https://archive.example.test/official-us-reused-symbol-archive.json"
+        ),
         "observed_at": "2026-08-15T22:00:00+00:00",
         "coverage": {"start": realized_sessions[0], "end": realized_sessions[-1]},
         "validity": {
@@ -1378,7 +1460,7 @@ def test_reconstruction_applies_company_actions_before_maturing_labels(
         "evidence_version": "split-adjustment-v1",
         "revision": "rev-1",
         "observation_kind": "official_archive",
-        "observation_reference": "https://archive.example.test/us/split.json",
+        "observation_reference": ("https://archive.example.test/official-us-split-archive.json"),
         "observed_at": "2026-08-15T22:00:00+00:00",
         "coverage": {"start": sessions[0], "end": sessions[-1]},
         "validity": {

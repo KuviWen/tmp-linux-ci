@@ -99,6 +99,7 @@ class HistoricalEvidenceAttestationIssuer:
         self._clock = clock
 
     def issue(self, command: HistoricalEvidenceAttestationCommand) -> str:
+        first_observed_at = self._clock()
         authorizations, policy = _authorize_historical_evidence(
             state_store=self._state_store,
             authorization_policy=self._authorization_policy,
@@ -106,8 +107,10 @@ class HistoricalEvidenceAttestationIssuer:
             action="market_data.collect",
             source_id=command.source_id,
             trace_id=command.trace_id,
-            evaluated_at=self._clock(),
+            evaluated_at=first_observed_at,
             rejection_operation="attest_historical_evidence",
+            listing_id=command.listing_id,
+            market=command.market,
         )
         evidence_bytes = self._object_repository.open_by_id(command.evidence_object_id).read()
         calendar_bytes = self._object_repository.open_by_id(command.calendar_object_id).read()
@@ -134,7 +137,23 @@ class HistoricalEvidenceAttestationIssuer:
                 "collector_principal_ids": sorted(
                     {str(authorization["principal_id"]) for authorization in authorizations}
                 ),
-                "attested_at": self._clock().isoformat(),
+                "distribution_bindings": sorted(
+                    [
+                        {
+                            "distribution_id": str(authorization["distribution_id"]),
+                            "distribution_url": str(authorization["distribution_url"]),
+                        }
+                        for authorization in authorizations
+                        if isinstance(authorization.get("distribution_id"), str)
+                        and isinstance(authorization.get("distribution_url"), str)
+                    ],
+                    key=lambda binding: (
+                        binding["distribution_id"],
+                        binding["distribution_url"],
+                    ),
+                ),
+                "first_observed_at": first_observed_at.isoformat(),
+                "attested_at": first_observed_at.isoformat(),
             },
             trace_id=command.trace_id,
             authorizations=authorizations,
@@ -167,6 +186,8 @@ class HistoricalEvidenceWorkflow:
             trace_id=command.trace_id,
             evaluated_at=self._observed_at,
             rejection_operation="qualify_historical_evidence",
+            listing_id=command.listing_id,
+            market=command.market,
         )
         rejected_levels = {
             "self_asserted": "historical_evidence_self_asserted",
@@ -240,8 +261,21 @@ class HistoricalEvidenceWorkflow:
                 evidence_level=command.submitted_evidence_level or "unknown",
             )
         evidence_object_id = str(attestation["evidence_object_id"])
+        reconstruction_ready = self._can_build_reconstruction(evidence, listing)
+        if evidence_level == "archive_attested" and not reconstruction_ready:
+            return self._quarantine(
+                command,
+                reason_code="historical_reconstruction_contract_incomplete",
+                authorizations=authorizations,
+                source_policy=source_policy,
+                evidence_level=evidence_level,
+            )
         use_scope = (
-            ("production", "historical_reconstruction")
+            (
+                ("production", "historical_reconstruction")
+                if reconstruction_ready
+                else ("production",)
+            )
             if evidence_level == "platform_observed"
             else ("historical_reconstruction",)
         )
@@ -261,6 +295,7 @@ class HistoricalEvidenceWorkflow:
             "observation_kind": evidence["observation_kind"],
             "observation_reference": evidence["observation_reference"],
             "evidence_observed_at": evidence["observed_at"],
+            "first_observed_at": attestation["first_observed_at"],
             "observed_start": coverage["start"],
             "observed_end": coverage["end"],
             "source_policy_id": source_policy.version_id,
@@ -299,6 +334,7 @@ class HistoricalEvidenceWorkflow:
             "observation_kind": evidence["observation_kind"],
             "observation_reference": evidence["observation_reference"],
             "evidence_observed_at": evidence["observed_at"],
+            "first_observed_at": attestation["first_observed_at"],
             "observed_start": coverage["start"],
             "observed_end": coverage["end"],
             "source_policy_id": source_policy.version_id,
@@ -322,7 +358,7 @@ class HistoricalEvidenceWorkflow:
             authorizations=authorizations,
         )
         artifact_ids = {"claim": claim_id, "verification": verification_id}
-        if self._can_build_reconstruction(evidence, listing):
+        if reconstruction_ready:
             artifact_ids.update(
                 self._build_reconstruction(
                     command=command,
@@ -539,6 +575,36 @@ class HistoricalEvidenceWorkflow:
             evidence.get("public_terms_url") != source_policy.terms_url
         ):
             raise ValueError("historical_evidence_source_policy_mismatch")
+        distribution_bindings = attestation.get("distribution_bindings")
+        if (
+            not isinstance(distribution_bindings, list)
+            or not distribution_bindings
+            or not all(
+                isinstance(binding, dict)
+                and set(binding) == {"distribution_id", "distribution_url"}
+                and isinstance(binding.get("distribution_id"), str)
+                and isinstance(binding.get("distribution_url"), str)
+                for binding in distribution_bindings
+            )
+        ):
+            raise ValueError("historical_evidence_attestation_invalid")
+        authorized_distribution_urls = {
+            str(cast(dict[str, object], binding)["distribution_url"])
+            for binding in distribution_bindings
+        }
+        if (
+            evidence_level == "archive_attested"
+            and evidence.get("observation_reference") not in authorized_distribution_urls
+        ) or (
+            evidence_level == "platform_observed"
+            and not str(evidence.get("observation_reference")).startswith("platform://")
+        ):
+            raise ValueError("historical_evidence_distribution_mismatch")
+        if (
+            calendar.get("source_reference") not in authorized_distribution_urls
+            or reference.get("source_reference") not in authorized_distribution_urls
+        ):
+            raise ValueError("historical_evidence_distribution_mismatch")
         coverage = evidence.get("coverage")
         validity = evidence.get("validity")
         if not isinstance(coverage, dict) or not isinstance(validity, dict):
@@ -547,16 +613,26 @@ class HistoricalEvidenceWorkflow:
             valid_from = datetime.fromisoformat(str(validity["valid_from"]))
             valid_until = datetime.fromisoformat(str(validity["valid_until"]))
             observed_at = datetime.fromisoformat(str(evidence["observed_at"]))
+            first_observed_at = datetime.fromisoformat(str(attestation["first_observed_at"]))
+            attested_at = datetime.fromisoformat(str(attestation["attested_at"]))
         except (KeyError, ValueError) as error:
             raise ValueError("historical_evidence_validity_invalid") from error
         if (
             valid_from.tzinfo is None
             or valid_until.tzinfo is None
             or observed_at.tzinfo is None
+            or first_observed_at.tzinfo is None
+            or attested_at.tzinfo is None
             or valid_from > observed_at
             or valid_until <= valid_from
         ):
             raise ValueError("historical_evidence_validity_invalid")
+        if (
+            observed_at > first_observed_at
+            or first_observed_at != attested_at
+            or first_observed_at > self._observed_at
+        ):
+            raise ValueError("historical_evidence_observation_chronology_invalid")
         self._validate_listing_evidence(
             command=command,
             evidence=evidence,
@@ -769,7 +845,6 @@ class HistoricalEvidenceWorkflow:
                 "company_actions": listing["company_actions"],
             },
             object_kind="historical_reconstruction_dataset",
-            source_policy_id=source_policy_id,
         )
         dataset_payload: dict[str, object] = {
             **common_lineage,
@@ -796,7 +871,6 @@ class HistoricalEvidenceWorkflow:
                 ],
             },
             object_kind="historical_adjustment_version",
-            source_policy_id=source_policy_id,
         )
         adjustment_payload: dict[str, object] = {
             **common_lineage,
@@ -824,7 +898,6 @@ class HistoricalEvidenceWorkflow:
         labels_object_id = self._store_json(
             labels_payload,
             object_kind="historical_mature_labels",
-            source_policy_id=source_policy_id,
         )
         labels_id = self._publish(
             artifact_kind="historical_mature_labels",
@@ -1067,7 +1140,6 @@ class HistoricalEvidenceWorkflow:
         payload: dict[str, object],
         *,
         object_kind: str,
-        source_policy_id: str,
     ) -> str:
         content = _canonical_json_bytes(payload)
         return self._object_repository.put_verified(
@@ -1076,7 +1148,6 @@ class HistoricalEvidenceWorkflow:
             metadata={
                 "content_type": "application/json",
                 "object_kind": object_kind,
-                "source_policy_id": source_policy_id,
             },
         ).object_id
 
@@ -1141,6 +1212,54 @@ class QualifiedHistoricalAvailabilityClaimVerifier:
             impact.get("event") in {"superseded", "revoked", "expired"} for impact in impacts
         )
 
+    def is_formally_reconstructable(
+        self,
+        *,
+        claim_id: str,
+        claim: HistoricalAvailabilityClaim,
+    ) -> bool:
+        if not self.is_usable(claim_id=claim_id, claim=claim):
+            return False
+        reports = [
+            report
+            for report in self._state_store.list_historical_qualification_reports()
+            if report.get("historical_availability_claim_id") == claim_id
+        ]
+        if len(reports) != 1:
+            return False
+        report = reports[0]
+        dataset_ids = report.get("dataset_version_ids")
+        if (
+            report.get("status") != "qualified"
+            or report.get("evidence_level") != claim.evidence_level
+            or report.get("exact_endpoints_verified") is not True
+            or report.get("exclusion_reasons") != []
+            or report.get("production_prediction") is not False
+            or not isinstance(dataset_ids, list)
+            or len(dataset_ids) != 1
+            or not all(isinstance(item, str) for item in dataset_ids)
+        ):
+            return False
+        expected_artifacts = {
+            str(dataset_ids[0]): "historical_reconstruction_dataset",
+            report.get("adjustment_version_id"): "historical_adjustment_version",
+            report.get("mature_labels_id"): "historical_mature_labels",
+            report.get("feature_snapshot_id"): "historical_feature_snapshot",
+            report.get("fold_manifest_id"): "historical_fold_manifest",
+        }
+        if any(not isinstance(artifact_id, str) for artifact_id in expected_artifacts):
+            return False
+        try:
+            return all(
+                self._state_store.get_canonical_artifact(cast(str, artifact_id)).get(
+                    "artifact_kind"
+                )
+                == artifact_kind
+                for artifact_id, artifact_kind in expected_artifacts.items()
+            )
+        except KeyError:
+            return False
+
 
 def historical_qualification_projections(
     state_store: StateStore,
@@ -1154,13 +1273,13 @@ def historical_qualification_projections(
         key = (str(report["listing_id"]), str(report["source_id"]))
         if key in latest:
             continue
-        if report.get("status") == "quarantined":
+        if report.get("status") in {"quarantined", "policy_blocked"}:
             latest[key] = {
                 "listing_id": report["listing_id"],
                 "market": report["market"],
                 "source_id": report["source_id"],
                 "source_mode": "historical_reconstruction",
-                "status": "quarantined",
+                "status": report["status"],
                 "reason_code": report["reason_code"],
                 "historical_availability_claim_id": None,
                 "claim_id": None,
@@ -1230,12 +1349,41 @@ def _authorize_historical_evidence(
     trace_id: str,
     evaluated_at: datetime,
     rejection_operation: str,
+    listing_id: str,
+    market: str,
 ) -> tuple[list[dict[str, object]], SourcePolicyVersion]:
     candidate_policies = [
         policy for policy in authorization_policy.source_policies if policy.dataset_id == source_id
     ]
     if len(candidate_policies) != 1:
-        raise HistoricalEvidenceAuthorizationError("historical_source_policy_unavailable")
+        decision = authorization_policy.evaluate(
+            security_context,
+            OperationIntent(
+                action=action,
+                dataset_id=source_id,
+                purpose="price_research",
+                environment=security_context.environment,
+                resource_state="active",
+                evaluated_at=evaluated_at,
+                trace_id=trace_id,
+                correlation_id=f"{trace_id}:{source_id}:{action}:source-policy",
+                required_uses=PRICE_RESEARCH_REQUIRED_USES,
+                source_access_mode="live_provider",
+            ),
+        )
+        authorizations = [authorization_audit_payload(decision)]
+        _publish_historical_authorization_denial(
+            state_store=state_store,
+            rejection_operation=rejection_operation,
+            listing_id=listing_id,
+            market=market,
+            source_id=source_id,
+            trace_id=trace_id,
+            evaluated_at=evaluated_at,
+            reason_code=decision.reason_code,
+            authorizations=authorizations,
+        )
+        raise HistoricalEvidenceAuthorizationError(decision.reason_code)
     source_policy = candidate_policies[0]
     source_access_mode: SourceAccessMode = (
         "engineering_double"
@@ -1271,12 +1419,15 @@ def _authorize_historical_evidence(
     authorizations = [authorization_audit_payload(decision) for decision in decisions]
     if any(not decision.allowed for decision in decisions):
         denied = next(decision for decision in decisions if not decision.allowed)
-        state_store._publish_governance_rejection(
-            payload={
-                "operation": rejection_operation,
-                "reason_code": denied.reason_code,
-            },
+        _publish_historical_authorization_denial(
+            state_store=state_store,
+            rejection_operation=rejection_operation,
+            listing_id=listing_id,
+            market=market,
+            source_id=source_id,
             trace_id=trace_id,
+            evaluated_at=evaluated_at,
+            reason_code=denied.reason_code,
             authorizations=authorizations,
         )
         raise HistoricalEvidenceAuthorizationError(denied.reason_code)
@@ -1286,6 +1437,56 @@ def _authorize_historical_evidence(
     ):
         raise HistoricalEvidenceAuthorizationError("historical_source_policy_unavailable")
     return authorizations, source_policy
+
+
+def _publish_historical_authorization_denial(
+    *,
+    state_store: StateStore,
+    rejection_operation: str,
+    listing_id: str,
+    market: str,
+    source_id: str,
+    trace_id: str,
+    evaluated_at: datetime,
+    reason_code: str,
+    authorizations: list[dict[str, object]],
+) -> None:
+    state_store._publish_governance_rejection(
+        payload={
+            "operation": rejection_operation,
+            "reason_code": reason_code,
+        },
+        trace_id=trace_id,
+        authorizations=authorizations,
+    )
+    if rejection_operation != "qualify_historical_evidence":
+        return
+    source_policy_ids = {
+        str(authorization["source_policy_version_id"])
+        for authorization in authorizations
+        if isinstance(authorization.get("source_policy_version_id"), str)
+    }
+    state_store._publish_historical_policy_blocked(
+        payload={
+            "qualification_report_schema_version": "historical-qualification-report/v1",
+            "listing_id": listing_id,
+            "market": market,
+            "source_id": source_id,
+            "status": "policy_blocked",
+            "reason_code": reason_code,
+            "historical_availability_claim_id": None,
+            "evidence_level": "unknown",
+            "source_policy_id": (
+                next(iter(source_policy_ids)) if len(source_policy_ids) == 1 else None
+            ),
+            "display_mode": "historical_reconstruction",
+            "production_prediction": False,
+            "exclusion_reasons": [reason_code],
+            "created_at": evaluated_at.isoformat(),
+        },
+        trace_id=trace_id,
+        authorizations=authorizations,
+    )
 
 
 def _json_object(content: bytes) -> dict[str, object]:
