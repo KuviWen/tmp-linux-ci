@@ -543,7 +543,7 @@ components:
         market: {type: string, enum: [XTAI, XNAS, XNYS]}
         status:
           type: string
-          enum: [qualified, credential_required, policy_blocked, quarantined, deferred]
+          enum: [qualified, credential_required, policy_blocked, quarantined, deferred, unavailable]
         reason_code: {type: string}
         source_basis_id: {type: string, minLength: 1}
         source_basis:
@@ -570,7 +570,7 @@ components:
         research_display: {$ref: '#/components/schemas/PriceDownstreamState'}
     PriceDownstreamState:
       type: string
-      enum: [ready, credential_required, policy_blocked, quarantined, deferred]
+      enum: [ready, credential_required, policy_blocked, quarantined, deferred, unavailable]
     PriceQualificationChecks:
       type: object
       additionalProperties: false
@@ -667,7 +667,7 @@ components:
       properties:
         status:
           type: string
-          enum: [published, credential_required, policy_blocked, quarantined, deferred]
+          enum: [published, credential_required, policy_blocked, quarantined, deferred, unavailable]
         reason_code: {type: string}
         policy_reason_code: {type: string}
         source_basis_id: {type: string, minLength: 1}

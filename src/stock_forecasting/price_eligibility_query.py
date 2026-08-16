@@ -128,6 +128,13 @@ class PriceEligibilityQuery:
                 for source in sources
                 if source["status"] == "credential_required"
             )
+        elif "unavailable" in statuses:
+            status = "unavailable"
+            reason_code = next(
+                str(source["reason_code"])
+                for source in sources
+                if source["status"] == "unavailable"
+            )
         elif "deferred" in statuses:
             status = "deferred"
             reason_code = "source_collection_deferred"

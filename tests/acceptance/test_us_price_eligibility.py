@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.alpaca_market_data import (
     AlpacaCompanyActionExpectation,
+    AlpacaMarketCalendarEvidence,
     AlpacaPriceSourceAdapter,
     AlpacaReferenceGraph,
     AlpacaReferenceListing,
@@ -36,18 +37,40 @@ from stock_forecasting.data_supply import (
     ExternalSecurityAlias,
     ListingLifecycleRecord,
     LoadedSourcePartition,
+    MarketSessionRecord,
     SourceBundleMemberRequest,
     SourceCredentialRequired,
     SourcePartitionRequest,
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
+from stock_forecasting.source_credentials import (
+    CredentialValidationEvidence,
+    CredentialValidationResult,
+)
 
 ALPACA_BARS_DISTRIBUTION_ID = "alpaca-us-stock-bars-v2"
 ALPACA_BARS_DISTRIBUTION_URL = "https://data.alpaca.markets/v2/stocks/bars"
 ALPACA_SOURCE_ID = "alpaca-us-stock-bars"
 ALPACA_SOURCE_BASIS_ID = "ALPACA-BASIC-US-MARKET-DATA-01"
 ENGINEERING_SOURCE_BASIS_ID = "ENGINEERING-ALPACA-CONTRACT-01"
+
+
+def _engineering_market_calendar_evidence() -> AlpacaMarketCalendarEvidence:
+    return AlpacaMarketCalendarEvidence(
+        version_id="engineering-nyse-calendar-2024-01-02-through-2024-01-04-v1",
+        coverage_start=date(2024, 1, 2),
+        coverage_end=date(2024, 1, 4),
+        sessions=tuple(
+            MarketSessionRecord(
+                session_date=session_date,
+                open_time="09:30",
+                close_time="16:00",
+                session_kind="regular",
+            )
+            for session_date in (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4))
+        ),
+    )
 
 
 def _engineering_reference_graph(
@@ -128,12 +151,21 @@ class LiveProviderCredentialRequiredAdapter(CredentialRequiredPriceAdapter):
 
 
 class EngineeringCredentialResolver:
-    def resolve_valid(self, provider_id: str) -> dict[str, str]:
+    def resolve_valid(self, provider_id: str, *, trace_id: str) -> dict[str, str]:
         assert provider_id == "alpaca-market-data-basic"
         return {
             "api_key_id": "PK-ENGINEERING-ONLY",
             "api_secret_key": "engineering-contract-secret",
         }
+
+
+class ValidCredentialValidator:
+    def validate(self, _credential_fields: Mapping[str, str]) -> CredentialValidationResult:
+        return CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
 
 
 class EngineeringProviderTransport:
@@ -152,17 +184,29 @@ class BundleQualityMutationAdapter:
     def __init__(
         self,
         delegate: AlpacaPriceSourceAdapter,
-        problem: Literal["schema", "coverage", "duplicate"],
+        problem: Literal[
+            "schema", "coverage", "duplicate", "duplicate_action", "calendar_omission"
+        ],
     ) -> None:
         self._delegate = delegate
         self._problem = problem
 
     def load(self, request: SourcePartitionRequest) -> LoadedSourcePartition:
         loaded = self._delegate.load(request)
+        if self._problem == "duplicate_action":
+            return replace(
+                loaded,
+                decoded=replace(
+                    loaded.decoded,
+                    quality_issues=tuple(
+                        sorted((*loaded.decoded.quality_issues, "duplicate_company_action"))
+                    ),
+                ),
+            )
         members = loaded.collection.bundle_members
         if self._problem == "duplicate":
             members = (*members, members[-1])
-        else:
+        elif self._problem != "calendar_omission":
             members = tuple(
                 (
                     replace(member, schema_version="unexpected-schema-v9")
@@ -425,6 +469,226 @@ def test_valid_source_policy_with_missing_credential_fails_closed_before_network
     assert "下游一致阻擋" in page_response.text
 
 
+def test_source_egress_audit_failure_prevents_live_provider_contact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-egress-audit",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    adapter = LiveProviderCredentialRequiredAdapter("source_credential_missing")
+    state_store = StateStore(
+        f"sqlite+pysqlite:///{tmp_path / 'ticket-07-egress-audit.db'}",
+        create_schema=True,
+    )
+    monkeypatch.setattr(
+        state_store,
+        "record_security_event",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("audit_store_unavailable")),
+        raising=False,
+    )
+    engineering_policy = _qualified_zero_fee_policy(identity, now)
+    live_policy = AuthorizationPolicy(
+        action_grants=engineering_policy.action_grants,
+        source_policies=tuple(
+            replace(
+                source_policy,
+                access_basis="principal_entitlement",
+                source_basis_id=None,
+                distributions=(),
+            )
+            if source_policy.dataset_id.startswith("alpaca-us-")
+            else source_policy
+            for source_policy in engineering_policy.source_policies
+        ),
+        source_entitlements=engineering_policy.source_entitlements,
+    )
+    data_supply = DataSupply(
+        authorization_policy=live_policy,
+        security_context=identity.context,
+        adapters={ALPACA_SOURCE_ID: adapter},
+        object_repository=FilesystemObjectRepository(tmp_path / "objects"),
+        state_store=state_store,
+        clock=lambda: now,
+    )
+    request = SourcePartitionRequest(
+        request_id="request-ticket-07-egress-audit",
+        trace_id="trace-ticket-07-egress-audit",
+        source_id=ALPACA_SOURCE_ID,
+        mode="historical",
+        listing_ids=("70000000-0000-4000-8000-000000000001",),
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        expected_checkpoint=None,
+        distribution_id=ALPACA_BARS_DISTRIBUTION_ID,
+        distribution_url=ALPACA_BARS_DISTRIBUTION_URL,
+        source_basis_id=ENGINEERING_SOURCE_BASIS_ID,
+        bundle_members=_bundle_member_requests(),
+    )
+
+    with pytest.raises(OSError, match="audit_store_unavailable"):
+        data_supply.materialize(request)
+
+    assert adapter.calls == 0
+    monkeypatch.undo()
+    audited_request = replace(
+        request,
+        request_id="request-ticket-07-egress-audit-recorded",
+        trace_id="trace-ticket-07-egress-audit-recorded",
+    )
+    assert data_supply.materialize(audited_request).status == "credential_required"
+    egress_audit = [
+        event
+        for event in state_store.list_audit_events(trace_id=audited_request.trace_id)
+        if event["action"] == "source.egress"
+    ]
+    assert egress_audit == [
+        {
+            "action": "source.egress",
+            "outcome": "allowed",
+            "reason_code": "source_egress_authorized",
+            "trace_id": audited_request.trace_id,
+            "policy_evaluation_id": egress_audit[0]["policy_evaluation_id"],
+            "dataset_id": ALPACA_SOURCE_ID,
+            "distribution_id": ALPACA_BARS_DISTRIBUTION_ID,
+        }
+    ]
+
+
+def test_provider_unavailability_is_published_through_materialize_rest_and_ui(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    listing_id = "70000000-0000-4000-8000-000000000001"
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-provider-unavailable",
+        environment="development",
+        scopes={
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "source_credential.manage",
+            "source_credential.read",
+        },
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    policy = _qualified_zero_fee_policy(identity, now)
+    application = build_test_application(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'ticket-07-unavailable.db'}",
+        object_root=tmp_path / "objects",
+        observed_at=now,
+        authorization_time=now,
+        local_identity=identity,
+        authorization_policy_override=policy,
+        source_credential_validators={"alpaca-market-data-basic": ValidCredentialValidator()},
+    )
+    application.operations_control.set_source_credential(
+        provider_id="alpaca-market-data-basic",
+        credential_fields={
+            "api_key_id": "PK-UNAVAILABLE",
+            "api_secret_key": "unavailable-secret",
+        },
+        trace_id="trace-ticket-07-provider-unavailable-set",
+        security_context=identity.context,
+    )
+    application.operations_control.validate_source_credential(
+        provider_id="alpaca-market-data-basic",
+        trace_id="trace-ticket-07-provider-unavailable-validate",
+        security_context=identity.context,
+    )
+    transport = EngineeringProviderTransport(
+        [ProviderHttpResponse(503, b'{"message":"provider unavailable"}')]
+    )
+    reference_graph = _engineering_reference_graph({listing_id: ("AAPL",)})
+    adapter = AlpacaPriceSourceAdapter(
+        source_id=ALPACA_SOURCE_ID,
+        mode="current",
+        adapter_version="alpaca-market-data-basic-v1",
+        rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+        source_access_mode="engineering_double",
+        collector=AlpacaSourceCollector(
+            source_id=ALPACA_SOURCE_ID,
+            provider_id="alpaca-market-data-basic",
+            reference_graph=reference_graph,
+            market_calendar_evidence=_engineering_market_calendar_evidence(),
+            credential_resolver=EngineeringCredentialResolver(),
+            transport=transport,
+            clock=lambda: now,
+            rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+        ),
+        decoder=AlpacaSourceDecoder(
+            source_id=ALPACA_SOURCE_ID,
+            reference_graph=reference_graph,
+        ),
+    )
+    request = SourcePartitionRequest(
+        request_id="request-ticket-07-provider-unavailable",
+        trace_id="trace-ticket-07-provider-unavailable",
+        source_id=ALPACA_SOURCE_ID,
+        mode="current",
+        listing_ids=(listing_id,),
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        expected_checkpoint=None,
+        distribution_id=ALPACA_BARS_DISTRIBUTION_ID,
+        distribution_url=ALPACA_BARS_DISTRIBUTION_URL,
+        source_basis_id=ENGINEERING_SOURCE_BASIS_ID,
+        bundle_members=_bundle_member_requests(),
+    )
+
+    outcome = DataSupply(
+        authorization_policy=policy,
+        security_context=identity.context,
+        adapters={ALPACA_SOURCE_ID: adapter},
+        object_repository=application.object_repository,
+        state_store=application.state_store,
+        clock=lambda: now,
+    ).materialize(request)
+
+    assert outcome.status == "unavailable"
+    assert outcome.reason_code == "source_provider_unavailable"
+    assert outcome.raw_object_id is None
+    assert outcome.dataset_version_id is None
+    assert len(transport.requests) == 1
+    eligibility = application.price_eligibility_query.get_listing(
+        listing_id=listing_id,
+        trace_id="trace-ticket-07-provider-unavailable-query",
+        security_context=identity.context,
+    )
+    assert isinstance(eligibility, dict)
+    assert eligibility["status"] == "unavailable"
+    assert eligibility["downstream_readiness"] == {
+        "new_collection": "unavailable",
+        "feature_materialization": "unavailable",
+        "training": "unavailable",
+        "research_display": "unavailable",
+    }
+
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    headers = {"Authorization": identity.credential.authorization_header()}
+    api_response = client.get(
+        f"/api/v1/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+    page_response = client.get(
+        f"/research/listings/{listing_id}/price-eligibility",
+        headers=headers,
+    )
+
+    assert api_response.status_code == 200
+    assert api_response.json()["status"] == "unavailable"
+    assert page_response.status_code == 200
+    assert "來源暫時不可用" in page_response.text
+    assert "source_provider_unavailable" in page_response.text
+
+
 def test_engineering_provider_contract_materializes_through_common_data_supply(
     tmp_path: Path,
 ) -> None:
@@ -498,6 +762,7 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
             source_id=ALPACA_SOURCE_ID,
             provider_id="alpaca-market-data-basic",
             reference_graph=reference_graph,
+            market_calendar_evidence=_engineering_market_calendar_evidence(),
             credential_resolver=EngineeringCredentialResolver(),
             transport=transport,
             clock=lambda: now,
@@ -577,6 +842,9 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
         "lifecycle_complete": True,
         "company_actions_complete": True,
     }
+    assert retrieval_receipt["payload"]["market_calendar_evidence_version_id"] == (
+        "engineering-nyse-calendar-2024-01-02-through-2024-01-04-v1"
+    )
     assert dataset["payload"]["reference_graph"] == {
         "version_id": reference_graph.version_id,
         "lifecycle_complete": True,
@@ -664,11 +932,13 @@ def test_engineering_provider_contract_materializes_through_common_data_supply(
         ("schema", "bundle_member_schema_incompatible"),
         ("coverage", "bundle_member_incomplete_coverage"),
         ("duplicate", "bundle_member_incomplete_coverage"),
+        ("duplicate_action", "duplicate_company_action"),
+        ("calendar_omission", "bundle_member_incomplete_coverage"),
     ],
 )
 def test_bundle_member_quality_issue_is_quarantined_before_dataset_publication(
     tmp_path: Path,
-    problem: Literal["schema", "coverage", "duplicate"],
+    problem: Literal["schema", "coverage", "duplicate", "duplicate_action", "calendar_omission"],
     expected_reason: str,
 ) -> None:
     now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
@@ -681,17 +951,31 @@ def test_bundle_member_quality_issue_is_quarantined_before_dataset_publication(
         expires_at=now + timedelta(hours=23),
         data_protection_classes={"licensed"},
     )
+    start_date = date(2024, 1, 2) if problem == "calendar_omission" else date(2024, 1, 3)
+    end_date = date(2024, 1, 4) if problem == "calendar_omission" else date(2024, 1, 3)
+    bars_payload = (
+        (
+            b'{"bars":{"AAPL":[{"t":"2024-01-02T05:00:00Z","o":185,'
+            b'"h":186,"l":184,"c":185,"v":100},{"t":"2024-01-04T05:00:00Z",'
+            b'"o":186,"h":187,"l":185,"c":186,"v":200}]},"next_page_token":null}'
+        )
+        if problem == "calendar_omission"
+        else (
+            b'{"bars":{"AAPL":[{"t":"2024-01-03T05:00:00Z","o":184.22,'
+            b'"h":185.88,"l":183.43,"c":184.25,"v":58414460}]},'
+            b'"next_page_token":null}'
+        )
+    )
+    calendar_payload = (
+        b'[{"date":"2024-01-02","open":"09:30","close":"16:00"},{"date":"2024-01-04","open":"09:30","close":"16:00"}]'
+        if problem == "calendar_omission"
+        else b'[{"date":"2024-01-03","open":"09:30","close":"16:00"}]'
+    )
     transport = EngineeringProviderTransport(
         [
-            ProviderHttpResponse(
-                200,
-                b'{"bars":{"AAPL":[{"t":"2024-01-03T05:00:00Z","o":184.22,"h":185.88,"l":183.43,"c":184.25,"v":58414460}]},"next_page_token":null}',
-            ),
+            ProviderHttpResponse(200, bars_payload),
             ProviderHttpResponse(200, b'{"cash_dividends":[],"next_page_token":null}'),
-            ProviderHttpResponse(
-                200,
-                b'[{"date":"2024-01-03","open":"09:30","close":"16:00"}]',
-            ),
+            ProviderHttpResponse(200, calendar_payload),
         ]
     )
     listing_symbols = {listing_id: ("AAPL",)}
@@ -706,6 +990,7 @@ def test_bundle_member_quality_issue_is_quarantined_before_dataset_publication(
             source_id=ALPACA_SOURCE_ID,
             provider_id="alpaca-market-data-basic",
             reference_graph=reference_graph,
+            market_calendar_evidence=_engineering_market_calendar_evidence(),
             credential_resolver=EngineeringCredentialResolver(),
             transport=transport,
             clock=lambda: now,
@@ -726,8 +1011,8 @@ def test_bundle_member_quality_issue_is_quarantined_before_dataset_publication(
         source_id=ALPACA_SOURCE_ID,
         mode="current",
         listing_ids=(listing_id,),
-        start_date=date(2024, 1, 3),
-        end_date=date(2024, 1, 3),
+        start_date=start_date,
+        end_date=end_date,
         expected_checkpoint=None,
         distribution_id=ALPACA_BARS_DISTRIBUTION_ID,
         distribution_url=ALPACA_BARS_DISTRIBUTION_URL,
@@ -748,6 +1033,7 @@ def test_bundle_member_quality_issue_is_quarantined_before_dataset_publication(
     assert outcome.reason_code == expected_reason
     assert outcome.raw_object_id is not None
     assert outcome.dataset_version_id is None
+    assert outcome.adjustment_version_id is None
     trace = state_store.get_trace_evidence(request.trace_id)
     artifacts = [
         state_store.get_canonical_artifact(artifact_id) for artifact_id in trace["artifact_ids"]

@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 from stock_forecasting.authorization import (
     AuthorizationAction,
@@ -284,6 +285,23 @@ class OperationsControl:
                 authentication_status="not_run",
             )
         else:
+            self._state_store.record_security_event(
+                event_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"{trace_id}:{provider_id}:{current['version']}:validation-checkout",
+                    )
+                ),
+                action="source_credential.checkout",
+                outcome="allowed",
+                reason_code="source_credential_checkout_authorized",
+                trace_id=trace_id,
+                authorization={
+                    "provider_id": provider_id,
+                    "credential_version": current["version"],
+                    "secret_ref_id": current["secret_ref_id"],
+                },
+            )
             try:
                 lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
             except (SecretUnavailableError, SecretCorruptError) as error:

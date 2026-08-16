@@ -789,6 +789,9 @@ for (const button of document.querySelectorAll('[data-operation]')) {
         if status == "quarantined":
             state_text = "資料隔離"
             provider_text = "不具研究資格；來源原始證據已隔離保存"
+        elif status == "unavailable":
+            state_text = "來源暫時不可用"
+            provider_text = "來源未回應或拒絕此資料要求；未建立資料集版本"
         elif status == "deferred":
             state_text = "來源延後"
             provider_text = "來源限流，尚未取得資料；checkpoint 未前進"

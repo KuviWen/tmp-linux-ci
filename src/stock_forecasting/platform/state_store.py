@@ -442,6 +442,41 @@ class StateStore:
                 trace_id=trace_id,
             )
 
+    def record_security_event(
+        self,
+        *,
+        event_id: str,
+        action: str,
+        outcome: str,
+        reason_code: str,
+        trace_id: str,
+        authorization: dict[str, object] | None = None,
+    ) -> None:
+        expected = {
+            "event_id": event_id,
+            "action": action,
+            "outcome": outcome,
+            "reason_code": reason_code,
+            "trace_id": trace_id,
+            "authorization": authorization,
+        }
+        with self.engine.begin() as connection:
+            existing = (
+                connection.execute(
+                    select(security_audit_events).where(
+                        security_audit_events.c.event_id == event_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing is not None:
+                actual = {key: existing[key] for key in expected}
+                if actual != expected:
+                    raise ImmutableStateConflict("immutable_security_event_conflict")
+                return
+            connection.execute(security_audit_events.insert().values(**expected))
+
     def get_authorization_decision(self, *, evaluation_id: str) -> dict[str, object]:
         with self.engine.connect() as connection:
             row = (

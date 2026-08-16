@@ -12,6 +12,7 @@ from stock_forecasting.alpaca_market_data import (
     AlpacaSourceDecoder,
     ProviderHttpTransport,
     UrllibProviderHttpTransport,
+    load_candidate_alpaca_market_calendar_evidence,
     load_candidate_alpaca_reference_graph,
 )
 from stock_forecasting.authorization import (
@@ -146,6 +147,7 @@ class Application:
         source_access_mode: SourceAccessMode,
     ) -> AlpacaPriceSourceAdapter:
         reference_graph = load_candidate_alpaca_reference_graph()
+        market_calendar_evidence = load_candidate_alpaca_market_calendar_evidence()
         return AlpacaPriceSourceAdapter(
             source_id="alpaca-us-stock-bars",
             mode="historical",
@@ -156,6 +158,7 @@ class Application:
                 source_id="alpaca-us-stock-bars",
                 provider_id="alpaca-market-data-basic",
                 reference_graph=reference_graph,
+                market_calendar_evidence=market_calendar_evidence,
                 credential_resolver=ManagedSourceCredentialResolver(
                     self.state_store,
                     self.secret_provider,

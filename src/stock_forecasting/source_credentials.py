@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -222,7 +222,7 @@ class CredentialNotReady(RuntimeError):
 
 
 class SourceCredentialResolver(Protocol):
-    def resolve_valid(self, provider_id: str) -> dict[str, str]: ...
+    def resolve_valid(self, provider_id: str, *, trace_id: str) -> dict[str, str]: ...
 
 
 def project_source_credential_readiness(
@@ -263,7 +263,7 @@ class ManagedSourceCredentialResolver:
         self._secret_provider = secret_provider
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    def resolve_valid(self, provider_id: str) -> dict[str, str]:
+    def resolve_valid(self, provider_id: str, *, trace_id: str) -> dict[str, str]:
         current = self._state_store.get_source_credential(provider_id=provider_id)
         if current is None:
             raise CredentialNotReady("source_credential_missing")
@@ -275,6 +275,23 @@ class ManagedSourceCredentialResolver:
             and datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= self._clock()
         ):
             raise CredentialNotReady("source_credential_expired")
+        self._state_store.record_security_event(
+            event_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"{trace_id}:{provider_id}:{current['version']}:secret-checkout",
+                )
+            ),
+            action="source_credential.checkout",
+            outcome="allowed",
+            reason_code="source_credential_checkout_authorized",
+            trace_id=trace_id,
+            authorization={
+                "provider_id": provider_id,
+                "credential_version": current["version"],
+                "secret_ref_id": current["secret_ref_id"],
+            },
+        )
         try:
             lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
         except SecretUnavailableError as error:

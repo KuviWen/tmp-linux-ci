@@ -91,6 +91,7 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "policy_blocked",
         "quarantined",
         "deferred",
+        "unavailable",
     ]
     assert eligibility["properties"]["market"] == {
         "type": "string",
@@ -136,6 +137,7 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "policy_blocked",
         "quarantined",
         "deferred",
+        "unavailable",
     ]
     assert source["properties"]["source_mode"]["enum"] == ["current", "historical"]
     assert source["properties"]["dataset_version_id"]["type"] == ["string", "null"]

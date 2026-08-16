@@ -13,6 +13,7 @@ from stock_forecasting.alpaca_market_data import (
     AlpacaCompanyActionExpectation,
     AlpacaCredentialValidator,
     AlpacaLiveContractValidator,
+    AlpacaMarketCalendarEvidence,
     AlpacaReferenceGraph,
     AlpacaReferenceListing,
     AlpacaSourceCollector,
@@ -20,6 +21,7 @@ from stock_forecasting.alpaca_market_data import (
     ProviderHttpRequest,
     ProviderHttpResponse,
     UrllibProviderHttpTransport,
+    load_candidate_alpaca_market_calendar_evidence,
     load_candidate_alpaca_reference_graph,
 )
 from stock_forecasting.data_supply import (
@@ -55,6 +57,28 @@ def _bundle_member_requests() -> tuple[SourceBundleMemberRequest, ...]:
     )
 
 
+def _engineering_market_calendar_evidence() -> AlpacaMarketCalendarEvidence:
+    return AlpacaMarketCalendarEvidence(
+        version_id="engineering-nyse-calendar-2023-12-29-through-2024-01-04-v1",
+        coverage_start=date(2023, 12, 29),
+        coverage_end=date(2024, 1, 4),
+        sessions=tuple(
+            MarketSessionRecord(
+                session_date=session_date,
+                open_time="09:30",
+                close_time="16:00",
+                session_kind="regular",
+            )
+            for session_date in (
+                date(2023, 12, 29),
+                date(2024, 1, 2),
+                date(2024, 1, 3),
+                date(2024, 1, 4),
+            )
+        ),
+    )
+
+
 class LiteralProviderTransport:
     def __init__(self, response: ProviderHttpResponse) -> None:
         self.response = response
@@ -69,7 +93,7 @@ class MissingCredentialResolver:
     def __init__(self, reason_code: str = "source_credential_missing") -> None:
         self.reason_code = reason_code
 
-    def resolve_valid(self, provider_id: str) -> dict[str, str]:
+    def resolve_valid(self, provider_id: str, *, trace_id: str) -> dict[str, str]:
         raise CredentialNotReady(self.reason_code)
 
 
@@ -77,7 +101,7 @@ class LiteralCredentialResolver:
     def __init__(self) -> None:
         self.provider_ids: list[str] = []
 
-    def resolve_valid(self, provider_id: str) -> dict[str, str]:
+    def resolve_valid(self, provider_id: str, *, trace_id: str) -> dict[str, str]:
         self.provider_ids.append(provider_id)
         return {
             "api_key_id": "PK-COLLECTOR-CONTRACT",
@@ -101,9 +125,11 @@ class LiteralUrlResponse:
 
     def __init__(self, body: bytes) -> None:
         self._body = body
+        self.read_sizes: list[int | None] = []
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, amount: int | None = None) -> bytes:
+        self.read_sizes.append(amount)
+        return self._body if amount is None else self._body[:amount]
 
     def __enter__(self) -> LiteralUrlResponse:
         return self
@@ -292,6 +318,28 @@ def test_candidate_reference_graph_does_not_invent_unknown_active_dates() -> Non
     assert graph.lifecycle_complete is False
 
 
+def test_candidate_calendar_evidence_is_limited_to_the_official_half_day_case() -> None:
+    evidence = load_candidate_alpaca_market_calendar_evidence()
+
+    assert evidence.coverage_start == date(2024, 11, 29)
+    assert evidence.coverage_end == date(2024, 11, 29)
+    assert evidence.sessions == (
+        MarketSessionRecord(
+            session_date=date(2024, 11, 29),
+            open_time="09:30",
+            close_time="13:00",
+            session_kind="early_close",
+        ),
+    )
+    assert (
+        evidence.expected_sessions(
+            start_date=date(2024, 11, 28),
+            end_date=date(2024, 11, 29),
+        )
+        is None
+    )
+
+
 def test_alpaca_credential_validator_checks_a_fixed_raw_daily_bar_request() -> None:
     transport = LiteralProviderTransport(
         ProviderHttpResponse(
@@ -363,6 +411,29 @@ def test_urllib_provider_transport_encodes_query_and_keeps_auth_in_headers() -> 
     assert request.get_header("Apca-api-key-id") == "PK-URLLIB"
     assert request.get_header("Apca-api-secret-key") == "urllib-secret"
     assert timeout == 7.5
+
+
+def test_urllib_provider_transport_bounds_provider_response_bytes() -> None:
+    response_body = b"x" * (8 * 1024 * 1024 + 1)
+    opened_response = LiteralUrlResponse(response_body)
+
+    response = UrllibProviderHttpTransport(
+        opener=lambda _request, *, timeout: opened_response
+    ).send(
+        ProviderHttpRequest(
+            method="GET",
+            url="https://data.alpaca.markets/v2/stocks/AAPL/bars",
+            query={},
+            headers={},
+        )
+    )
+
+    assert opened_response.read_sizes == [8 * 1024 * 1024 + 1]
+    assert response == ProviderHttpResponse(
+        502,
+        b'{"message":"provider response too large"}',
+        {},
+    )
 
 
 @pytest.mark.parametrize(
@@ -802,6 +873,7 @@ def test_alpaca_collector_builds_one_immutable_paginated_source_bundle() -> None
                 "70000000-0000-4000-8000-000000000002": ("FB", "META"),
             }
         ),
+        market_calendar_evidence=_engineering_market_calendar_evidence(),
         credential_resolver=resolver,
         transport=transport,
         clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
@@ -841,8 +913,14 @@ def test_alpaca_collector_builds_one_immutable_paginated_source_bundle() -> None
     assert collection.coverage.observed_start == date(2024, 1, 3)
     assert collection.coverage.observed_end == date(2024, 1, 3)
     assert collection.coverage.complete is True
+    assert collection.market_calendar_evidence_version_id == (
+        "engineering-nyse-calendar-2023-12-29-through-2024-01-04-v1"
+    )
     bundle = json.loads(collection.raw_payload)
     assert bundle["provider_id"] == "alpaca-market-data-basic"
+    assert bundle["market_calendar_evidence_version_id"] == (
+        collection.market_calendar_evidence_version_id
+    )
     assert len(bundle["bars_pages"]) == 2
     assert len(bundle["corporate_action_pages"]) == 1
     assert bundle["calendar"] == [{"close": "16:00", "date": "2024-01-03", "open": "09:30"}]
@@ -1060,6 +1138,7 @@ def test_alpaca_collector_requests_each_alias_overlapping_the_partition() -> Non
         source_id="alpaca-us-stock-bars",
         provider_id="alpaca-market-data-basic",
         reference_graph=reference_graph,
+        market_calendar_evidence=_engineering_market_calendar_evidence(),
         credential_resolver=LiteralCredentialResolver(),
         transport=transport,
         clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
@@ -1109,6 +1188,7 @@ def test_alpaca_collector_requests_each_alias_overlapping_the_partition() -> Non
         source_id="alpaca-us-stock-bars",
         provider_id="alpaca-market-data-basic",
         reference_graph=reference_graph,
+        market_calendar_evidence=_engineering_market_calendar_evidence(),
         credential_resolver=LiteralCredentialResolver(),
         transport=pre_change_transport,
         clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
@@ -1217,6 +1297,57 @@ def test_alpaca_collector_marks_a_missing_symbol_session_incomplete() -> None:
     assert collection.coverage.complete is False
     assert collection.coverage.observed_start is None
     assert collection.coverage.observed_end is None
+
+
+def test_alpaca_collector_rejects_an_interior_session_omitted_by_provider_calendar() -> None:
+    collector = AlpacaSourceCollector(
+        source_id="alpaca-us-stock-bars",
+        provider_id="alpaca-market-data-basic",
+        reference_graph=_complete_reference_graph(
+            listing_id="70000000-0000-4000-8000-000000000001"
+        ),
+        market_calendar_evidence=_engineering_market_calendar_evidence(),
+        credential_resolver=LiteralCredentialResolver(),
+        transport=SequenceProviderTransport(
+            [
+                ProviderHttpResponse(
+                    200,
+                    b'{"bars":{"AAPL":[{"t":"2024-01-02T05:00:00Z","o":185,"h":186,"l":184,"c":185,"v":100},{"t":"2024-01-04T05:00:00Z","o":186,"h":187,"l":185,"c":186,"v":200}]},"next_page_token":null}',
+                ),
+                ProviderHttpResponse(200, b'{"next_page_token":null}'),
+                ProviderHttpResponse(
+                    200,
+                    b'[{"date":"2024-01-02","open":"09:30","close":"16:00"},{"date":"2024-01-04","open":"09:30","close":"16:00"}]',
+                ),
+            ]
+        ),
+        clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+        rate_limit_policy_id="alpaca-basic-200-requests-per-minute-v1",
+    )
+
+    collection = collector.collect(
+        SourcePartitionRequest(
+            request_id="request-ticket-07-calendar-omission",
+            trace_id="trace-ticket-07-calendar-omission",
+            source_id="alpaca-us-stock-bars",
+            mode="historical",
+            listing_ids=("70000000-0000-4000-8000-000000000001",),
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 4),
+            expected_checkpoint=None,
+            distribution_id="alpaca-us-stock-bars-v2",
+            distribution_url="https://data.alpaca.markets/v2/stocks/bars",
+            bundle_members=_bundle_member_requests(),
+        )
+    )
+
+    assert collection.coverage.complete is False
+    calendar_member = next(
+        member
+        for member in collection.bundle_members
+        if member.dataset_id == "alpaca-us-trading-calendar-v2"
+    )
+    assert calendar_member.coverage.complete is False
 
 
 def test_alpaca_decoder_rejects_overlapping_cross_listing_symbol_reuse() -> None:
@@ -1474,6 +1605,53 @@ def test_alpaca_decoder_quarantines_partially_resolved_or_cross_listing_name_cha
 
     assert "unresolved-name-change" not in decoded.identity_assertion_ids
     assert decoded.quality_issues == ("identity_ambiguous", "missing_company_action")
+
+
+def test_alpaca_decoder_quarantines_duplicate_company_action_ids_across_pages() -> None:
+    listing_id = "70000000-0000-4000-8000-000000000026"
+    reference_graph = _complete_reference_graph(listing_id=listing_id)
+    collection = _collected_partition_for_reference_graph(
+        reference_graph,
+        listing_ids=(listing_id,),
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        bars={
+            "AAPL": [
+                {
+                    "t": "2024-01-03T05:00:00Z",
+                    "o": 184.22,
+                    "h": 185.88,
+                    "l": 183.43,
+                    "c": 184.25,
+                    "v": 58414460,
+                }
+            ]
+        },
+    )
+    payload = json.loads(collection.raw_payload)
+    action = {
+        "id": "duplicate-dividend",
+        "symbol": "AAPL",
+        "ex_date": "2024-01-03",
+        "rate": "0.24",
+    }
+    payload["corporate_action_pages"] = [
+        {"cash_dividends": [action], "next_page_token": "actions-page-2"},
+        {"cash_dividends": [action], "next_page_token": None},
+    ]
+
+    decoded = AlpacaSourceDecoder(
+        source_id="alpaca-us-stock-bars",
+        reference_graph=reference_graph,
+    ).decode(
+        replace(
+            collection,
+            raw_payload=json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
+        )
+    )
+
+    assert [action.source_action_id for action in decoded.company_actions] == ["duplicate-dividend"]
+    assert decoded.quality_issues == ("duplicate_company_action",)
 
 
 def test_alpaca_decoder_uses_permanent_listing_ids_and_internal_action_semantics() -> None:

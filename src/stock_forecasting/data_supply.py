@@ -60,6 +60,7 @@ ManifestEvidenceStatus = Literal["qualification_candidate", "qualified"]
 TaiwanPriceSourceMode = Literal["current", "historical"]
 SourceRevisionKind = Literal["original", "late_arrival", "correction", "withdrawal"]
 SourceQualityIssue = Literal[
+    "duplicate_company_action",
     "identity_ambiguous",
     "missing_company_action",
     "correction_requires_review",
@@ -217,6 +218,7 @@ class CollectedSourcePartition:
     reference_graph_lifecycle_verified: bool = False
     company_action_completeness_verified: bool = False
     expected_company_action_ids: frozenset[str] = frozenset()
+    market_calendar_evidence_version_id: str | None = None
     revision_kind: SourceRevisionKind = "original"
 
 
@@ -318,6 +320,14 @@ class SourceCredentialRequired(RuntimeError):
         self.reason_code = reason_code
 
 
+class SourceUnavailable(RuntimeError):
+    def __init__(self, reason_code: str = "source_provider_unavailable") -> None:
+        if not reason_code.startswith("source_provider_"):
+            raise ValueError("source_unavailable_reason_invalid")
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
 class CollectorDecoderPriceSourceAdapter:
     def __init__(
         self,
@@ -388,6 +398,7 @@ class PriceMaterializationOutcome:
         "published",
         "quarantined",
         "deferred",
+        "unavailable",
     ]
     reason_code: str
     policy_reason_code: str
@@ -517,7 +528,12 @@ class DataSupply:
                     outcome="allowed",
                     trace_id=request.trace_id,
                 )
-            return self._materialize_allowed(request, decision, member_decisions)
+            return self._materialize_allowed(
+                request,
+                decision,
+                member_decisions,
+                source_access_mode=source_access_mode,
+            )
         return self._publish_policy_blocked(request, decision)
 
     def _publish_policy_blocked(
@@ -584,6 +600,8 @@ class DataSupply:
         request: SourcePartitionRequest,
         decision: AuthorizationDecision,
         member_decisions: Mapping[str, AuthorizationDecision],
+        *,
+        source_access_mode: SourceAccessMode,
     ) -> PriceMaterializationOutcome:
         source_basis_id = self._source_basis_id(decision, request)
         adapter = self._adapters.get(request.source_id)
@@ -596,6 +614,24 @@ class DataSupply:
         if request.expected_checkpoint != durable_checkpoint:
             raise ValueError("source_checkpoint_state_mismatch")
         authorized_request = replace(request, policy_decision_id=decision.decision_id)
+        if source_access_mode == "live_provider":
+            self._state_store.record_security_event(
+                event_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"{decision.evaluation_id}:source-egress",
+                    )
+                ),
+                action="source.egress",
+                outcome="allowed",
+                reason_code="source_egress_authorized",
+                trace_id=request.trace_id,
+                authorization={
+                    "policy_evaluation_id": decision.evaluation_id,
+                    "dataset_id": request.source_id,
+                    "distribution_id": request.distribution_id,
+                },
+            )
         try:
             loaded = adapter.load(authorized_request)
         except SourceCredentialRequired as error:
@@ -642,6 +678,32 @@ class DataSupply:
                 historical_availability_claim_id=request.historical_availability_claim_id,
                 rate_limit_policy_id=error.rate_limit_policy_id,
                 retry_after_seconds=error.retry_after_seconds,
+            )
+            self._state_store.publish_price_research_evaluation(
+                trace_id=request.trace_id,
+                execution_purpose="price_research",
+                artifacts=[],
+                authorization=authorization_audit_payload(decision),
+                authorization_outcome="allowed",
+                eligibility_records=_eligibility_records(outcome),
+            )
+            return outcome
+        except SourceUnavailable as error:
+            outcome = PriceMaterializationOutcome(
+                status="unavailable",
+                reason_code=error.reason_code,
+                policy_reason_code=decision.reason_code,
+                source_basis_id=source_basis_id,
+                source_id=request.source_id,
+                source_mode=request.mode,
+                listing_ids=request.listing_ids,
+                trace_id=request.trace_id,
+                policy_decision_id=decision.decision_id,
+                policy_evaluation_id=decision.evaluation_id,
+                policy_correlation_id=decision.correlation_id,
+                policy_valid_until=decision.valid_until,
+                evaluated_at=decision.evaluated_at,
+                historical_availability_claim_id=request.historical_availability_claim_id,
             )
             self._state_store.publish_price_research_evaluation(
                 trace_id=request.trace_id,
@@ -998,7 +1060,7 @@ def _source_qualification_checks(status: str, reason_code: str) -> dict[str, str
             "integrity": "not_evaluated",
             "depth": "not_evaluated",
         }
-    if status == "deferred":
+    if status in {"deferred", "unavailable"}:
         return {
             "policy": "passed",
             "coverage": "not_evaluated",
@@ -1207,6 +1269,10 @@ def _source_retrieval_receipt_artifact(
     reference_graph = _reference_graph_lineage_payload(collection)
     if reference_graph is not None:
         payload["reference_graph"] = reference_graph
+    if collection.market_calendar_evidence_version_id is not None:
+        payload["market_calendar_evidence_version_id"] = (
+            collection.market_calendar_evidence_version_id
+        )
     return {
         "artifact_id": _artifact_id("source_retrieval_receipt", payload),
         "artifact_kind": "source_retrieval_receipt",
@@ -1270,6 +1336,8 @@ def _quarantine_reason(
         return "identity_ambiguous"
     if "missing_company_action" in decoded.quality_issues:
         return "missing_company_action"
+    if "duplicate_company_action" in decoded.quality_issues:
+        return "duplicate_company_action"
     if "correction_requires_review" in decoded.quality_issues:
         return "correction_requires_review"
     observed_listing_ids = {

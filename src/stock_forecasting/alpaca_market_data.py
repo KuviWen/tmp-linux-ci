@@ -28,6 +28,7 @@ from stock_forecasting.data_supply import (
     SourceQualityIssue,
     SourceRateLimited,
     SourceRevisionKind,
+    SourceUnavailable,
     SymbolIdentityRecord,
 )
 from stock_forecasting.source_credentials import (
@@ -231,6 +232,66 @@ def load_candidate_alpaca_reference_graph() -> AlpacaReferenceGraph:
     )
 
 
+@dataclass(frozen=True)
+class AlpacaMarketCalendarEvidence:
+    version_id: str
+    coverage_start: date
+    coverage_end: date
+    sessions: tuple[MarketSessionRecord, ...]
+
+    def __post_init__(self) -> None:
+        session_dates = tuple(session.session_date for session in self.sessions)
+        if (
+            not self.version_id
+            or self.coverage_start > self.coverage_end
+            or len(set(session_dates)) != len(session_dates)
+            or any(
+                not self.coverage_start <= session_date <= self.coverage_end
+                for session_date in session_dates
+            )
+        ):
+            raise ValueError("alpaca_market_calendar_evidence_invalid")
+
+    def expected_sessions(
+        self,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> tuple[MarketSessionRecord, ...] | None:
+        if start_date < self.coverage_start or end_date > self.coverage_end:
+            return None
+        return tuple(
+            sorted(
+                (
+                    session
+                    for session in self.sessions
+                    if start_date <= session.session_date <= end_date
+                ),
+                key=lambda session: session.session_date,
+            )
+        )
+
+
+def load_candidate_alpaca_market_calendar_evidence() -> AlpacaMarketCalendarEvidence:
+    from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
+
+    manifest = load_us_stock_pool_manifest()
+    evidence = manifest.market_calendar_evidence
+    return AlpacaMarketCalendarEvidence(
+        version_id=f"{manifest.selection_evidence_version}:market-calendar",
+        coverage_start=evidence.session_date,
+        coverage_end=evidence.session_date,
+        sessions=(
+            MarketSessionRecord(
+                session_date=evidence.session_date,
+                open_time=evidence.open_time,
+                close_time=evidence.close_time,
+                session_kind="early_close",
+            ),
+        ),
+    )
+
+
 class ProviderHttpTransport(Protocol):
     def send(self, request: ProviderHttpRequest) -> ProviderHttpResponse: ...
 
@@ -239,7 +300,7 @@ class _UrlResponse(Protocol):
     status: int
     headers: Message
 
-    def read(self) -> bytes: ...
+    def read(self, amount: int | None = None) -> bytes: ...
 
     def __enter__(self) -> _UrlResponse: ...
 
@@ -272,6 +333,7 @@ def _open_without_redirects(request: Request, *, timeout: float) -> _UrlResponse
 
 class UrllibProviderHttpTransport:
     _ALLOWED_HOSTS = frozenset({"data.alpaca.markets", "paper-api.alpaca.markets"})
+    _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
     def __init__(
         self,
@@ -304,15 +366,15 @@ class UrllibProviderHttpTransport:
         )
         try:
             with self._opener(urllib_request, timeout=self._timeout_seconds) as response:
-                return ProviderHttpResponse(
+                return self._bounded_response(
                     status_code=response.status,
-                    body=response.read(),
+                    body=response.read(self._MAX_RESPONSE_BYTES + 1),
                     headers=dict(response.headers.items()),
                 )
         except HTTPError as error:
-            return ProviderHttpResponse(
+            return self._bounded_response(
                 status_code=error.code,
-                body=error.read(),
+                body=error.read(self._MAX_RESPONSE_BYTES + 1),
                 headers=dict(error.headers.items()) if error.headers is not None else {},
             )
         except URLError:
@@ -320,6 +382,20 @@ class UrllibProviderHttpTransport:
                 status_code=503,
                 body=b'{"message":"provider transport unavailable"}',
             )
+
+    def _bounded_response(
+        self,
+        *,
+        status_code: int,
+        body: bytes,
+        headers: Mapping[str, str],
+    ) -> ProviderHttpResponse:
+        if len(body) > self._MAX_RESPONSE_BYTES:
+            return ProviderHttpResponse(
+                status_code=502,
+                body=b'{"message":"provider response too large"}',
+            )
+        return ProviderHttpResponse(status_code=status_code, body=body, headers=headers)
 
 
 class AlpacaCredentialValidator:
@@ -715,6 +791,7 @@ class AlpacaSourceCollector:
         source_id: str,
         provider_id: str,
         reference_graph: AlpacaReferenceGraph,
+        market_calendar_evidence: AlpacaMarketCalendarEvidence | None = None,
         credential_resolver: SourceCredentialResolver,
         transport: ProviderHttpTransport,
         clock: Callable[[], datetime],
@@ -723,6 +800,7 @@ class AlpacaSourceCollector:
         self._source_id = source_id
         self._provider_id = provider_id
         self._reference_graph = reference_graph
+        self._market_calendar_evidence = market_calendar_evidence
         self._credential_resolver = credential_resolver
         self._transport = transport
         self._clock = clock
@@ -736,7 +814,10 @@ class AlpacaSourceCollector:
         if declared_members != self._REQUIRED_BUNDLE_MEMBERS:
             raise ValueError("source_bundle_member_request_mismatch")
         try:
-            credential_fields = self._credential_resolver.resolve_valid(self._provider_id)
+            credential_fields = self._credential_resolver.resolve_valid(
+                self._provider_id,
+                trace_id=request.trace_id,
+            )
         except CredentialNotReady as error:
             raise SourceCredentialRequired(error.reason_code) from error
         if request.source_id != self._source_id:
@@ -821,11 +902,26 @@ class AlpacaSourceCollector:
             isinstance(session, dict) for session in calendar
         ):
             raise ValueError("source_provider_schema_invalid")
+        observed_sessions = self._calendar_sessions(calendar)
+        expected_sessions = (
+            self._market_calendar_evidence.expected_sessions(
+                start_date=request.start_date,
+                end_date=request.end_date,
+            )
+            if self._market_calendar_evidence is not None
+            else None
+        )
+        calendar_exact = expected_sessions is not None and observed_sessions == expected_sessions
         bundle = {
             "bars_pages": bars_pages,
             "calendar": calendar,
             "corporate_action_pages": corporate_action_pages,
             "provider_id": self._provider_id,
+            "market_calendar_evidence_version_id": (
+                self._market_calendar_evidence.version_id
+                if self._market_calendar_evidence is not None
+                else None
+            ),
             "reference_graph": self._reference_graph.partition_payload(
                 listing_ids=request.listing_ids,
                 start_date=request.start_date,
@@ -841,8 +937,8 @@ class AlpacaSourceCollector:
         ).encode("utf-8")
         checkpoint = f"sha256:{hashlib.sha256(raw_payload).hexdigest()}"
         observed_dates = self._observed_bar_dates(bars_pages)
-        session_dates = {date.fromisoformat(str(session["date"])) for session in calendar}
-        complete = bool(session_dates) and all(
+        session_dates = {session.session_date for session in observed_sessions}
+        complete = calendar_exact and all(
             self._listing_session_observed(
                 aliases=aliases,
                 session_date=session_date,
@@ -896,6 +992,11 @@ class AlpacaSourceCollector:
                     end_date=request.end_date,
                 )
             ),
+            market_calendar_evidence_version_id=(
+                self._market_calendar_evidence.version_id
+                if self._market_calendar_evidence is not None
+                else None
+            ),
             revision_kind=request.revision_kind,
             bundle_members=(
                 CollectedSourceBundleMember(
@@ -925,7 +1026,7 @@ class AlpacaSourceCollector:
                         requested_end=request.end_date,
                         observed_start=calendar_observed_start,
                         observed_end=calendar_observed_end,
-                        complete=bool(session_dates),
+                        complete=calendar_exact,
                     ),
                     schema_version="alpaca-trading-calendar-v2",
                     known_gaps=("calendar_history_subject_to_provider_coverage",),
@@ -976,7 +1077,7 @@ class AlpacaSourceCollector:
         if response.status_code == 401:
             raise SourceCredentialRequired("source_credential_authentication_failed")
         if response.status_code == 403:
-            raise RuntimeError("source_provider_unavailable")
+            raise SourceUnavailable()
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", "60")
             try:
@@ -988,7 +1089,7 @@ class AlpacaSourceCollector:
                 rate_limit_policy_id=self._rate_limit_policy_id,
             )
         if response.status_code != 200:
-            raise RuntimeError("source_provider_unavailable")
+            raise SourceUnavailable()
         try:
             payload = json.loads(response.body)
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
@@ -1051,6 +1152,36 @@ class AlpacaSourceCollector:
         return bool(active_symbols) and any(
             session_date in observed_dates.get(symbol, set()) for symbol in active_symbols
         )
+
+    @staticmethod
+    def _calendar_sessions(
+        calendar: list[object],
+    ) -> tuple[MarketSessionRecord, ...]:
+        try:
+            sessions = tuple(
+                sorted(
+                    (
+                        MarketSessionRecord(
+                            session_date=date.fromisoformat(str(session["date"])),
+                            open_time=str(session["open"]),
+                            close_time=str(session["close"]),
+                            session_kind=(
+                                "regular" if str(session["close"]) == "16:00" else "early_close"
+                            ),
+                        )
+                        for session in calendar
+                        if isinstance(session, Mapping)
+                    ),
+                    key=lambda session: session.session_date,
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("source_provider_schema_invalid") from error
+        if len(sessions) != len(calendar) or len({item.session_date for item in sessions}) != len(
+            sessions
+        ):
+            raise ValueError("source_provider_schema_invalid")
+        return sessions
 
     @staticmethod
     def _observed_bar_dates(
@@ -1244,6 +1375,7 @@ class AlpacaSourceDecoder:
         company_actions: list[CompanyActionRecord] = []
         symbol_identities: list[SymbolIdentityRecord] = []
         assertion_ids: set[str] = set()
+        seen_action_ids: set[str] = set()
         pages = bundle.get("corporate_action_pages")
         if not isinstance(pages, list):
             raise ValueError("source_provider_schema_invalid")
@@ -1256,6 +1388,10 @@ class AlpacaSourceDecoder:
                 action_type = action.get("type") or action.get("corporate_action_type")
                 if not isinstance(action_id, str) or not isinstance(action_type, str):
                     raise ValueError("source_provider_schema_invalid")
+                if action_id in seen_action_ids:
+                    quality_issues.add("duplicate_company_action")
+                    continue
+                seen_action_ids.add(action_id)
                 if action_type == "name_change":
                     old_symbol = action.get("old_symbol") or action.get("initiating_symbol")
                     new_symbol = action.get("new_symbol") or action.get("target_symbol")
