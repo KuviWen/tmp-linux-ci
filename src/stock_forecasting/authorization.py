@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Literal, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from stock_forecasting.alpaca_provider_contract import ALPACA_PROVIDER_DISTRIBUTIONS
+
 RuntimeEnvironment = Literal["local", "development", "test", "staging", "production"]
 EntitlementStatus = Literal["draft", "under_review", "active", "suspended", "expired", "revoked"]
 DataProtectionClass = Literal["public_source", "internal", "licensed", "restricted", "secret"]
@@ -1548,10 +1550,11 @@ def build_us_zero_fee_engineering_authorization_policy(
     credential_actions: frozenset[AuthorizationAction] = frozenset(
         {"source_credential.read", "source_credential.manage"}
     )
+    price_research_purposes: frozenset[AuthorizationPurpose] = frozenset({"price_research"})
     engineering_collect_policies = tuple(
         SourcePolicyVersion(
-            version_id=f"ticket-07-engineering/{dataset_id}-policy-v1",
-            dataset_id=dataset_id,
+            version_id=(f"ticket-07-engineering/{distribution.policy_dataset_id}-policy-v1"),
+            dataset_id=distribution.policy_dataset_id,
             allowed_actions=bars_actions,
             purposes=frozenset({"price_research"}),
             environments=frozenset({context.environment}),
@@ -1564,28 +1567,12 @@ def build_us_zero_fee_engineering_authorization_policy(
             source_basis_id="ENGINEERING-ALPACA-CONTRACT-01",
             distributions=(
                 SourceDistribution(
-                    dataset_id=distribution_id,
-                    distribution_url=distribution_url,
+                    dataset_id=distribution.distribution_id,
+                    distribution_url=distribution.distribution_url,
                 ),
             ),
         )
-        for dataset_id, distribution_id, distribution_url in (
-            (
-                "alpaca-us-stock-bars",
-                "alpaca-us-stock-bars-v2",
-                "https://data.alpaca.markets/v2/stocks/bars",
-            ),
-            (
-                "alpaca-us-corporate-actions-v1",
-                "alpaca-us-corporate-actions-v1",
-                "https://data.alpaca.markets/v1/corporate-actions",
-            ),
-            (
-                "alpaca-us-trading-calendar-v2",
-                "alpaca-us-trading-calendar-v2",
-                "https://paper-api.alpaca.markets/v2/calendar",
-            ),
-        )
+        for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
     )
     policies = (
         *engineering_collect_policies,
@@ -1612,6 +1599,17 @@ def build_us_zero_fee_engineering_authorization_policy(
             valid_to=context.expires_at,
         ),
     )
+    engineering_entitlement_contracts: tuple[
+        tuple[
+            str,
+            frozenset[AuthorizationAction],
+            frozenset[AuthorizationPurpose],
+        ],
+        ...,
+    ] = tuple(
+        (distribution.policy_dataset_id, bars_actions, price_research_purposes)
+        for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
+    )
     entitlement_contracts: tuple[
         tuple[
             str,
@@ -1620,18 +1618,8 @@ def build_us_zero_fee_engineering_authorization_policy(
         ],
         ...,
     ] = (
-        ("alpaca-us-stock-bars", bars_actions, frozenset({"price_research"})),
-        (
-            "alpaca-us-corporate-actions-v1",
-            bars_actions,
-            frozenset({"price_research"}),
-        ),
-        (
-            "alpaca-us-trading-calendar-v2",
-            bars_actions,
-            frozenset({"price_research"}),
-        ),
-        ("price-research-eligibility", read_actions, frozenset({"price_research"})),
+        *engineering_entitlement_contracts,
+        ("price-research-eligibility", read_actions, price_research_purposes),
         (
             "source-credential-metadata",
             credential_actions,

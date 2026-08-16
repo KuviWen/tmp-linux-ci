@@ -5,6 +5,10 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
+from stock_forecasting.alpaca_provider_contract import (
+    ALPACA_PROVIDER_DISTRIBUTIONS,
+    ALPACA_PROVIDER_ID,
+)
 from stock_forecasting.authorization import (
     AuthorizationAction,
     AuthorizationDecision,
@@ -45,28 +49,6 @@ _SOURCE_CREDENTIAL_PROVIDERS: tuple[dict[str, object], ...] = (
         "key_management_url": "https://app.alpaca.markets/paper/dashboard/overview",
     },
 )
-_SOURCE_CREDENTIAL_VALIDATION_TARGETS: dict[
-    str,
-    tuple[tuple[str, str, str], ...],
-] = {
-    "alpaca-market-data-basic": (
-        (
-            "alpaca-us-stock-bars",
-            "alpaca-us-stock-bars-v2",
-            "https://data.alpaca.markets/v2/stocks/bars",
-        ),
-        (
-            "alpaca-us-corporate-actions-v1",
-            "alpaca-us-corporate-actions-v1",
-            "https://data.alpaca.markets/v1/corporate-actions",
-        ),
-        (
-            "alpaca-us-trading-calendar-v2",
-            "alpaca-us-trading-calendar-v2",
-            "https://paper-api.alpaca.markets/v2/calendar",
-        ),
-    ),
-}
 
 
 class OperationsControl:
@@ -416,39 +398,43 @@ class OperationsControl:
             else:
                 credential_fields = lease.credential_fields()
                 try:
-                    validation = validator.validate(credential_fields)
-                    serialized_validation = json.dumps(
-                        {
-                            "reason_code": validation.reason_code,
-                            "evidence": validation.evidence.as_payload(),
-                            "source_contract_assessment": (
-                                validation.source_contract_assessment.as_payload()
-                                if validation.source_contract_assessment is not None
-                                else None
-                            ),
-                        },
-                        sort_keys=True,
-                    )
-                    output_contains_secret = any(
-                        credential_value in serialized_validation
-                        for credential_value in credential_fields.values()
-                    )
-                except Exception:
-                    validation_readiness = "validation_failed"
-                    validation_reason = "source_credential_validator_output_rejected"
-                    validation_evidence = None
-                    source_contract_assessment = None
-                else:
-                    if output_contains_secret:
+                    try:
+                        validation = validator.validate(credential_fields)
+                        serialized_validation = json.dumps(
+                            {
+                                "reason_code": validation.reason_code,
+                                "evidence": validation.evidence.as_payload(),
+                                "source_contract_assessment": (
+                                    validation.source_contract_assessment.as_payload()
+                                    if validation.source_contract_assessment is not None
+                                    else None
+                                ),
+                            },
+                            sort_keys=True,
+                        )
+                        output_contains_secret = any(
+                            credential_value in serialized_validation
+                            for credential_value in credential_fields.values()
+                        )
+                    except Exception:
                         validation_readiness = "validation_failed"
                         validation_reason = "source_credential_validator_output_rejected"
                         validation_evidence = None
                         source_contract_assessment = None
                     else:
-                        validation_readiness = validation.readiness
-                        validation_reason = validation.reason_code
-                        validation_evidence = validation.evidence
-                        source_contract_assessment = validation.source_contract_assessment
+                        if output_contains_secret:
+                            validation_readiness = "validation_failed"
+                            validation_reason = "source_credential_validator_output_rejected"
+                            validation_evidence = None
+                            source_contract_assessment = None
+                        else:
+                            validation_readiness = validation.readiness
+                            validation_reason = validation.reason_code
+                            validation_evidence = validation.evidence
+                            source_contract_assessment = validation.source_contract_assessment
+                finally:
+                    credential_fields.clear()
+                    lease.revoke()
         if not isinstance(expected_version, int):
             raise ValueError("source_credential_version_invalid")
         return self._state_store.record_source_credential_validation(
@@ -482,6 +468,8 @@ class OperationsControl:
         policy_loader = self._source_adapter_authorization_policy
         if context is None or policy_loader is None:
             raise ValueError("source_adapter_identity_unavailable")
+        if provider_id != ALPACA_PROVIDER_ID:
+            raise ValueError("source_credential_provider_unknown")
         try:
             policy = policy_loader()
         except KeyError:
@@ -490,14 +478,12 @@ class OperationsControl:
                 source_policies=(),
                 source_entitlements=(),
             )
-        for dataset_id, distribution_id, distribution_url in _SOURCE_CREDENTIAL_VALIDATION_TARGETS[
-            provider_id
-        ]:
+        for distribution in ALPACA_PROVIDER_DISTRIBUTIONS:
             decision = policy.evaluate(
                 context,
                 OperationIntent(
                     action="market_data.collect",
-                    dataset_id=dataset_id,
+                    dataset_id=distribution.policy_dataset_id,
                     purpose="price_research",
                     environment=context.environment,
                     resource_state="active",
@@ -505,8 +491,8 @@ class OperationsControl:
                     trace_id=trace_id,
                     correlation_id=trace_id,
                     required_uses=PRICE_RESEARCH_REQUIRED_USES,
-                    distribution_id=distribution_id,
-                    distribution_url=distribution_url,
+                    distribution_id=distribution.distribution_id,
+                    distribution_url=distribution.distribution_url,
                     source_access_mode=validator.source_access_mode,
                 ),
             )

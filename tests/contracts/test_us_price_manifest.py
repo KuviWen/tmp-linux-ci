@@ -3,6 +3,10 @@ from __future__ import annotations
 from datetime import date
 from uuid import UUID
 
+from stock_forecasting.alpaca_provider_contract import (
+    ALPACA_PROVIDER_DISTRIBUTIONS,
+    ALPACA_PROVIDER_ID,
+)
 from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
 
@@ -138,3 +142,40 @@ def test_us_manifest_preserves_each_zero_fee_source_bundle_member_and_gap() -> N
     assert manifest.formal_qualification_artifact_id is None
     assert manifest.historical_availability_claim_id is None
     assert manifest.formally_qualified is False
+
+
+def test_alpaca_provider_contract_catalog_matches_the_source_manifest() -> None:
+    manifest = load_us_stock_pool_manifest()
+
+    assert ALPACA_PROVIDER_ID == "alpaca-market-data-basic"
+    assert [
+        (
+            distribution.policy_dataset_id,
+            distribution.distribution_id,
+            distribution.distribution_url,
+        )
+        for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
+    ] == [
+        (
+            "alpaca-us-stock-bars",
+            "alpaca-us-stock-bars-v2",
+            "https://data.alpaca.markets/v2/stocks/bars",
+        ),
+        (
+            "alpaca-us-corporate-actions-v1",
+            "alpaca-us-corporate-actions-v1",
+            "https://data.alpaca.markets/v1/corporate-actions",
+        ),
+        (
+            "alpaca-us-trading-calendar-v2",
+            "alpaca-us-trading-calendar-v2",
+            "https://paper-api.alpaca.markets/v2/calendar",
+        ),
+    ]
+    assert manifest.source_basis.provider_id == ALPACA_PROVIDER_ID
+    assert [
+        (member.dataset_id, member.distribution_url) for member in manifest.source_basis.members
+    ] == [
+        (distribution.distribution_id, distribution.distribution_url)
+        for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
+    ]

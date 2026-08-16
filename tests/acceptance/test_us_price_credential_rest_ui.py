@@ -43,6 +43,7 @@ from stock_forecasting.source_credentials import (
     SecretUnavailableError,
     SecretUseContext,
     SourceContractAssessment,
+    SourceCredentialValidator,
 )
 
 
@@ -187,7 +188,7 @@ def _direct_secret_context(*, credential_version: int) -> SecretUseContext:
 def _credential_application(
     tmp_path: Path,
     *,
-    credential_validator: LiteralCredentialValidator | None = None,
+    credential_validator: SourceCredentialValidator | None = None,
     secret_provider: SecretProvider | None = None,
     source_adapter_identity: LocalApiKeyIdentity | None = None,
     install_source_adapter_policy: bool = True,
@@ -1155,7 +1156,7 @@ def test_operations_sanitizes_a_secret_bearing_validator_exception(tmp_path: Pat
     validator = SecretBearingExceptionValidator()
     _, client, headers = _credential_application(
         tmp_path,
-        credential_validator=validator,  # type: ignore[arg-type]
+        credential_validator=validator,
     )
     secret_value = "exception-secret-canary"
     client.put(
@@ -1183,6 +1184,50 @@ def test_operations_sanitizes_a_secret_bearing_validator_exception(tmp_path: Pat
     assert validated.json()["source_contract_assessment"] is None
     assert "PK-EXCEPTION-CANARY" not in validated.text
     assert secret_value not in validated.text
+
+
+@pytest.mark.parametrize("validator_raises", [False, True])
+def test_validation_releases_its_secret_lease_immediately(
+    tmp_path: Path,
+    validator_raises: bool,
+) -> None:
+    secret_provider = RecordingSecretProvider()
+    validator: SourceCredentialValidator = (
+        SecretBearingExceptionValidator()
+        if validator_raises
+        else LiteralCredentialValidator(
+            CredentialValidationResult(
+                readiness="valid",
+                reason_code="source_credential_valid",
+                evidence=CredentialValidationEvidence(authentication_status="passed"),
+            )
+        )
+    )
+    _, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+        secret_provider=secret_provider,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    configured = client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-RELEASE-AFTER-VALIDATION",
+                "api_secret_key": "release-after-validation-secret",
+            }
+        },
+    )
+    assert configured.status_code == 200
+
+    validated = client.post(f"{endpoint}/validations", headers=headers)
+
+    assert validated.status_code == 200
+    lease = secret_provider.leases[-1]
+    assert lease.revoked is True
+    with pytest.raises(SecretUnavailableError, match="source_credential_lease_revoked"):
+        lease.credential_fields()
 
 
 def test_only_a_valid_managed_credential_can_be_resolved_for_provider_use(

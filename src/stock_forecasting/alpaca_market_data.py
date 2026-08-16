@@ -12,6 +12,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from stock_forecasting.alpaca_provider_contract import (
+    ALPACA_BARS_DISTRIBUTION,
+    ALPACA_CORPORATE_ACTIONS_DISTRIBUTION,
+    ALPACA_CREDENTIAL_VALIDATION_URL,
+    ALPACA_PROVIDER_DISTRIBUTIONS,
+    ALPACA_REQUIRED_BUNDLE_DISTRIBUTIONS,
+    ALPACA_TRADING_CALENDAR_DISTRIBUTION,
+)
 from stock_forecasting.authorization import SourceAccessMode
 from stock_forecasting.data_supply import (
     CanonicalPriceRow,
@@ -402,7 +410,7 @@ class UrllibProviderHttpTransport:
 class AlpacaCredentialValidator:
     source_access_mode: SourceAccessMode = "live_provider"
 
-    _VALIDATION_URL = "https://data.alpaca.markets/v2/stocks/AAPL/bars"
+    _VALIDATION_URL = ALPACA_CREDENTIAL_VALIDATION_URL
     _VALIDATION_QUERY = {
         "adjustment": "raw",
         "end": "2024-01-04T00:00:00Z",
@@ -498,7 +506,7 @@ class AlpacaCredentialValidator:
                 contract_id="alpaca-credential-probe-v1",
                 live_validation="passed",
                 ticker_count=1,
-                datasets=("alpaca-us-stock-bars-v2",),
+                datasets=(ALPACA_BARS_DISTRIBUTION.distribution_id,),
             ),
         )
 
@@ -509,9 +517,9 @@ class AlpacaLiveContractValidator:
     """Opt-in provider contract probe; evidence never contains credential material."""
 
     _REGULAR_SYMBOLS = ("AAPL", "AMZN", "BRK.B", "GME", "GOOG", "GOOGL", "META", "NVDA", "TSM")
-    _BARS_URL = "https://data.alpaca.markets/v2/stocks/bars"
-    _ACTIONS_URL = "https://data.alpaca.markets/v1/corporate-actions"
-    _CALENDAR_URL = "https://paper-api.alpaca.markets/v2/calendar"
+    _BARS_URL = ALPACA_BARS_DISTRIBUTION.distribution_url
+    _ACTIONS_URL = ALPACA_CORPORATE_ACTIONS_DISTRIBUTION.distribution_url
+    _CALENDAR_URL = ALPACA_TRADING_CALENDAR_DISTRIBUTION.distribution_url
 
     def __init__(self, transport: ProviderHttpTransport) -> None:
         self._transport = transport
@@ -665,10 +673,8 @@ class AlpacaLiveContractValidator:
                 ticker_count=10,
                 pagination_pages=pagination_pages,
                 symbol_lifecycle_probe="passed",
-                datasets=(
-                    "alpaca-us-stock-bars-v2",
-                    "alpaca-us-corporate-actions-v1",
-                    "alpaca-us-trading-calendar-v2",
+                datasets=tuple(
+                    distribution.distribution_id for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
                 ),
             ),
         )
@@ -780,14 +786,11 @@ class AlpacaLiveContractValidator:
 class AlpacaSourceCollector:
     _MAX_PAGES = 1000
     _REQUIRED_BUNDLE_MEMBERS = {
-        "alpaca-us-corporate-actions-v1": (
-            "alpaca-us-corporate-actions-v1",
-            "https://data.alpaca.markets/v1/corporate-actions",
-        ),
-        "alpaca-us-trading-calendar-v2": (
-            "alpaca-us-trading-calendar-v2",
-            "https://paper-api.alpaca.markets/v2/calendar",
-        ),
+        distribution.policy_dataset_id: (
+            distribution.distribution_id,
+            distribution.distribution_url,
+        )
+        for distribution in ALPACA_REQUIRED_BUNDLE_DISTRIBUTIONS
     }
 
     def __init__(
@@ -870,7 +873,7 @@ class AlpacaSourceCollector:
         except (IndexError, KeyError) as error:
             raise SourceCredentialRequired("source_credential_fields_invalid") from error
         bars_pages = self._paginated_request(
-            url="https://data.alpaca.markets/v2/stocks/bars",
+            url=ALPACA_BARS_DISTRIBUTION.distribution_url,
             query={
                 "adjustment": "raw",
                 "asof": "-",
@@ -885,7 +888,7 @@ class AlpacaSourceCollector:
             headers=headers,
         )
         corporate_action_pages = self._paginated_request(
-            url="https://data.alpaca.markets/v1/corporate-actions",
+            url=ALPACA_CORPORATE_ACTIONS_DISTRIBUTION.distribution_url,
             query={
                 "end": request.end_date.isoformat(),
                 "limit": "1000",
@@ -898,7 +901,7 @@ class AlpacaSourceCollector:
         calendar = self._request_json(
             ProviderHttpRequest(
                 method="GET",
-                url="https://paper-api.alpaca.markets/v2/calendar",
+                url=ALPACA_TRADING_CALENDAR_DISTRIBUTION.distribution_url,
                 query={
                     "date_type": "TRADING",
                     "end": request.end_date.isoformat(),
@@ -977,7 +980,7 @@ class AlpacaSourceCollector:
             request_id=request.request_id,
             source_id=request.source_id,
             acquired_at=self._clock(),
-            sanitized_source_uri="https://data.alpaca.markets/v2/stocks/bars",
+            sanitized_source_uri=ALPACA_BARS_DISTRIBUTION.distribution_url,
             media_type="application/json",
             raw_payload=raw_payload,
             checkpoint_before=request.expected_checkpoint,
@@ -1009,9 +1012,9 @@ class AlpacaSourceCollector:
             revision_kind=request.revision_kind,
             bundle_members=(
                 CollectedSourceBundleMember(
-                    dataset_id="alpaca-us-corporate-actions-v1",
-                    distribution_id="alpaca-us-corporate-actions-v1",
-                    distribution_url="https://data.alpaca.markets/v1/corporate-actions",
+                    dataset_id=ALPACA_CORPORATE_ACTIONS_DISTRIBUTION.policy_dataset_id,
+                    distribution_id=ALPACA_CORPORATE_ACTIONS_DISTRIBUTION.distribution_id,
+                    distribution_url=ALPACA_CORPORATE_ACTIONS_DISTRIBUTION.distribution_url,
                     media_type="application/json",
                     raw_payload=action_payload,
                     coverage=SourceCollectionCoverage(
@@ -1025,9 +1028,9 @@ class AlpacaSourceCollector:
                     known_gaps=("provider_creation_time_not_guaranteed",),
                 ),
                 CollectedSourceBundleMember(
-                    dataset_id="alpaca-us-trading-calendar-v2",
-                    distribution_id="alpaca-us-trading-calendar-v2",
-                    distribution_url="https://paper-api.alpaca.markets/v2/calendar",
+                    dataset_id=ALPACA_TRADING_CALENDAR_DISTRIBUTION.policy_dataset_id,
+                    distribution_id=ALPACA_TRADING_CALENDAR_DISTRIBUTION.distribution_id,
+                    distribution_url=ALPACA_TRADING_CALENDAR_DISTRIBUTION.distribution_url,
                     media_type="application/json",
                     raw_payload=calendar_payload,
                     coverage=SourceCollectionCoverage(
