@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 
 from stock_forecasting.authorization import (
@@ -101,13 +102,27 @@ class PriceEligibilityQuery:
             selected_basis = (
                 manifest.authenticated_source_basis if finmind_selected else manifest.source_basis
             )
+            qualification_manifest = (
+                manifest.for_authenticated_source_path() if finmind_selected else manifest
+            )
+            persisted_gate = self._state_store.find_latest_price_qualification_gate(
+                manifest_id=qualification_manifest.manifest_id,
+                source_path_id=qualification_manifest.source_path_id,
+            )
+            if persisted_gate is not None:
+                gate_id, gate_payload = persisted_gate
+                with suppress(ValueError):
+                    qualification_manifest = qualification_manifest.with_formal_qualification_gate(
+                        artifact_id=gate_id,
+                        payload=gate_payload,
+                    )
             source_basis = selected_basis.as_payload()
             try:
                 formal_evidence_available = TaiwanPriceQualificationWorkflow(
                     self._state_store,
                     object_repository=self._object_repository,
                 ).formal_qualification_available(
-                    manifest,
+                    qualification_manifest,
                     sources,
                 )
             except ValueError:
@@ -186,7 +201,7 @@ class PriceEligibilityQuery:
             "reason_code": reason_code,
             "source_basis_id": str(source_basis["source_basis_id"]),
             "source_basis": source_basis,
-            "formally_qualified": status == "qualified",
+            "formally_qualified": (formal_evidence_available and not current_source_rights_denied),
             "downstream_readiness": {
                 "new_collection": downstream_state,
                 "feature_materialization": downstream_state,

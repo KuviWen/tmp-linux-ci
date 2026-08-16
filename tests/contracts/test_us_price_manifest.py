@@ -161,6 +161,25 @@ def test_us_candidate_still_requires_its_pinned_terms_digest() -> None:
         )
 
 
+def test_us_candidate_rejects_the_wrong_provider_credential_or_required_bundle() -> None:
+    manifest = load_us_stock_pool_manifest()
+
+    for invalid_basis in (
+        replace(
+            manifest.source_basis,
+            provider_id="another-provider",
+            members=tuple(
+                replace(member, provider_id="another-provider")
+                for member in manifest.source_basis.members
+            ),
+        ),
+        replace(manifest.source_basis, credential_kind="bearer_token"),
+        replace(manifest.source_basis, members=manifest.source_basis.members[:-1]),
+    ):
+        with pytest.raises(ValueError, match="us_stock_pool_manifest_invalid"):
+            replace(manifest, source_basis=invalid_basis)
+
+
 def test_alpaca_provider_contract_catalog_matches_the_source_manifest() -> None:
     manifest = load_us_stock_pool_manifest()
 

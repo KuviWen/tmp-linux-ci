@@ -802,6 +802,17 @@ class DataSupply:
                     "payload": quarantine_payload,
                 },
             ]
+            historical_assessment = _historical_qualification_assessment_artifact(
+                request=request,
+                collection=collection,
+                decoded=decoded,
+                quarantine_reason=quarantine_reason,
+                raw_object_id=raw_object.object_id,
+                raw_sha256=raw_object.checksum,
+                bundle_member_lineage=member_lineage,
+            )
+            if historical_assessment is not None:
+                quarantine_artifacts.append(historical_assessment)
             self._state_store.publish_price_research_evaluation(
                 trace_id=request.trace_id,
                 execution_purpose="price_research",
@@ -1356,6 +1367,76 @@ def _quarantine_reason(
     return None
 
 
+def _historical_qualification_assessment_artifact(
+    *,
+    request: SourcePartitionRequest,
+    collection: CollectedSourcePartition,
+    decoded: DecodedSourcePartition,
+    quarantine_reason: str,
+    raw_object_id: str,
+    raw_sha256: str,
+    bundle_member_lineage: list[dict[str, object]],
+) -> dict[str, object] | None:
+    observed_listing_ids = {
+        item.listing_id
+        for items in (decoded.prices, decoded.company_actions, decoded.listing_lifecycle)
+        for item in items
+    }
+    if (
+        request.mode != "historical"
+        or quarantine_reason != "historical_evidence_unverified"
+        or decoded.schema_version not in _APPROVED_PRICE_SCHEMA_VERSIONS
+        or decoded.revision_kind != "original"
+        or decoded.quality_issues
+        or not decoded.identity_assertion_ids
+        or not collection.coverage.complete
+        or collection.coverage.observed_start is None
+        or collection.coverage.observed_end is None
+        or collection.market_calendar_evidence_version_id is None
+        or not collection.reference_graph_lifecycle_verified
+        or not collection.company_action_completeness_verified
+        or observed_listing_ids != set(request.listing_ids)
+        or _bundle_member_quarantine_reason(request, collection) is not None
+        or request.distribution_id is None
+    ):
+        return None
+    integrity_objects = [
+        {"object_id": raw_object_id, "sha256": raw_sha256},
+        *[
+            {
+                "object_id": lineage["raw_object_id"],
+                "sha256": lineage["raw_sha256"],
+            }
+            for lineage in bundle_member_lineage
+        ],
+    ]
+    payload: dict[str, object] = {
+        "source_id": request.source_id,
+        "source_mode": request.mode,
+        "request_id": request.request_id,
+        "schema_version": decoded.schema_version,
+        "listing_ids": sorted(request.listing_ids),
+        "observed_dataset_ids": sorted(
+            {
+                request.distribution_id,
+                *(member.distribution_id for member in request.bundle_members),
+            }
+        ),
+        "coverage": _coverage_payload(collection.coverage),
+        "exact_sessions_verified": True,
+        "integrity_objects": integrity_objects,
+        "company_actions_verified": True,
+        "listing_lifecycle_verified": True,
+        "reference_graph_version_id": collection.reference_graph_version_id,
+        "market_calendar_evidence_version_id": (collection.market_calendar_evidence_version_id),
+    }
+    return {
+        "artifact_id": _artifact_id("historical_qualification_assessment", payload),
+        "artifact_kind": "historical_qualification_assessment",
+        "payload": payload,
+    }
+
+
 def _bundle_member_quarantine_reason(
     request: SourcePartitionRequest,
     collection: CollectedSourcePartition,
@@ -1649,15 +1730,48 @@ class TaiwanStockPoolManifest:
     listing_relationships: tuple[ListingSelectionRelationship, ...]
     source_basis: OpenDataSourceBasis
     authenticated_source_basis: ZeroFeeAuthenticatedSourceBasis
+    source_path_id: str
     current_source_id: str
     historical_source_id: str
+    authenticated_source_path_id: str
+    authenticated_current_source_id: str
+    authenticated_historical_source_id: str
     formal_qualification_artifact_id: str | None
     historical_availability_claim_id: str | None
     evidence_status: ManifestEvidenceStatus
 
     def __post_init__(self) -> None:
+        from stock_forecasting.finmind_provider_contract import (
+            FINMIND_PROVIDER_DISTRIBUTIONS,
+            FINMIND_PROVIDER_ID,
+        )
+
+        authenticated_member_ids = {
+            member.dataset_id for member in self.authenticated_source_basis.members
+        }
         if len(self.listings) != self.taiwan_target:
             raise ValueError("taiwan_stock_pool_target_mismatch")
+        if (
+            self.authenticated_source_basis.source_basis_id != "FINMIND-FREE-TAIWAN-MARKET-DATA-01"
+            or self.authenticated_source_basis.provider_id != FINMIND_PROVIDER_ID
+            or self.authenticated_source_basis.credential_kind != "bearer_token"
+            or authenticated_member_ids
+            != {distribution.distribution_id for distribution in FINMIND_PROVIDER_DISTRIBUTIONS}
+            or any(
+                member.provider_id != FINMIND_PROVIDER_ID
+                for member in self.authenticated_source_basis.supplemental_references
+            )
+            or {
+                member.dataset_id
+                for member in self.authenticated_source_basis.supplemental_references
+            }
+            != {"TaiwanStockInfo"}
+            or not self.source_path_id
+            or not self.authenticated_source_path_id
+            or self.authenticated_current_source_id != "finmind-taiwan-stock-price"
+            or self.authenticated_historical_source_id != "finmind-taiwan-stock-price"
+        ):
+            raise ValueError("taiwan_stock_pool_manifest_invalid")
         if len({listing.listing_id for listing in self.listings}) != len(self.listings):
             raise ValueError("taiwan_stock_pool_listing_id_reused")
         if len({listing.issuer_id for listing in self.listings}) != len(self.listings):
@@ -1765,6 +1879,67 @@ class TaiwanStockPoolManifest:
             and all(reference.archival_status == "verified" for reference in self.source_references)
         )
 
+    def for_authenticated_source_path(self) -> TaiwanStockPoolManifest:
+        return replace(
+            self,
+            source_path_id=self.authenticated_source_path_id,
+            current_source_id=self.authenticated_current_source_id,
+            historical_source_id=self.authenticated_historical_source_id,
+        )
+
+    def with_formal_qualification_gate(
+        self,
+        *,
+        artifact_id: str,
+        payload: Mapping[str, object],
+    ) -> TaiwanStockPoolManifest:
+        bindings = payload.get("selection_source_archive_bindings")
+        claim_id = payload.get("historical_availability_claim_id")
+        if (
+            payload.get("manifest_id") != self.manifest_id
+            or payload.get("source_path_id") != self.source_path_id
+            or payload.get("current_source_id") != self.current_source_id
+            or payload.get("historical_source_id") != self.historical_source_id
+            or payload.get("evidence_status") != "qualified"
+            or not isinstance(claim_id, str)
+            or not claim_id
+            or not isinstance(bindings, list)
+        ):
+            raise ValueError("taiwan_stock_pool_qualification_gate_invalid")
+        by_reference_id = {
+            reference.source_reference_id: reference for reference in self.source_references
+        }
+        if len(bindings) != len(by_reference_id):
+            raise ValueError("taiwan_stock_pool_qualification_gate_invalid")
+        archived_references: list[SelectionSourceReference] = []
+        try:
+            for value in cast(list[object], bindings):
+                if not isinstance(value, dict):
+                    raise ValueError
+                reference_id = value["source_reference_id"]
+                reference = by_reference_id[str(reference_id)]
+                archived_references.append(
+                    replace(
+                        reference,
+                        observed_content_sha256=str(value["observed_content_sha256"]),
+                        archival_status="verified",
+                        acquired_at=datetime.fromisoformat(str(value["acquired_at"])),
+                        raw_object_id=str(value["raw_object_id"]),
+                        retrieval_receipt_id=str(value["retrieval_receipt_id"]),
+                    )
+                )
+        except (KeyError, ValueError) as error:
+            raise ValueError("taiwan_stock_pool_qualification_gate_invalid") from error
+        if {item.source_reference_id for item in archived_references} != set(by_reference_id):
+            raise ValueError("taiwan_stock_pool_qualification_gate_invalid")
+        return replace(
+            self,
+            source_references=tuple(archived_references),
+            evidence_status="qualified",
+            formal_qualification_artifact_id=artifact_id,
+            historical_availability_claim_id=claim_id,
+        )
+
     def verify_source_archive(
         self,
         object_repository: FilesystemObjectRepository | None,
@@ -1840,6 +2015,7 @@ def load_taiwan_stock_pool_manifest(
     payload = cast(dict[str, object], json.loads(manifest_path.read_text(encoding="utf-8")))
     targets = cast(dict[str, int], payload["market_targets"])
     source_ids = cast(dict[str, str], payload["taiwan_sources"])
+    authenticated_source_ids = cast(dict[str, str], payload["taiwan_authenticated_sources"])
     listing_payloads = cast(list[dict[str, object]], payload["taiwan_listings"])
     evidence_payloads = cast(list[dict[str, object]], payload["selection_evidence"])
     source_reference_payloads = cast(
@@ -2033,8 +2209,12 @@ def load_taiwan_stock_pool_manifest(
                 )
             ),
         ),
+        source_path_id=source_ids["source_path_id"],
         current_source_id=source_ids["current"],
         historical_source_id=source_ids["historical"],
+        authenticated_source_path_id=authenticated_source_ids["source_path_id"],
+        authenticated_current_source_id=authenticated_source_ids["current"],
+        authenticated_historical_source_id=authenticated_source_ids["historical"],
         formal_qualification_artifact_id=cast(
             str | None, payload["formal_qualification_artifact_id"]
         ),

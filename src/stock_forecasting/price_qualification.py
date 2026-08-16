@@ -151,20 +151,29 @@ class TaiwanPriceQualificationWorkflow:
         trace_id: str,
     ) -> str:
         """Archive and bind the exact terms for an authenticated zero-fee candidate."""
+        from stock_forecasting.finmind_provider_contract import (
+            FINMIND_PROVIDER_DISTRIBUTIONS,
+        )
+
+        policy_source_ids = tuple(
+            distribution.policy_dataset_id for distribution in FINMIND_PROVIDER_DISTRIBUTIONS
+        )
         authorizations = self._authorize_sources(
-            (source_id,),
+            policy_source_ids,
             trace_id=trace_id,
             operation="register_zero_fee_source_basis_evidence",
         )
         basis = manifest.authenticated_source_basis
         try:
-            authorization = authorizations[0]
-            policy_version_id = authorization.get("source_policy_version_id")
             policies = (
                 tuple(
                     policy
                     for policy in self._authorization_policy.source_policies
-                    if policy.version_id == policy_version_id and policy.dataset_id == source_id
+                    if policy.version_id
+                    in {
+                        authorization.get("source_policy_version_id")
+                        for authorization in authorizations
+                    }
                 )
                 if self._authorization_policy is not None
                 else ()
@@ -173,21 +182,29 @@ class TaiwanPriceQualificationWorkflow:
                 (member.dataset_id, member.distribution_url) for member in basis.members
             }
             if (
-                len(policies) != 1
-                or policies[0].access_basis != "zero_fee_plan"
-                or policies[0].source_basis_id != basis.source_basis_id
-                or policies[0].provider_id != basis.provider_id
-                or policies[0].plan_id != basis.plan_id
-                or policies[0].principal_classification != basis.principal_classification
-                or policies[0].credential_kind != basis.credential_kind
-                or policies[0].account_required is not True
-                or policies[0].fee_required is not False
-                or policies[0].terms_url != basis.terms_url
-                or policies[0].terms_content_sha256 != basis.terms_content_sha256
-                or not isinstance(policies[0].license_id, str)
-                or not isinstance(policies[0].attribution, str)
-                or not isinstance(policies[0].terms_content_sha256, str)
-                or {(item.dataset_id, item.distribution_url) for item in policies[0].distributions}
+                len(policies) != len(policy_source_ids)
+                or {policy.dataset_id for policy in policies} != set(policy_source_ids)
+                or any(
+                    policy.access_basis != "zero_fee_plan"
+                    or policy.source_basis_id != basis.source_basis_id
+                    or policy.provider_id != basis.provider_id
+                    or policy.plan_id != basis.plan_id
+                    or policy.principal_classification != basis.principal_classification
+                    or policy.credential_kind != basis.credential_kind
+                    or policy.account_required is not True
+                    or policy.fee_required is not False
+                    or policy.terms_url != basis.terms_url
+                    or policy.terms_content_sha256 != basis.terms_content_sha256
+                    or not isinstance(policy.license_id, str)
+                    or not isinstance(policy.attribution, str)
+                    or not isinstance(policy.terms_content_sha256, str)
+                    for policy in policies
+                )
+                or {
+                    (item.dataset_id, item.distribution_url)
+                    for policy in policies
+                    for item in policy.distributions
+                }
                 != expected_distributions
                 or self._object_repository is None
                 or not terms_content
@@ -229,7 +246,7 @@ class TaiwanPriceQualificationWorkflow:
                 "terms_content_sha256": terms_sha256,
                 "terms_object_id": terms_object.object_id,
                 "attribution": policy.attribution,
-                "source_policy_version_id": policy.version_id,
+                "source_policy_version_ids": sorted(policy.version_id for policy in policies),
                 "provider_id": basis.provider_id,
                 "plan_id": basis.plan_id,
                 "principal_classification": basis.principal_classification,
@@ -282,6 +299,69 @@ class TaiwanPriceQualificationWorkflow:
             authorizations=authorizations,
         )
 
+    def register_historical_qualification_evidence(
+        self,
+        *,
+        manifest: TaiwanStockPoolManifest,
+        assessment_artifact_id: str,
+        trace_id: str,
+    ) -> str:
+        """Promote one complete immutable materialization assessment into evidence."""
+        authorizations = self._authorize_sources(
+            (manifest.historical_source_id,),
+            trace_id=trace_id,
+            operation="register_historical_qualification_evidence",
+        )
+        try:
+            assessment = self._verified_historical_assessment(assessment_artifact_id)
+            expected_basis_members = (
+                manifest.authenticated_source_basis.members
+                if manifest.source_path_id == manifest.authenticated_source_path_id
+                else manifest.source_basis.datasets
+            )
+            coverage = cast(dict[str, object], assessment["coverage"])
+            if (
+                assessment["source_id"] != manifest.historical_source_id
+                or assessment["listing_ids"]
+                != sorted(listing.listing_id for listing in manifest.listings)
+                or assessment["observed_dataset_ids"]
+                != sorted(member.dataset_id for member in expected_basis_members)
+                or coverage["requested_start"] != coverage["observed_start"]
+                or coverage["requested_end"] != coverage["observed_end"]
+            ):
+                raise ValueError("historical_qualification_assessment_invalid")
+        except (KeyError, TypeError, ValueError) as error:
+            self._state_store._publish_governance_rejection(
+                payload={
+                    "operation": "register_historical_qualification_evidence",
+                    "reason_code": "historical_qualification_assessment_invalid",
+                },
+                trace_id=trace_id,
+                authorizations=authorizations,
+            )
+            raise ValueError("historical_qualification_assessment_invalid") from error
+        coverage = cast(dict[str, object], assessment["coverage"])
+        return self._state_store._publish_authorized_governance_artifact(
+            artifact_kind="historical_qualification_evidence",
+            payload={
+                "source_id": manifest.historical_source_id,
+                "evidence_level": "archive_attested",
+                "verification_status": "verified",
+                "observed_start": coverage["observed_start"],
+                "observed_end": coverage["observed_end"],
+                "schema_version": assessment["schema_version"],
+                "exact_sessions_verified": True,
+                "integrity_verified": True,
+                "company_actions_verified": True,
+                "listing_lifecycle_verified": True,
+                "listing_ids": assessment["listing_ids"],
+                "observed_dataset_ids": assessment["observed_dataset_ids"],
+                "materialization_artifact_ids": [assessment_artifact_id],
+            },
+            trace_id=trace_id,
+            authorizations=authorizations,
+        )
+
     def _validate_historical_evidence(
         self,
         claim: HistoricalAvailabilityClaim,
@@ -297,6 +377,7 @@ class TaiwanPriceQualificationWorkflow:
         except KeyError as error:
             raise ValueError("qualified_claim_requires_historical_evidence") from error
         evidence = cast(dict[str, Any], payload)
+        materialization_artifact_ids = evidence.get("materialization_artifact_ids")
         if (
             evidence.get("source_id") != claim.source_id
             or evidence.get("evidence_level") != claim.evidence_level
@@ -308,10 +389,79 @@ class TaiwanPriceQualificationWorkflow:
             or evidence.get("integrity_verified") is not True
             or evidence.get("company_actions_verified") is not True
             or evidence.get("listing_lifecycle_verified") is not True
-            or not isinstance(evidence.get("materialization_artifact_ids"), list)
-            or not evidence["materialization_artifact_ids"]
+            or not isinstance(materialization_artifact_ids, list)
+            or not materialization_artifact_ids
+            or not all(isinstance(item, str) and item for item in materialization_artifact_ids)
         ):
             raise ValueError("qualified_claim_requires_historical_evidence")
+        try:
+            assessments = [
+                self._verified_historical_assessment(artifact_id)
+                for artifact_id in cast(list[str], materialization_artifact_ids)
+            ]
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("qualified_claim_requires_historical_evidence") from error
+        if any(
+            assessment["source_id"] != claim.source_id
+            or assessment["schema_version"] != claim.schema_version
+            or cast(dict[str, object], assessment["coverage"])["observed_start"]
+            != claim.observed_start.isoformat()
+            or cast(dict[str, object], assessment["coverage"])["observed_end"]
+            != claim.observed_end.isoformat()
+            for assessment in assessments
+        ):
+            raise ValueError("qualified_claim_requires_historical_evidence")
+
+    def _verified_historical_assessment(self, artifact_id: str) -> dict[str, object]:
+        artifact = self._state_store.get_canonical_artifact(artifact_id)
+        payload = artifact.get("payload")
+        if (
+            artifact.get("artifact_kind") != "historical_qualification_assessment"
+            or artifact.get("execution_purpose") != "price_research"
+            or not isinstance(payload, dict)
+            or payload.get("source_mode") != "historical"
+            or payload.get("exact_sessions_verified") is not True
+            or payload.get("company_actions_verified") is not True
+            or payload.get("listing_lifecycle_verified") is not True
+            or not isinstance(payload.get("source_id"), str)
+            or not isinstance(payload.get("schema_version"), str)
+            or not isinstance(payload.get("listing_ids"), list)
+            or not isinstance(payload.get("observed_dataset_ids"), list)
+            or not isinstance(payload.get("coverage"), dict)
+            or cast(dict[str, object], payload["coverage"]).get("complete") is not True
+            or not isinstance(payload.get("integrity_objects"), list)
+            or not payload["integrity_objects"]
+        ):
+            raise ValueError("historical_qualification_assessment_invalid")
+        coverage = cast(dict[str, object], payload["coverage"])
+        if set(coverage) != {
+            "requested_start",
+            "requested_end",
+            "observed_start",
+            "observed_end",
+            "complete",
+        }:
+            raise ValueError("historical_qualification_assessment_invalid")
+        try:
+            if self._object_repository is None:
+                raise ValueError
+            for binding in cast(list[object], payload["integrity_objects"]):
+                if (
+                    not isinstance(binding, dict)
+                    or set(binding) != {"object_id", "sha256"}
+                    or not isinstance(binding.get("object_id"), str)
+                    or not isinstance(binding.get("sha256"), str)
+                ):
+                    raise ValueError
+                content = self._object_repository.open_by_id(binding["object_id"]).read()
+                if (
+                    hashlib.sha256(content).hexdigest() != binding["sha256"]
+                    or binding["object_id"] != f"sha256:{binding['sha256']}"
+                ):
+                    raise ValueError
+        except (OSError, ObjectIntegrityError, ValueError) as error:
+            raise ValueError("historical_qualification_assessment_invalid") from error
+        return cast(dict[str, object], payload)
 
     def _validate_source_basis_evidence(
         self,
@@ -346,7 +496,6 @@ class TaiwanPriceQualificationWorkflow:
             "terms_content_sha256",
             "terms_object_id",
             "attribution",
-            "source_policy_version_id",
         )
         if (
             evidence.get("source_id") != source_id
@@ -357,6 +506,21 @@ class TaiwanPriceQualificationWorkflow:
             or any(
                 not isinstance(evidence.get(field), str) or not evidence[field]
                 for field in evidence_fields
+            )
+            or (
+                artifact_kind == "open_data_source_basis_evidence"
+                and not isinstance(evidence.get("source_policy_version_id"), str)
+            )
+            or (
+                artifact_kind == "zero_fee_source_basis_evidence"
+                and (
+                    not isinstance(evidence.get("source_policy_version_ids"), list)
+                    or not evidence["source_policy_version_ids"]
+                    or not all(
+                        isinstance(item, str) and item
+                        for item in evidence["source_policy_version_ids"]
+                    )
+                )
             )
             or any(
                 not isinstance(distribution, dict)
@@ -425,44 +589,76 @@ class TaiwanPriceQualificationWorkflow:
                 raise ValueError("formal_gate_requires_verified_source_basis")
         if authorization is not None:
             policy_version_id = authorization.get("source_policy_version_id")
+            raw_policy_version_ids = (
+                [evidence.get("source_policy_version_id")]
+                if artifact_kind == "open_data_source_basis_evidence"
+                else evidence.get("source_policy_version_ids")
+            )
+            if not isinstance(raw_policy_version_ids, list) or not all(
+                isinstance(item, str) for item in raw_policy_version_ids
+            ):
+                raise ValueError("formal_gate_requires_verified_source_basis")
+            evidence_policy_version_ids = cast(list[str], raw_policy_version_ids)
             policies = (
                 tuple(
                     policy
                     for policy in self._authorization_policy.source_policies
-                    if policy.version_id == policy_version_id and policy.dataset_id == source_id
+                    if policy.version_id in evidence_policy_version_ids
                 )
                 if self._authorization_policy is not None
                 else ()
             )
+            authorized_policy = next(
+                (
+                    policy
+                    for policy in policies
+                    if policy.version_id == policy_version_id and policy.dataset_id == source_id
+                ),
+                None,
+            )
             if (
-                len(policies) != 1
-                or policies[0].access_basis
-                != (
-                    "open_data_terms"
-                    if artifact_kind == "open_data_source_basis_evidence"
-                    else "zero_fee_plan"
+                authorized_policy is None
+                or any(
+                    policy.access_basis
+                    != (
+                        "open_data_terms"
+                        if artifact_kind == "open_data_source_basis_evidence"
+                        else "zero_fee_plan"
+                    )
+                    for policy in policies
                 )
-                or evidence["source_policy_version_id"] != policy_version_id
-                or evidence["license_id"] != policies[0].license_id
-                or evidence["terms_url"] != policies[0].terms_url
-                or evidence["terms_content_sha256"] != policies[0].terms_content_sha256
-                or evidence["attribution"] != policies[0].attribution
+                or policy_version_id not in evidence_policy_version_ids
+                or evidence["license_id"] != authorized_policy.license_id
+                or evidence["terms_url"] != authorized_policy.terms_url
+                or evidence["terms_content_sha256"] != authorized_policy.terms_content_sha256
+                or evidence["attribution"] != authorized_policy.attribution
                 or {(item["dataset_id"], item["distribution_url"]) for item in distributions}
-                != {(item.dataset_id, item.distribution_url) for item in policies[0].distributions}
+                != {
+                    (item.dataset_id, item.distribution_url)
+                    for policy in policies
+                    for item in policy.distributions
+                }
             ):
                 raise ValueError("formal_gate_requires_verified_source_basis")
             if artifact_kind == "open_data_source_basis_evidence":
-                if authorization.get("source_entitlement_version_id") is not None:
+                if (
+                    len(policies) != 1
+                    or authorization.get("source_entitlement_version_id") is not None
+                ):
                     raise ValueError("formal_gate_requires_verified_source_basis")
-            elif (
-                authorization.get("source_entitlement_version_id") is None
-                or evidence["source_basis_id"] != policies[0].source_basis_id
-                or evidence["provider_id"] != policies[0].provider_id
-                or evidence["plan_id"] != policies[0].plan_id
-                or evidence["principal_classification"] != policies[0].principal_classification
-                or evidence["credential_kind"] != policies[0].credential_kind
-                or evidence["account_required"] != policies[0].account_required
-                or evidence["fee_required"] != policies[0].fee_required
+            elif authorization.get("source_entitlement_version_id") is None or any(
+                evidence["source_basis_id"] != policy.source_basis_id
+                or evidence["provider_id"] != policy.provider_id
+                or evidence["plan_id"] != policy.plan_id
+                or evidence["principal_classification"] != policy.principal_classification
+                or evidence["credential_kind"] != policy.credential_kind
+                or evidence["account_required"] != policy.account_required
+                or evidence["fee_required"] != policy.fee_required
+                or evidence["license_id"] != policy.license_id
+                or evidence["terms_url"] != policy.terms_url
+                or evidence["terms_content_sha256"] != policy.terms_content_sha256
+                or evidence["attribution"] != policy.attribution
+                for policy in policies
             ):
                 raise ValueError("formal_gate_requires_verified_source_basis")
         return evidence
@@ -513,6 +709,7 @@ class TaiwanPriceQualificationWorkflow:
         return gate_payload == {
             "source_basis_id": source_basis_evidence["source_basis_id"],
             "manifest_id": manifest.manifest_id,
+            "source_path_id": manifest.source_path_id,
             "current_source_id": manifest.current_source_id,
             "historical_source_id": manifest.historical_source_id,
             "historical_availability_claim_id": claim_id,
@@ -602,6 +799,7 @@ class TaiwanPriceQualificationWorkflow:
             payload={
                 "source_basis_id": source_basis_evidence["source_basis_id"],
                 "manifest_id": manifest.manifest_id,
+                "source_path_id": manifest.source_path_id,
                 "current_source_id": manifest.current_source_id,
                 "historical_source_id": manifest.historical_source_id,
                 "historical_availability_claim_id": historical_availability_claim_id,
@@ -630,7 +828,7 @@ class TaiwanPriceQualificationWorkflow:
             raise QualificationAuthorizationError("qualification_authorization_not_configured")
         evaluated_at = self._clock()
         authorizations: list[dict[str, object]] = []
-        for source_id in source_ids:
+        for source_id in dict.fromkeys(source_ids):
             decision = self._authorization_policy.evaluate(
                 self._security_context,
                 OperationIntent(

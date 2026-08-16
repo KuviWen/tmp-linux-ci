@@ -54,6 +54,31 @@ from stock_forecasting.source_credentials import (
 )
 
 
+def _valid_finmind_price_values(
+    value: object,
+) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        open_price, high, low, close, volume = (
+            Decimal(str(value[field]))
+            for field in ("open", "max", "min", "close", "Trading_Volume")
+        )
+    except (InvalidOperation, KeyError, ValueError):
+        return None
+    if (
+        not all(item.is_finite() for item in (open_price, high, low, close, volume))
+        or any(item <= 0 for item in (open_price, high, low, close))
+        or volume < 0
+        or volume != volume.to_integral_value()
+        or high < low
+        or not low <= open_price <= high
+        or not low <= close <= high
+    ):
+        return None
+    return open_price, high, low, close, volume
+
+
 class FinMindSourceCollector:
     _REQUIRED_BUNDLE_MEMBERS = {
         distribution.policy_dataset_id: (
@@ -178,12 +203,16 @@ class FinMindSourceCollector:
         )
         observed_price_dates = self._observed_price_dates(price_rows)
         complete = calendar_exact and all(
-            any(
+            not self._listing_active_on(
+                self._reference_graph.listing(listing_id),
+                session_date=session_date,
+            )
+            or any(
                 session_date in observed_price_dates.get(alias.security_code, set())
                 for alias in aliases
                 if self._alias_active(alias, session_date=session_date)
             )
-            for aliases in aliases_by_listing.values()
+            for listing_id, aliases in aliases_by_listing.items()
             for session_date in observed_sessions
         )
         expected_action_ids = self._reference_graph.expected_company_action_ids(
@@ -191,7 +220,12 @@ class FinMindSourceCollector:
             start_date=request.start_date,
             end_date=request.end_date,
         )
-        observed_action_ids = self._observed_action_ids(dividend_rows, split_rows)
+        observed_action_ids = self._observed_action_ids(
+            dividend_rows,
+            split_rows,
+            start_date=request.start_date,
+            end_date=request.end_date,
+        )
         company_actions_complete = (
             self._reference_graph.company_actions_complete
             and expected_action_ids <= observed_action_ids
@@ -333,6 +367,8 @@ class FinMindSourceCollector:
             retry_after = response.headers.get("Retry-After", "60")
             try:
                 retry_after_seconds = int(retry_after)
+                if retry_after_seconds < 0:
+                    raise ValueError
             except ValueError:
                 retry_after_seconds = 60
             raise SourceRateLimited(
@@ -443,12 +479,7 @@ class FinMindSourceCollector:
         observed: dict[str, set[date]] = {}
         try:
             for row in rows:
-                price_values = tuple(
-                    Decimal(str(row[field])) for field in ("open", "max", "min", "close")
-                )
-                if not all(value.is_finite() for value in price_values):
-                    raise ValueError
-                if all(value == 0 for value in price_values):
+                if _valid_finmind_price_values(row) is None:
                     continue
                 observed.setdefault(str(row["stock_id"]), set()).add(
                     date.fromisoformat(str(row["date"]))
@@ -461,6 +492,9 @@ class FinMindSourceCollector:
     def _observed_action_ids(
         dividend_rows: list[dict[str, object]],
         split_rows: list[dict[str, object]],
+        *,
+        start_date: date,
+        end_date: date,
     ) -> frozenset[str]:
         return frozenset(
             {
@@ -468,13 +502,54 @@ class FinMindSourceCollector:
                 f"{row.get('stock_id')}:{row.get('date')}:cash_dividend"
                 for row in dividend_rows
                 if row.get("stock_or_cache_dividend") == "息"
+                and FinMindSourceCollector._row_in_partition(
+                    row,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
             }
             | {
                 f"finmind:TaiwanStockSplitPrice:{row.get('stock_id')}:{row.get('date')}:split"
                 for row in split_rows
-                if row.get("stock_id") is not None and row.get("date") is not None
+                if row.get("stock_id") is not None
+                and row.get("date") is not None
+                and row.get("type") == "分割"
+                and FinMindSourceCollector._row_in_partition(
+                    row,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
             }
         )
+
+    @staticmethod
+    def _row_in_partition(
+        row: Mapping[str, object],
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> bool:
+        try:
+            observed_on = date.fromisoformat(str(row["date"]))
+        except (KeyError, ValueError):
+            return False
+        return start_date <= observed_on <= end_date
+
+    def _listing_active_on(
+        self,
+        listing: MarketDataReferenceListing,
+        *,
+        session_date: date,
+    ) -> bool:
+        if not self._reference_graph.lifecycle_complete:
+            return True
+        applicable = tuple(
+            event for event in listing.lifecycle if event.effective_date <= session_date
+        )
+        if not applicable:
+            return False
+        latest = max(applicable, key=lambda event: event.effective_date)
+        return latest.status == "active"
 
     @staticmethod
     def _alias_overlaps(
@@ -619,17 +694,32 @@ class FinMindSourceDecoder:
         if bundle.get("reference_graph") != expected_reference_payload:
             raise ValueError("source_reference_graph_lineage_mismatch")
         quality_issues: set[SourceQualityIssue] = set()
-        prices = self._decode_prices(bundle, quality_issues)
+        start_date = collection.coverage.requested_start
+        end_date = collection.coverage.requested_end
+        prices = self._decode_prices(
+            bundle,
+            quality_issues,
+            start_date=start_date,
+            end_date=end_date,
+        )
         company_actions, action_assertions = self._decode_actions(
             bundle,
             quality_issues,
             expected_action_ids=collection.expected_company_action_ids,
+            start_date=start_date,
+            end_date=end_date,
         )
         requested_listings = tuple(
             self._reference_graph.listing(listing_id)
             for listing_id in collection.requested_listing_ids
         )
-        lifecycle = self._decode_lifecycle(bundle, requested_listings, quality_issues)
+        lifecycle = self._decode_lifecycle(
+            bundle,
+            requested_listings,
+            quality_issues,
+            start_date=start_date,
+            end_date=end_date,
+        )
         symbol_identities = tuple(
             SymbolIdentityRecord(
                 listing_id=listing.listing_id,
@@ -643,6 +733,11 @@ class FinMindSourceDecoder:
             )
             for listing in requested_listings
             for alias in listing.aliases
+            if self._interval_overlaps_partition(
+                alias,
+                start_date=start_date,
+                end_date=end_date,
+            )
         )
         if not collection.reference_graph_lifecycle_verified:
             quality_issues.add("identity_ambiguous")
@@ -687,6 +782,9 @@ class FinMindSourceDecoder:
         self,
         bundle: Mapping[str, object],
         quality_issues: set[SourceQualityIssue],
+        *,
+        start_date: date,
+        end_date: date,
     ) -> list[CanonicalPriceRow]:
         rows = bundle.get("prices")
         if not isinstance(rows, list):
@@ -698,6 +796,8 @@ class FinMindSourceDecoder:
                 if not isinstance(value, dict):
                     raise TypeError
                 session_date = date.fromisoformat(str(value["date"]))
+                if not start_date <= session_date <= end_date:
+                    continue
                 listing_id = self._listing_for_symbol(
                     str(value["stock_id"]),
                     effective_date=session_date,
@@ -710,21 +810,15 @@ class FinMindSourceDecoder:
                     quality_issues.add("identity_ambiguous")
                     continue
                 seen.add(key)
-                open_price = self._decimal(value["open"])
-                high = self._decimal(value["max"])
-                low = self._decimal(value["min"])
-                close = self._decimal(value["close"])
-                volume_decimal = self._decimal(value["trading_volume"])
-                if (
-                    any(item < 0 for item in (open_price, high, low, close, volume_decimal))
-                    or high < low
-                    or (any(item != 0 for item in (open_price, high, low, close)))
-                    and (not low <= open_price <= high or not low <= close <= high)
-                    or volume_decimal != volume_decimal.to_integral_value()
-                ):
+                parsed = _valid_finmind_price_values(value)
+                if parsed is None:
+                    raw_prices = tuple(
+                        self._decimal(value[field]) for field in ("open", "max", "min", "close")
+                    )
+                    if all(item == 0 for item in raw_prices):
+                        continue
                     raise ValueError
-                if all(item == 0 for item in (open_price, high, low, close)):
-                    continue
+                open_price, high, low, close, volume_decimal = parsed
                 prices.append(
                     CanonicalPriceRow(
                         listing_id=listing_id,
@@ -746,6 +840,8 @@ class FinMindSourceDecoder:
         quality_issues: set[SourceQualityIssue],
         *,
         expected_action_ids: frozenset[str],
+        start_date: date,
+        end_date: date,
     ) -> tuple[list[CompanyActionRecord], set[str]]:
         dividend_rows = bundle.get("dividend_results")
         split_rows = bundle.get("split_prices")
@@ -760,6 +856,8 @@ class FinMindSourceDecoder:
                 if value.get("stock_or_cache_dividend") != "息":
                     continue
                 effective_date = date.fromisoformat(str(value["date"]))
+                if not start_date <= effective_date <= end_date:
+                    continue
                 symbol = str(value["stock_id"])
                 listing_id = self._listing_for_symbol(symbol, effective_date=effective_date)
                 if listing_id is None:
@@ -790,7 +888,11 @@ class FinMindSourceDecoder:
             for value in split_rows:
                 if not isinstance(value, dict):
                     raise TypeError
+                if value.get("type") != "分割":
+                    continue
                 effective_date = date.fromisoformat(str(value["date"]))
+                if not start_date <= effective_date <= end_date:
+                    continue
                 symbol = str(value["stock_id"])
                 listing_id = self._listing_for_symbol(symbol, effective_date=effective_date)
                 if listing_id is None:
@@ -829,11 +931,19 @@ class FinMindSourceDecoder:
         bundle: Mapping[str, object],
         requested_listings: tuple[MarketDataReferenceListing, ...],
         quality_issues: set[SourceQualityIssue],
+        *,
+        start_date: date,
+        end_date: date,
     ) -> set[ListingLifecycleRecord]:
         rows = bundle.get("delistings")
         if not isinstance(rows, list):
             raise ValueError("source_provider_schema_invalid")
-        lifecycle = {event for listing in requested_listings for event in listing.lifecycle}
+        lifecycle = {
+            event
+            for listing in requested_listings
+            for event in listing.lifecycle
+            if event.effective_date <= end_date
+        }
         try:
             for value in rows:
                 if not isinstance(value, dict):
@@ -842,11 +952,20 @@ class FinMindSourceDecoder:
                 if symbol not in self._aliases_by_symbol:
                     continue
                 effective_date = date.fromisoformat(str(value["date"]))
+                if not start_date <= effective_date <= end_date:
+                    continue
                 candidates = {listing_id for listing_id, _ in self._aliases_by_symbol[symbol]}
                 if len(candidates) != 1:
                     quality_issues.add("identity_ambiguous")
                     continue
                 listing_id = candidates.pop()
+                if any(
+                    event.listing_id == listing_id
+                    and event.effective_date == effective_date
+                    and event.status == "delisted"
+                    for event in lifecycle
+                ):
+                    continue
                 lifecycle.add(
                     ListingLifecycleRecord(
                         listing_id=listing_id,
@@ -920,6 +1039,17 @@ class FinMindSourceDecoder:
         if not result.is_finite():
             raise ValueError
         return result
+
+    @staticmethod
+    def _interval_overlaps_partition(
+        alias: ExternalSecurityAlias,
+        *,
+        start_date: date,
+        end_date: date,
+    ) -> bool:
+        return (alias.valid_from is None or alias.valid_from <= end_date) and (
+            alias.valid_to is None or alias.valid_to >= start_date
+        )
 
 
 class FinMindPriceSourceAdapter(CollectorDecoderPriceSourceAdapter):
@@ -1016,19 +1146,11 @@ class FinMindCredentialValidator:
                 "max",
                 "min",
                 "close",
-                "trading_volume",
+                "Trading_Volume",
             )
         ):
             return False
-        try:
-            price_values = tuple(
-                Decimal(str(value[field])) for field in ("open", "max", "min", "close")
-            )
-        except InvalidOperation:
-            return False
-        return all(item.is_finite() for item in price_values) and any(
-            item != 0 for item in price_values
-        )
+        return _valid_finmind_price_values(value) is not None
 
     @classmethod
     def _contains_token(cls, value: object, *, token: str) -> bool:

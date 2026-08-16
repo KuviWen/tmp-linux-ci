@@ -1028,6 +1028,40 @@ class StateStore:
             raise KeyError(artifact_id)
         return deepcopy(dict(row))
 
+    def find_latest_price_qualification_gate(
+        self,
+        *,
+        manifest_id: str,
+        source_path_id: str,
+    ) -> tuple[str, dict[str, object]] | None:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    canonical_artifacts.c.artifact_id,
+                    canonical_artifacts.c.payload,
+                )
+                .select_from(
+                    trace_artifact_refs.join(
+                        canonical_artifacts,
+                        trace_artifact_refs.c.artifact_id == canonical_artifacts.c.artifact_id,
+                    )
+                )
+                .where(
+                    canonical_artifacts.c.artifact_kind == "taiwan_price_qualification_gate",
+                    canonical_artifacts.c.execution_purpose == "governance",
+                )
+                .order_by(trace_artifact_refs.c.sequence.desc())
+            ).mappings()
+            for row in rows:
+                payload = row["payload"]
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("manifest_id") == manifest_id
+                    and payload.get("source_path_id") == source_path_id
+                ):
+                    return str(row["artifact_id"]), deepcopy(cast(dict[str, object], payload))
+        return None
+
     def _publish_authorized_governance_artifact(
         self,
         *,
@@ -1039,6 +1073,7 @@ class StateStore:
         if artifact_kind not in {
             "open_data_source_basis_evidence",
             "zero_fee_source_basis_evidence",
+            "historical_qualification_evidence",
             "historical_availability_claim",
             "taiwan_price_qualification_gate",
         }:
@@ -1072,6 +1107,7 @@ class StateStore:
             not in {
                 "register_open_data_source_basis_evidence",
                 "register_zero_fee_source_basis_evidence",
+                "register_historical_qualification_evidence",
                 "register_historical_availability_claim",
                 "register_formal_qualification_gate",
             }

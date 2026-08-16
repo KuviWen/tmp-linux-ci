@@ -39,7 +39,7 @@ class _UrlResponse(Protocol):
     def __exit__(self, *args: object) -> None: ...
 
 
-class _UrlOpener(Protocol):
+class UrlOpener(Protocol):
     def __call__(self, request: Request, *, timeout: float) -> _UrlResponse: ...
 
 
@@ -70,7 +70,7 @@ class UrllibProviderHttpTransport:
         self,
         *,
         allowed_hosts: frozenset[str],
-        opener: _UrlOpener | None = None,
+        opener: UrlOpener | None = None,
         timeout_seconds: float = 10.0,
     ) -> None:
         if timeout_seconds <= 0:

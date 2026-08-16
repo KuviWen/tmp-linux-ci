@@ -62,6 +62,7 @@ from stock_forecasting.provider_http import (
 from stock_forecasting.provider_http import (
     UrllibProviderHttpTransport as _UrllibProviderHttpTransport,
 )
+from stock_forecasting.provider_http import UrlOpener
 from stock_forecasting.source_credentials import (
     CredentialNotReady,
     CredentialValidationEvidence,
@@ -149,12 +150,17 @@ def load_candidate_alpaca_market_calendar_evidence() -> AlpacaMarketCalendarEvid
 
 
 class UrllibProviderHttpTransport(_UrllibProviderHttpTransport):
-    def __init__(self, **kwargs: object) -> None:
-        kwargs.setdefault(
-            "allowed_hosts",
-            frozenset({"data.alpaca.markets", "paper-api.alpaca.markets"}),
+    def __init__(
+        self,
+        *,
+        opener: UrlOpener | None = None,
+        timeout_seconds: float = 10.0,
+    ) -> None:
+        super().__init__(
+            allowed_hosts=frozenset({"data.alpaca.markets", "paper-api.alpaca.markets"}),
+            opener=opener,
+            timeout_seconds=timeout_seconds,
         )
-        super().__init__(**kwargs)  # type: ignore[arg-type]
 
 
 class AlpacaCredentialValidator:

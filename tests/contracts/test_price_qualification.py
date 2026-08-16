@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 
 from stock_forecasting.authorization import (
     ActionGrant,
+    AuthorizationAction,
     AuthorizationPolicy,
     LocalApiKeyIdentity,
     SourceDistribution,
@@ -19,16 +21,36 @@ from stock_forecasting.authorization import (
 )
 from stock_forecasting.data_supply import (
     PRICE_RESEARCH_REQUIRED_USES,
+    CanonicalPriceRow,
+    CollectedSourceBundleMember,
+    CollectedSourcePartition,
+    DataSupply,
+    DecodedSourcePartition,
     HistoricalAvailabilityClaim,
+    ListingLifecycleRecord,
+    LoadedSourcePartition,
+    SourceBundleMemberRequest,
+    SourceCollectionCoverage,
+    SourcePartitionRequest,
     TaiwanStockPoolManifest,
     load_taiwan_stock_pool_manifest,
 )
+from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_DISTRIBUTIONS
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository, ObjectRef
 from stock_forecasting.platform.state_store import StateStore
+from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
 from stock_forecasting.price_qualification import (
     QualificationAuthorizationError,
     TaiwanPriceQualificationWorkflow,
 )
+
+
+class _QualificationLiteralAdapter:
+    def __init__(self, loaded: LoadedSourcePartition) -> None:
+        self.loaded = loaded
+
+    def load(self, request: SourcePartitionRequest) -> LoadedSourcePartition:
+        return self.loaded
 
 
 def test_historical_claim_cannot_be_minted_without_qualification_authorization() -> None:
@@ -200,10 +222,8 @@ def test_finmind_zero_fee_basis_can_enter_the_same_formal_governance_path(
     )
     source_id = "finmind-taiwan-stock-price"
     manifest = replace(
-        base_manifest,
+        base_manifest.for_authenticated_source_path(),
         authenticated_source_basis=basis,
-        current_source_id=source_id,
-        historical_source_id=source_id,
     )
     identity = LocalApiKeyIdentity.issue(
         owner="ticket-06-finmind-governor",
@@ -225,10 +245,10 @@ def test_finmind_zero_fee_basis_can_enter_the_same_formal_governance_path(
                 valid_to=now + timedelta(days=1),
             ),
         ),
-        source_policies=(
+        source_policies=tuple(
             SourcePolicyVersion(
-                version_id="policy-finmind-history-v1",
-                dataset_id=source_id,
+                version_id=f"policy-finmind-{distribution.policy_dataset_id}-v1",
+                dataset_id=distribution.policy_dataset_id,
                 allowed_actions=frozenset({"price_qualification.govern"}),
                 purposes=frozenset({"price_research"}),
                 environments=frozenset({"development"}),
@@ -241,12 +261,11 @@ def test_finmind_zero_fee_basis_can_enter_the_same_formal_governance_path(
                 terms_url=basis.terms_url,
                 terms_content_sha256=terms_sha256,
                 attribution="FinMind",
-                distributions=tuple(
+                distributions=(
                     SourceDistribution(
-                        dataset_id=member.dataset_id,
-                        distribution_url=member.distribution_url,
-                    )
-                    for member in basis.members
+                        dataset_id=distribution.distribution_id,
+                        distribution_url=distribution.distribution_url,
+                    ),
                 ),
                 provider_id=basis.provider_id,
                 plan_id=basis.plan_id,
@@ -254,13 +273,14 @@ def test_finmind_zero_fee_basis_can_enter_the_same_formal_governance_path(
                 credential_kind=basis.credential_kind,
                 account_required=True,
                 fee_required=False,
-            ),
+            )
+            for distribution in FINMIND_PROVIDER_DISTRIBUTIONS
         ),
-        source_entitlements=(
+        source_entitlements=tuple(
             SourceEntitlement(
-                version_id="entitlement-finmind-history-v1",
+                version_id=f"entitlement-finmind-{distribution.policy_dataset_id}-v1",
                 principal_id=identity.context.principal_id,
-                dataset_id=source_id,
+                dataset_id=distribution.policy_dataset_id,
                 status="active",
                 allowed_actions=frozenset({"price_qualification.govern"}),
                 purposes=frozenset({"price_research"}),
@@ -268,7 +288,8 @@ def test_finmind_zero_fee_basis_can_enter_the_same_formal_governance_path(
                 valid_from=now - timedelta(days=1),
                 valid_to=now + timedelta(days=1),
                 allowed_uses=PRICE_RESEARCH_REQUIRED_USES,
-            ),
+            )
+            for distribution in FINMIND_PROVIDER_DISTRIBUTIONS
         ),
     )
     state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
@@ -303,6 +324,358 @@ def test_finmind_zero_fee_basis_can_enter_the_same_formal_governance_path(
         }
         for member in basis.members
     ]
+
+
+def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 16, 1, 0, tzinfo=UTC)
+    terms_content = b"Pinned FinMind free-plan terms for full-gate contract evidence"
+    terms_sha256 = hashlib.sha256(terms_content).hexdigest()
+    repository = FilesystemObjectRepository(tmp_path / "objects")
+    archived, _ = _archive_selection_sources(
+        load_taiwan_stock_pool_manifest(),
+        repository=repository,
+        acquired_at=datetime(2026, 8, 15, 1, 0, tzinfo=UTC),
+    )
+    manifest = replace(
+        archived.for_authenticated_source_path(),
+        authenticated_source_basis=replace(
+            archived.authenticated_source_basis,
+            terms_content_sha256=terms_sha256,
+        ),
+    )
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-finmind-full-gate",
+        environment="development",
+        scopes={
+            "market_data.collect",
+            "price_qualification.govern",
+            "price_research_eligibility.read",
+        },
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+        principal_classification="individual_or_internal_group",
+    )
+    source_actions: frozenset[AuthorizationAction] = frozenset(
+        {"market_data.collect", "price_qualification.govern"}
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="grant-finmind-full-gate-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset(
+                    {
+                        "market_data.collect",
+                        "price_qualification.govern",
+                        "price_research_eligibility.read",
+                    }
+                ),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=tuple(
+            SourcePolicyVersion(
+                version_id=f"policy-finmind-full-{distribution.policy_dataset_id}-v1",
+                dataset_id=distribution.policy_dataset_id,
+                allowed_actions=source_actions,
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                allowed_uses=PRICE_RESEARCH_REQUIRED_USES,
+                access_basis="zero_fee_plan",
+                source_basis_id=manifest.authenticated_source_basis.source_basis_id,
+                license_id="FinMind-Free-Plan-Terms",
+                terms_url=manifest.authenticated_source_basis.terms_url,
+                terms_content_sha256=terms_sha256,
+                attribution="FinMind",
+                distributions=(
+                    SourceDistribution(
+                        dataset_id=distribution.distribution_id,
+                        distribution_url=distribution.distribution_url,
+                    ),
+                ),
+                provider_id=manifest.authenticated_source_basis.provider_id,
+                plan_id=manifest.authenticated_source_basis.plan_id,
+                principal_classification=(
+                    manifest.authenticated_source_basis.principal_classification
+                ),
+                credential_kind=manifest.authenticated_source_basis.credential_kind,
+                account_required=True,
+                fee_required=False,
+            )
+            for distribution in FINMIND_PROVIDER_DISTRIBUTIONS
+        )
+        + (
+            SourcePolicyVersion(
+                version_id="policy-finmind-full-price-read-v1",
+                dataset_id="price-research-eligibility",
+                allowed_actions=frozenset({"price_research_eligibility.read"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+            ),
+        ),
+        source_entitlements=tuple(
+            SourceEntitlement(
+                version_id=f"entitlement-finmind-full-{distribution.policy_dataset_id}-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id=distribution.policy_dataset_id,
+                status="active",
+                allowed_actions=source_actions,
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+                allowed_uses=PRICE_RESEARCH_REQUIRED_USES,
+            )
+            for distribution in FINMIND_PROVIDER_DISTRIBUTIONS
+        )
+        + (
+            SourceEntitlement(
+                version_id="entitlement-finmind-full-price-read-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id="price-research-eligibility",
+                status="active",
+                allowed_actions=frozenset({"price_research_eligibility.read"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+    )
+    primary, *bundle_distributions = FINMIND_PROVIDER_DISTRIBUTIONS
+    listing_ids = tuple(listing.listing_id for listing in manifest.listings)
+    coverage = SourceCollectionCoverage(
+        requested_start=date(2024, 1, 3),
+        requested_end=date(2024, 1, 3),
+        observed_start=date(2024, 1, 3),
+        observed_end=date(2024, 1, 3),
+        complete=True,
+    )
+    bundle_requests = tuple(
+        SourceBundleMemberRequest(
+            dataset_id=distribution.policy_dataset_id,
+            distribution_id=distribution.distribution_id,
+            distribution_url=distribution.distribution_url,
+            schema_version=f"{distribution.distribution_id}-v1",
+        )
+        for distribution in bundle_distributions
+    )
+
+    def loaded(
+        request_id: str,
+        revision: str,
+        *,
+        checkpoint_before: str | None = None,
+    ) -> LoadedSourcePartition:
+        collection = CollectedSourcePartition(
+            request_id=request_id,
+            source_id=primary.policy_dataset_id,
+            acquired_at=now,
+            sanitized_source_uri=primary.distribution_url,
+            media_type="application/json",
+            raw_payload=f'{{"request_id":"{request_id}"}}'.encode(),
+            checkpoint_before=checkpoint_before,
+            checkpoint_after=f"checkpoint:{revision}",
+            coverage=coverage,
+            source_revision=revision,
+            bundle_members=tuple(
+                CollectedSourceBundleMember(
+                    dataset_id=distribution.policy_dataset_id,
+                    distribution_id=distribution.distribution_id,
+                    distribution_url=distribution.distribution_url,
+                    media_type="application/json",
+                    raw_payload=distribution.distribution_id.encode(),
+                    coverage=coverage,
+                    schema_version=f"{distribution.distribution_id}-v1",
+                )
+                for distribution in bundle_distributions
+            ),
+            requested_listing_ids=listing_ids,
+            reference_graph_version_id=manifest.selection_evidence_version,
+            reference_graph_lifecycle_verified=True,
+            company_action_completeness_verified=True,
+            market_calendar_evidence_version_id="engineering-xtai-calendar-2024-01-03-v1",
+        )
+        decoded = DecodedSourcePartition(
+            source_id=primary.policy_dataset_id,
+            schema_version="taiwan-unadjusted-eod-v1",
+            source_revision=revision,
+            prices=tuple(
+                CanonicalPriceRow(
+                    listing_id=listing_id,
+                    session_date=date(2024, 1, 3),
+                    open=Decimal("100"),
+                    high=Decimal("102"),
+                    low=Decimal("99"),
+                    close=Decimal("101"),
+                    volume=1000,
+                )
+                for listing_id in listing_ids
+            ),
+            company_actions=(),
+            listing_lifecycle=tuple(
+                ListingLifecycleRecord(
+                    listing_id=listing_id,
+                    effective_date=date(2024, 1, 3),
+                    status="active",
+                    source_event_id=f"engineering-active:{listing_id}",
+                )
+                for listing_id in listing_ids
+            ),
+            adjusted_close_cross_checks=(),
+            identity_assertion_ids=tuple(
+                f"engineering-identity:{listing_id}" for listing_id in listing_ids
+            ),
+            parent_object_ids=(),
+        )
+        return LoadedSourcePartition(collection=collection, decoded=decoded)
+
+    state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
+    adapter = _QualificationLiteralAdapter(loaded("finmind-assessment", "assessment-v1"))
+    data_supply = DataSupply(
+        authorization_policy=policy,
+        security_context=identity.context,
+        adapters={primary.policy_dataset_id: adapter},
+        object_repository=repository,
+        state_store=state_store,
+        clock=lambda: now,
+    )
+
+    def request(
+        request_id: str,
+        mode: str,
+        *,
+        claim_id: str | None = None,
+        expected_checkpoint: str | None = None,
+    ) -> SourcePartitionRequest:
+        return SourcePartitionRequest(
+            request_id=request_id,
+            trace_id=f"trace-{request_id}",
+            source_id=primary.policy_dataset_id,
+            mode=mode,  # type: ignore[arg-type]
+            listing_ids=listing_ids,
+            start_date=coverage.requested_start,
+            end_date=coverage.requested_end,
+            expected_checkpoint=expected_checkpoint,
+            distribution_id=primary.distribution_id,
+            distribution_url=primary.distribution_url,
+            source_basis_id=manifest.authenticated_source_basis.source_basis_id,
+            bundle_members=bundle_requests,
+            historical_availability_claim_id=claim_id,
+        )
+
+    assessment_outcome = data_supply.materialize(request("finmind-assessment", "historical"))
+    assert assessment_outcome.status == "quarantined"
+    assessment_trace = state_store.get_trace_evidence("trace-finmind-assessment")
+    assessment_id = next(
+        artifact_id
+        for artifact_id, kind in zip(
+            assessment_trace["artifact_ids"],
+            assessment_trace["artifact_kinds"],
+            strict=True,
+        )
+        if kind == "historical_qualification_assessment"
+    )
+    workflow = TaiwanPriceQualificationWorkflow(
+        state_store,
+        authorization_policy=policy,
+        security_context=identity.context,
+        clock=lambda: now,
+        object_repository=repository,
+    )
+    qualification_evidence_id = workflow.register_historical_qualification_evidence(
+        manifest=manifest,
+        assessment_artifact_id=assessment_id,
+        trace_id="trace-finmind-history-evidence",
+    )
+    assert coverage.observed_start is not None
+    assert coverage.observed_end is not None
+    claim_id = workflow.register_historical_availability_claim(
+        HistoricalAvailabilityClaim(
+            source_id=manifest.historical_source_id,
+            evidence_level="archive_attested",
+            evidence_status="qualified",
+            observed_start=coverage.observed_start,
+            observed_end=coverage.observed_end,
+            schema_version="taiwan-unadjusted-eod-v1",
+            exact_sessions_verified=True,
+            integrity_verified=True,
+            company_actions_verified=True,
+            listing_lifecycle_verified=True,
+            qualification_artifact_id=qualification_evidence_id,
+        ),
+        trace_id="trace-finmind-history-claim",
+    )
+    source_basis_evidence_id = workflow.register_zero_fee_source_basis_evidence(
+        manifest=manifest,
+        source_id=manifest.historical_source_id,
+        terms_content=terms_content,
+        trace_id="trace-finmind-full-source-basis",
+    )
+    gate_id = workflow.register_formal_qualification_gate(
+        manifest=manifest,
+        historical_availability_claim_id=claim_id,
+        source_basis_evidence_id=source_basis_evidence_id,
+        trace_id="trace-finmind-formal-gate",
+    )
+    qualified_manifest = replace(
+        manifest,
+        evidence_status="qualified",
+        historical_availability_claim_id=claim_id,
+        formal_qualification_artifact_id=gate_id,
+    )
+    adapter.loaded = loaded("finmind-current", "current-v1")
+    current_outcome = data_supply.materialize(request("finmind-current", "current"))
+    adapter.loaded = loaded(
+        "finmind-historical",
+        "historical-v1",
+        checkpoint_before="checkpoint:assessment-v1",
+    )
+    historical_outcome = data_supply.materialize(
+        request(
+            "finmind-historical",
+            "historical",
+            claim_id=claim_id,
+            expected_checkpoint="checkpoint:assessment-v1",
+        )
+    )
+
+    sources = state_store.list_price_research_eligibility(listing_id=listing_ids[0])
+    assert [current_outcome.status, historical_outcome.status] == ["published", "published"]
+    assert workflow.formal_qualification_available(qualified_manifest, sources) is True
+    persisted_gate = state_store.find_latest_price_qualification_gate(
+        manifest_id=manifest.manifest_id,
+        source_path_id=manifest.source_path_id,
+    )
+    assert persisted_gate is not None
+    reloaded_manifest = load_taiwan_stock_pool_manifest().for_authenticated_source_path()
+    reloaded_manifest = reloaded_manifest.with_formal_qualification_gate(
+        artifact_id=persisted_gate[0],
+        payload=persisted_gate[1],
+    )
+    assert workflow.formal_qualification_available(reloaded_manifest, sources) is True
+    result = PriceEligibilityQuery(
+        state_store,
+        authorization_policy=policy,
+        authorization_time=now,
+        object_repository=repository,
+    ).get_listing(
+        listing_id=listing_ids[0],
+        trace_id="trace-finmind-qualified-query",
+        security_context=identity.context,
+    )
+    assert isinstance(result, dict)
+    assert result["formally_qualified"] is True, result
+    assert result["source_basis_id"] == "FINMIND-FREE-TAIWAN-MARKET-DATA-01"
 
 
 def test_formal_gate_rejects_an_existing_artifact_with_the_wrong_evidence_contract(

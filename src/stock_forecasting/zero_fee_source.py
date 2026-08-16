@@ -41,6 +41,9 @@ class ZeroFeeSourceBundleMember:
             or not self.distribution_url.startswith("https://")
             or not self.qualification_scope
             or not self.schema_version
+            or self.price_semantics not in {None, "unadjusted"}
+            or self.qualification_status
+            not in {"candidate_terms_not_archived", "candidate_scope_limited"}
             or self.materialization_role
             not in {"required_observation", "supplemental_qualification_reference"}
             or not self.known_gaps

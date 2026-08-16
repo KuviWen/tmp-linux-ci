@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from email.message import Message
+from typing import Any, cast
 from urllib.request import Request
 
 import pytest
@@ -474,6 +475,21 @@ def test_urllib_provider_transport_bounds_provider_response_bytes() -> None:
         b'{"message":"provider response too large"}',
         {},
     )
+
+
+def test_alpaca_transport_does_not_allow_callers_to_override_provider_hosts() -> None:
+    with pytest.raises(TypeError):
+        cast(Any, UrllibProviderHttpTransport)(allowed_hosts=frozenset({"example.com"}))
+
+    with pytest.raises(ValueError, match="source_provider_url_forbidden"):
+        UrllibProviderHttpTransport().send(
+            ProviderHttpRequest(
+                method="GET",
+                url="https://example.com/provider-data",
+                query={},
+                headers={},
+            )
+        )
 
 
 @pytest.mark.parametrize(

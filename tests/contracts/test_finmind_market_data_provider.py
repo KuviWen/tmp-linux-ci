@@ -13,7 +13,6 @@ import pytest
 from stock_forecasting.alpaca_market_data import (
     ProviderHttpRequest,
     ProviderHttpResponse,
-    UrllibProviderHttpTransport,
 )
 from stock_forecasting.application import build_test_application
 from stock_forecasting.authorization import (
@@ -48,6 +47,9 @@ from stock_forecasting.market_data_reference import (
     MarketDataReferenceListing,
 )
 from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
+from stock_forecasting.provider_http import (
+    UrllibProviderHttpTransport as GenericUrllibProviderHttpTransport,
+)
 from stock_forecasting.source_credentials import (
     CredentialNotReady,
     SecretLease,
@@ -208,7 +210,7 @@ def test_finmind_credential_validation_uses_bearer_header_not_query() -> None:
                             "max": 585.0,
                             "min": 576.0,
                             "close": 581.0,
-                            "trading_volume": 15318106,
+                            "Trading_Volume": 15318106,
                         }
                     ],
                 }
@@ -245,7 +247,7 @@ def test_shared_http_transport_accepts_only_the_configured_finmind_host() -> Non
         opened.append(request)
         return LiteralUrlResponse()
 
-    transport = UrllibProviderHttpTransport(
+    transport = GenericUrllibProviderHttpTransport(
         allowed_hosts=frozenset({"api.finmindtrade.com"}),
         opener=opener,
         timeout_seconds=4.0,
@@ -324,6 +326,25 @@ def test_finmind_collector_preserves_quota_retry_evidence(status_code: int) -> N
 
     assert raised.value.retry_after_seconds == 17
     assert raised.value.rate_limit_policy_id == "finmind-free-600-requests-per-hour-v1"
+
+
+@pytest.mark.parametrize("retry_after", ["not-a-number", "-1"])
+def test_finmind_collector_defaults_invalid_retry_after(retry_after: str) -> None:
+    collector = FinMindSourceCollector(
+        source_id="finmind-taiwan-stock-price",
+        provider_id="finmind-free-api",
+        credential_resolver=LiteralTokenResolver(),
+        transport=RecordingTransport(
+            ProviderHttpResponse(429, b'{"status":429}', headers={"Retry-After": retry_after})
+        ),
+        clock=lambda: datetime(2026, 8, 16, 8, 0, tzinfo=UTC),
+        rate_limit_policy_id="finmind-free-600-requests-per-hour-v1",
+    )
+
+    with pytest.raises(SourceRateLimited) as raised:
+        collector.collect(_finmind_request())
+
+    assert raised.value.retry_after_seconds == 60
 
 
 def test_finmind_collector_rejects_a_response_that_echoes_the_token() -> None:
@@ -408,7 +429,7 @@ def test_finmind_collector_builds_an_immutable_candidate_bundle() -> None:
         [
             ProviderHttpResponse(
                 200,
-                b'{"status":200,"msg":"success","data":[{"stock_id":"2330","date":"2024-01-03","open":578,"max":585,"min":576,"close":581,"trading_volume":15318106}]}',
+                b'{"status":200,"msg":"success","data":[{"stock_id":"2330","date":"2024-01-03","open":578,"max":585,"min":576,"close":581,"Trading_Volume":15318106}]}',
             ),
             ProviderHttpResponse(
                 200,
@@ -547,7 +568,7 @@ def test_finmind_zero_ohlc_row_is_not_a_complete_price_session() -> None:
         [
             ProviderHttpResponse(
                 200,
-                b'{"status":200,"msg":"success","data":[{"stock_id":"2317","date":"2025-07-30","open":0,"max":0,"min":0,"close":0,"trading_volume":0}]}',
+                b'{"status":200,"msg":"success","data":[{"stock_id":"2317","date":"2025-07-30","open":0,"max":0,"min":0,"close":0,"Trading_Volume":0}]}',
             ),
             ProviderHttpResponse(
                 200,
@@ -640,7 +661,7 @@ def test_finmind_collector_attests_the_exact_delisting_event(
         [
             ProviderHttpResponse(
                 200,
-                b'{"status":200,"msg":"success","data":[{"stock_id":"2448","date":"2021-01-05","open":42,"max":43,"min":41,"close":42,"trading_volume":1000}]}',
+                b'{"status":200,"msg":"success","data":[{"stock_id":"2448","date":"2021-01-05","open":42,"max":43,"min":41,"close":42,"Trading_Volume":1000}]}',
             ),
             ProviderHttpResponse(
                 200,
@@ -670,6 +691,204 @@ def test_finmind_collector_attests_the_exact_delisting_event(
     )
 
     assert collection.reference_graph_lifecycle_verified is expected_verified
+
+
+def test_finmind_partition_excludes_future_and_unsupported_events_after_delisting() -> None:
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    reference_graph = MarketDataReferenceGraph(
+        version_id="engineering-finmind-point-in-time-v1",
+        listings=(
+            MarketDataReferenceListing(
+                listing_id=listing_id,
+                aliases=(
+                    ExternalSecurityAlias(
+                        security_code="2448",
+                        security_name="晶電",
+                        valid_from=date(2001, 5, 25),
+                        valid_to=date(2021, 1, 5),
+                    ),
+                ),
+                lifecycle=(
+                    ListingLifecycleRecord(
+                        listing_id=listing_id,
+                        effective_date=date(2001, 5, 25),
+                        status="active",
+                        source_event_id="engineering-active-2448",
+                    ),
+                    ListingLifecycleRecord(
+                        listing_id=listing_id,
+                        effective_date=date(2021, 1, 6),
+                        status="delisted",
+                        source_event_id="engineering-delisted-2448",
+                    ),
+                ),
+            ),
+        ),
+        company_action_expectations=(),
+        lifecycle_complete=True,
+        company_actions_complete=True,
+    )
+    calendar = MarketCalendarEvidence(
+        version_id="engineering-xtai-calendar-2021-01-v1",
+        coverage_start=date(2021, 1, 5),
+        coverage_end=date(2021, 1, 7),
+        sessions=tuple(
+            MarketSessionRecord(
+                session_date=session_date,
+                open_time="09:00",
+                close_time="13:30",
+                session_kind="regular",
+            )
+            for session_date in (date(2021, 1, 5), date(2021, 1, 7))
+        ),
+    )
+    collector = FinMindSourceCollector(
+        source_id="finmind-taiwan-stock-price",
+        provider_id="finmind-free-api",
+        reference_graph=reference_graph,
+        market_calendar_evidence=calendar,
+        credential_resolver=LiteralTokenResolver(),
+        transport=SequenceTransport(
+            [
+                ProviderHttpResponse(
+                    200,
+                    b'{"status":200,"msg":"success","data":[{"stock_id":"2448","date":"2021-01-05","open":42,"max":43,"min":41,"close":42,"Trading_Volume":1000}]}',
+                ),
+                ProviderHttpResponse(
+                    200,
+                    b'{"status":200,"msg":"success","data":[{"date":"2021-01-05"},{"date":"2021-01-07"}]}',
+                ),
+                ProviderHttpResponse(200, b'{"status":200,"msg":"success","data":[]}'),
+                ProviderHttpResponse(
+                    200,
+                    b'{"status":200,"msg":"success","data":[{"stock_id":"2448","date":"2021-01-06"},{"stock_id":"2448","date":"2025-01-01"}]}',
+                ),
+                ProviderHttpResponse(
+                    200,
+                    json.dumps(
+                        {
+                            "status": 200,
+                            "msg": "success",
+                            "data": [
+                                {
+                                    "stock_id": "2448",
+                                    "date": "2021-01-05",
+                                    "type": "減資",
+                                    "before_price": 42,
+                                    "after_price": 21,
+                                },
+                                {
+                                    "stock_id": "2448",
+                                    "date": "2025-01-01",
+                                    "type": "分割",
+                                    "before_price": 42,
+                                    "after_price": 21,
+                                },
+                            ],
+                        }
+                    ).encode(),
+                ),
+            ]
+        ),
+        clock=lambda: datetime(2026, 8, 16, 8, 0, tzinfo=UTC),
+        rate_limit_policy_id="finmind-free-600-requests-per-hour-v1",
+    )
+
+    collection = collector.collect(
+        replace(
+            _finmind_request(),
+            start_date=date(2021, 1, 5),
+            end_date=date(2021, 1, 7),
+        )
+    )
+    decoded = FinMindSourceDecoder(
+        source_id="finmind-taiwan-stock-price",
+        reference_graph=reference_graph,
+        market_calendar_evidence=calendar,
+    ).decode(collection)
+
+    assert collection.coverage.complete is True
+    assert decoded.company_actions == ()
+    assert [(event.effective_date, event.status) for event in decoded.listing_lifecycle] == [
+        (date(2001, 5, 25), "active"),
+        (date(2021, 1, 6), "delisted"),
+    ]
+
+
+def test_finmind_partial_zero_ohlc_is_not_complete_or_canonical() -> None:
+    transport = SequenceTransport(
+        [
+            ProviderHttpResponse(
+                200,
+                b'{"status":200,"msg":"success","data":[{"stock_id":"2330","date":"2024-01-03","open":0,"max":585,"min":0,"close":581,"Trading_Volume":1000}]}',
+            ),
+            ProviderHttpResponse(
+                200,
+                b'{"status":200,"msg":"success","data":[{"date":"2024-01-03"}]}',
+            ),
+            ProviderHttpResponse(200, b'{"status":200,"msg":"success","data":[]}'),
+            ProviderHttpResponse(200, b'{"status":200,"msg":"success","data":[]}'),
+            ProviderHttpResponse(200, b'{"status":200,"msg":"success","data":[]}'),
+        ]
+    )
+    graph = MarketDataReferenceGraph(
+        version_id="engineering-finmind-partial-zero-v1",
+        listings=(
+            MarketDataReferenceListing(
+                listing_id="10000000-0000-4000-8000-000000000001",
+                aliases=(
+                    ExternalSecurityAlias(
+                        security_code="2330",
+                        security_name="台積電",
+                        valid_from=date(1994, 9, 5),
+                        valid_to=None,
+                    ),
+                ),
+                lifecycle=(
+                    ListingLifecycleRecord(
+                        listing_id="10000000-0000-4000-8000-000000000001",
+                        effective_date=date(1994, 9, 5),
+                        status="active",
+                        source_event_id="engineering-active-2330",
+                    ),
+                ),
+            ),
+        ),
+        company_action_expectations=(),
+        lifecycle_complete=True,
+        company_actions_complete=True,
+    )
+    calendar = MarketCalendarEvidence(
+        version_id="engineering-xtai-calendar-2024-01-03-v1",
+        coverage_start=date(2024, 1, 3),
+        coverage_end=date(2024, 1, 3),
+        sessions=(
+            MarketSessionRecord(
+                session_date=date(2024, 1, 3),
+                open_time="09:00",
+                close_time="13:30",
+                session_kind="regular",
+            ),
+        ),
+    )
+    collection = FinMindSourceCollector(
+        source_id="finmind-taiwan-stock-price",
+        provider_id="finmind-free-api",
+        reference_graph=graph,
+        market_calendar_evidence=calendar,
+        credential_resolver=LiteralTokenResolver(),
+        transport=transport,
+        clock=lambda: datetime(2026, 8, 16, 8, 0, tzinfo=UTC),
+        rate_limit_policy_id="finmind-free-600-requests-per-hour-v1",
+    ).collect(_finmind_request())
+
+    assert collection.coverage.complete is False
+    with pytest.raises(ValueError, match="source_provider_schema_invalid"):
+        FinMindSourceDecoder(
+            source_id="finmind-taiwan-stock-price",
+            reference_graph=graph,
+            market_calendar_evidence=calendar,
+        ).decode(collection)
 
 
 def test_finmind_materialization_fails_closed_before_network_when_token_is_missing(
@@ -813,9 +1032,12 @@ def test_application_exposes_finmind_through_the_ticket_07_adapter_identity(
         source_adapter_security_context=source_identity.context,
     )
 
-    assert application.finmind_price_adapter is not None
-    assert application.finmind_price_adapter.source_id == "finmind-taiwan-stock-price"
-    assert application.finmind_price_adapter.source_access_mode == "live_provider"
+    assert application.finmind_current_price_adapter is not None
+    assert application.finmind_current_price_adapter.source_id == "finmind-taiwan-stock-price"
+    assert application.finmind_current_price_adapter.mode == "current"
+    assert application.finmind_historical_price_adapter is not None
+    assert application.finmind_historical_price_adapter.source_id == "finmind-taiwan-stock-price"
+    assert application.finmind_historical_price_adapter.mode == "historical"
 
 
 def _finmind_live_price_responses() -> list[ProviderHttpResponse]:
@@ -839,7 +1061,7 @@ def _finmind_live_price_responses() -> list[ProviderHttpResponse]:
                             "max": 102,
                             "min": 99,
                             "close": 101,
-                            "trading_volume": 1000,
+                            "Trading_Volume": 1000,
                         }
                     ],
                 }

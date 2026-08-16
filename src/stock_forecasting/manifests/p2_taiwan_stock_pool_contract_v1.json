@@ -16,8 +16,14 @@
     "evidence_id": "twse-calendar-saturday-shortened-session"
   },
   "taiwan_sources": {
+    "source_path_id": "taiwan-twse-ogdl-v1",
     "current": "twse-open-data-current",
     "historical": "twse-open-data-observed-history"
+  },
+  "taiwan_authenticated_sources": {
+    "source_path_id": "taiwan-finmind-free-v1",
+    "current": "finmind-taiwan-stock-price",
+    "historical": "finmind-taiwan-stock-price"
   },
   "taiwan_source_basis": {
     "source_basis_id": "TWSE-OGDL-OPEN-DATA-01",

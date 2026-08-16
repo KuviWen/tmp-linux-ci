@@ -93,11 +93,21 @@ class UnitedStatesStockPoolManifest:
     listings: tuple[USStockPoolListing, ...]
 
     def __post_init__(self) -> None:
+        from stock_forecasting.alpaca_provider_contract import (
+            ALPACA_PROVIDER_DISTRIBUTIONS,
+            ALPACA_PROVIDER_ID,
+        )
+
         if (
             len(self.listings) != self.united_states_target
             or len({listing.listing_id for listing in self.listings}) != len(self.listings)
             or len({listing.security_id for listing in self.listings}) != len(self.listings)
             or self.market_calendar_cases != frozenset({"half_day_session"})
+            or self.source_basis.source_basis_id != "ALPACA-BASIC-US-MARKET-DATA-01"
+            or self.source_basis.provider_id != ALPACA_PROVIDER_ID
+            or self.source_basis.credential_kind != "api_key_pair"
+            or {member.dataset_id for member in self.source_basis.members}
+            != {distribution.distribution_id for distribution in ALPACA_PROVIDER_DISTRIBUTIONS}
             or self.source_basis.terms_content_sha256 is None
         ):
             raise ValueError("us_stock_pool_manifest_invalid")

@@ -19,12 +19,12 @@ from stock_forecasting.acceptance import (
 from stock_forecasting.acceptance_bundle import is_sha256_reference
 from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
-    build_taiwan_price_blocked_authorization_policy,
+    build_taiwan_finmind_engineering_authorization_policy,
     build_us_zero_fee_engineering_authorization_policy,
 )
 from stock_forecasting.authorization_repository import (
     FIXTURE_REVOKED_POLICY_SET,
-    TICKET_06_POLICY_BLOCKED_SET,
+    TICKET_06_FINMIND_ENGINEERING_POLICY_SET,
     TICKET_07_ENGINEERING_POLICY_SET,
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
@@ -205,7 +205,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     local_key_init.add_argument(
         "--principal-classification",
-        choices=["individual_non_commercial", "commercial"],
+        choices=[
+            "individual_non_commercial",
+            "individual_or_internal_group",
+            "commercial",
+        ],
     )
     local_key_init.add_argument("--issued-at", type=_instant)
     local_key_init.add_argument("--expires-at", type=_instant)
@@ -220,6 +224,11 @@ def _parser() -> argparse.ArgumentParser:
     ticket_06_authorization = authorization_commands.add_parser("init-ticket-06")
     ticket_06_authorization.add_argument("--database-url", required=True)
     ticket_06_authorization.add_argument("--key-file", type=Path, required=True)
+    ticket_06_authorization.add_argument(
+        "--source-adapter-key-file",
+        type=Path,
+        required=True,
+    )
     ticket_07_authorization = authorization_commands.add_parser("init-ticket-07")
     ticket_07_authorization.add_argument("--database-url", required=True)
     ticket_07_authorization.add_argument("--key-file", type=Path, required=True)
@@ -250,11 +259,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.ticket in {"ticket-06", "ticket-07"}:
             if arguments.base_url is None or arguments.key_file is None:
                 parser.error(f"{arguments.ticket} requires --base-url and --key-file")
-            if arguments.ticket == "ticket-07" and (
+            if arguments.ticket in {"ticket-06", "ticket-07"} and (
                 arguments.source_secret_root is None or arguments.source_adapter_key_file is None
             ):
                 parser.error(
-                    "ticket-07 requires --source-secret-root and --source-adapter-key-file"
+                    f"{arguments.ticket} requires --source-secret-root and "
+                    "--source-adapter-key-file"
                 )
             report = (
                 run_ticket_06_acceptance(
@@ -262,6 +272,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     object_root=arguments.object_root,
                     base_url=arguments.base_url,
                     key_file=arguments.key_file,
+                    source_adapter_key_file=arguments.source_adapter_key_file,
+                    source_secret_root=arguments.source_secret_root,
                 )
                 if arguments.ticket == "ticket-06"
                 else run_ticket_07_acceptance(
@@ -442,14 +454,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         "init-ticket-06"
     ):
         identity = LocalApiKeyIdentity.load(arguments.key_file)
+        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
         repository = AuthorizationPolicyRepository(
             StateStore(arguments.database_url, create_schema=False)
         )
         repository.install(
-            TICKET_06_POLICY_BLOCKED_SET,
-            build_taiwan_price_blocked_authorization_policy(identity.context),
+            TICKET_06_FINMIND_ENGINEERING_POLICY_SET,
+            build_taiwan_finmind_engineering_authorization_policy(identity.context),
         )
-        print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
+        repository.install(
+            TICKET_06_FINMIND_ENGINEERING_POLICY_SET,
+            build_taiwan_finmind_engineering_authorization_policy(source_adapter_identity.context),
+        )
+        print(json.dumps({"status": "initialized", "policy_set_count": 2}, sort_keys=True))
         return 0
     if arguments.command == "authorization" and arguments.authorization_command == (
         "init-ticket-07"

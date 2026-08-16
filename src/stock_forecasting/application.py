@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import mkdtemp
+from typing import Literal
 from uuid import uuid4
 
 from stock_forecasting.alpaca_market_data import (
@@ -165,16 +166,29 @@ class Application:
             if self.source_adapter_security_context is not None
             else None
         )
-        self.finmind_price_adapter = (
+        self.finmind_current_price_adapter = (
             self.build_finmind_price_adapter(
                 transport=ProviderUrllibHttpTransport(
                     allowed_hosts=frozenset({"api.finmindtrade.com"})
                 ),
                 source_access_mode="live_provider",
+                mode="current",
             )
             if self.source_adapter_security_context is not None
             else None
         )
+        self.finmind_historical_price_adapter = (
+            self.build_finmind_price_adapter(
+                transport=ProviderUrllibHttpTransport(
+                    allowed_hosts=frozenset({"api.finmindtrade.com"})
+                ),
+                source_access_mode="live_provider",
+                mode="historical",
+            )
+            if self.source_adapter_security_context is not None
+            else None
+        )
+        self.finmind_price_adapter = self.finmind_historical_price_adapter
         self._relay_fault = relay_fault or NoRelayFault()
         self._event_compatibility = event_compatibility or EventCompatibility.current()
         self._relay_clock = relay_clock or SystemRelayClock()
@@ -240,6 +254,7 @@ class Application:
         *,
         transport: ProviderHttpTransport,
         source_access_mode: SourceAccessMode,
+        mode: Literal["current", "historical"] = "historical",
     ) -> FinMindPriceSourceAdapter:
         if self.source_adapter_security_context is None:
             raise ValueError("source_adapter_identity_unavailable")
@@ -248,7 +263,7 @@ class Application:
         rate_limit_policy_id = "finmind-free-600-requests-per-hour-v1"
         return FinMindPriceSourceAdapter(
             source_id=source_id,
-            mode="historical",
+            mode=mode,
             adapter_version=f"{FINMIND_PROVIDER_ID}-v1",
             rate_limit_policy_id=rate_limit_policy_id,
             source_access_mode=source_access_mode,

@@ -10,7 +10,7 @@ from stock_forecasting.authorization import (
 from stock_forecasting.authorization_repository import (
     FIXTURE_ACTIVE_POLICY_SET,
     FIXTURE_REVOKED_POLICY_SET,
-    TICKET_06_POLICY_BLOCKED_SET,
+    TICKET_06_FINMIND_ENGINEERING_POLICY_SET,
     TICKET_07_ENGINEERING_POLICY_SET,
     AuthorizationPolicyRepository,
 )
@@ -123,7 +123,7 @@ def test_authorization_init_cli_installs_main_and_admin_policy_sets_without_secr
     )
 
 
-def test_ticket_06_authorization_init_installs_metadata_read_but_no_price_source_rights(
+def test_ticket_06_authorization_init_installs_finmind_admin_and_adapter_contracts(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -132,16 +132,28 @@ def test_ticket_06_authorization_init_installs_metadata_read_but_no_price_source
         owner="ticket-06-researcher",
         environment="development",
         scopes={
-            "market_data.collect",
             "price_research_eligibility.read",
             "source_credential.read",
+            "source_credential.manage",
         },
-        data_protection_classes={"internal", "restricted"},
+        data_protection_classes={"licensed", "restricted", "secret"},
         issued_at=now,
         expires_at=now.replace(day=16),
+        principal_classification="individual_or_internal_group",
     )
     key_file = tmp_path / "ticket-06-local-api-key.json"
     identity.save(key_file)
+    source_adapter_identity = LocalApiKeyIdentity.issue(
+        owner="ticket-06-finmind-source-adapter",
+        environment="development",
+        scopes={"market_data.collect"},
+        data_protection_classes={"licensed", "secret"},
+        issued_at=now,
+        expires_at=now.replace(day=16),
+        principal_classification="individual_or_internal_group",
+    )
+    source_adapter_key_file = tmp_path / "ticket-06-source-adapter-api-key.json"
+    source_adapter_identity.save(source_adapter_key_file)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'ticket-06-authorization.db'}"
     StateStore(database_url, create_schema=True)
 
@@ -153,30 +165,40 @@ def test_ticket_06_authorization_init_installs_metadata_read_but_no_price_source
             database_url,
             "--key-file",
             str(key_file),
+            "--source-adapter-key-file",
+            str(source_adapter_key_file),
         ]
     )
 
     assert exit_code == 0
-    assert capsys.readouterr().out == '{"policy_set_count": 1, "status": "initialized"}\n'
+    assert capsys.readouterr().out == '{"policy_set_count": 2, "status": "initialized"}\n'
     policy = AuthorizationPolicyRepository(StateStore(database_url, create_schema=False)).get(
-        TICKET_06_POLICY_BLOCKED_SET,
+        TICKET_06_FINMIND_ENGINEERING_POLICY_SET,
         principal_id=identity.context.principal_id,
     )
-    assert {item.dataset_id for item in policy.source_policies} == {
+    assert {
+        "finmind-taiwan-stock-price",
+        "finmind-taiwan-trading-date",
+        "finmind-taiwan-dividend-result",
+        "finmind-taiwan-delisting",
+        "finmind-taiwan-split-price",
         "price-research-eligibility",
         "source-credential-metadata",
-    }
-    assert {item.dataset_id for item in policy.source_entitlements} == {
-        "price-research-eligibility",
-        "source-credential-metadata",
-    }
+    } == {item.dataset_id for item in policy.source_policies}
     assert policy.action_grants[0].actions == frozenset(
         {
-            "market_data.collect",
             "price_research_eligibility.read",
             "source_credential.read",
+            "source_credential.manage",
         }
     )
+    adapter_policy = AuthorizationPolicyRepository(
+        StateStore(database_url, create_schema=False)
+    ).get(
+        TICKET_06_FINMIND_ENGINEERING_POLICY_SET,
+        principal_id=source_adapter_identity.context.principal_id,
+    )
+    assert adapter_policy.action_grants[0].actions == frozenset({"market_data.collect"})
 
 
 def test_ticket_07_authorization_init_installs_zero_fee_and_credential_contracts(

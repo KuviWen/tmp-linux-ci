@@ -146,6 +146,11 @@ def test_taiwan_segment_declares_versioned_ten_listing_qualification_contract() 
     assert manifest.historical_availability_claim_id is None
     assert manifest.formally_qualified is False
 
+    finmind_path = manifest.for_authenticated_source_path()
+    assert finmind_path.current_source_id == "finmind-taiwan-stock-price"
+    assert finmind_path.historical_source_id == "finmind-taiwan-stock-price"
+    assert finmind_path.source_path_id == "taiwan-finmind-free-v1"
+
 
 def test_taiwan_manifest_declares_finmind_free_authenticated_candidate_bundle() -> None:
     manifest = load_taiwan_stock_pool_manifest()
@@ -192,6 +197,46 @@ def test_authenticated_candidate_rejects_a_member_from_another_provider() -> Non
             members=(
                 replace(basis.members[0], provider_id="unexpected-provider"),
                 *basis.members[1:],
+            ),
+        )
+
+
+def test_zero_fee_bundle_member_rejects_qualified_without_archived_terms() -> None:
+    member = load_taiwan_stock_pool_manifest().authenticated_source_basis.members[0]
+
+    with pytest.raises(ValueError, match="zero_fee_source_bundle_member_invalid"):
+        replace(member, qualification_status="qualified")  # type: ignore[arg-type]
+
+
+def test_zero_fee_bundle_member_rejects_adjusted_price_semantics() -> None:
+    member = load_taiwan_stock_pool_manifest().authenticated_source_basis.members[0]
+
+    with pytest.raises(ValueError, match="zero_fee_source_bundle_member_invalid"):
+        replace(member, price_semantics="adjusted")  # type: ignore[arg-type]
+
+
+def test_taiwan_candidate_rejects_the_wrong_provider_or_credential_kind() -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+
+    with pytest.raises(ValueError, match="taiwan_stock_pool_manifest_invalid"):
+        replace(
+            manifest,
+            authenticated_source_basis=replace(
+                manifest.authenticated_source_basis,
+                credential_kind="api_key_pair",
+            ),
+        )
+    with pytest.raises(ValueError, match="taiwan_stock_pool_manifest_invalid"):
+        replace(
+            manifest,
+            authenticated_source_basis=replace(
+                manifest.authenticated_source_basis,
+                supplemental_references=(
+                    replace(
+                        manifest.authenticated_source_basis.supplemental_references[0],
+                        provider_id="another-provider",
+                    ),
+                ),
             ),
         )
 
