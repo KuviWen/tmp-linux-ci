@@ -119,6 +119,14 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
             {"$ref": "#/components/schemas/ZeroFeeAuthenticatedSourceBasis"},
         ]
     }
+    open_data_dataset = contract["components"]["schemas"]["OpenDataSourceBasis"]["properties"][
+        "datasets"
+    ]["items"]
+    assert "distribution_url" in open_data_dataset["required"]
+    assert open_data_dataset["properties"]["distribution_url"] == {
+        "type": "string",
+        "format": "uri",
+    }
     zero_fee_basis = contract["components"]["schemas"]["ZeroFeeAuthenticatedSourceBasis"]
     assert set(zero_fee_basis["required"]) == {
         "account_required",

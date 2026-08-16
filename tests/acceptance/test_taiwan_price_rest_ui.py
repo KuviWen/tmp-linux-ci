@@ -15,6 +15,7 @@ from stock_forecasting.authorization import (
     AuthorizationPolicy,
     CurrentSourcePrincipalAttributes,
     LocalApiKeyIdentity,
+    SourceAccessMode,
     SourceEntitlement,
     SourcePolicyVersion,
     SourceUseRight,
@@ -34,6 +35,8 @@ from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
 
 
 class NeverCalledAdapter:
+    source_access_mode: SourceAccessMode = "engineering_double"
+
     def __init__(self) -> None:
         self.calls = 0
 
@@ -43,6 +46,8 @@ class NeverCalledAdapter:
 
 
 class LiteralQuarantineAdapter:
+    source_access_mode: SourceAccessMode = "engineering_double"
+
     def __init__(self, loaded: LoadedSourcePartition) -> None:
         self.loaded = loaded
 
@@ -51,6 +56,8 @@ class LiteralQuarantineAdapter:
 
 
 class RateLimitedAdapter:
+    source_access_mode: SourceAccessMode = "engineering_double"
+
     def load(self, request: SourcePartitionRequest) -> NoReturn:
         raise SourceRateLimited(
             retry_after_seconds=45,

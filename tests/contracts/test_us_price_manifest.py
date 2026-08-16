@@ -151,6 +151,36 @@ def test_us_manifest_preserves_each_zero_fee_source_bundle_member_and_gap() -> N
     assert manifest.formally_qualified is False
 
 
+def test_us_candidate_rejects_noncanonical_required_or_supplemental_distributions() -> None:
+    manifest = load_us_stock_pool_manifest()
+    basis = manifest.source_basis
+
+    with pytest.raises(ValueError, match="us_stock_pool_manifest_invalid"):
+        replace(
+            manifest,
+            source_basis=replace(
+                basis,
+                members=(
+                    replace(basis.members[0], distribution_url="https://evil.example/data"),
+                    *basis.members[1:],
+                ),
+            ),
+        )
+    with pytest.raises(ValueError, match="us_stock_pool_manifest_invalid"):
+        replace(
+            manifest,
+            source_basis=replace(
+                basis,
+                supplemental_references=(
+                    replace(
+                        basis.supplemental_references[0],
+                        provider_id="unexpected-provider",
+                    ),
+                ),
+            ),
+        )
+
+
 def test_us_candidate_still_requires_its_pinned_terms_digest() -> None:
     manifest = load_us_stock_pool_manifest()
 

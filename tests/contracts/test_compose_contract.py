@@ -32,6 +32,7 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "ticket-06-local-key-init",
         "ticket-06-source-adapter-key-init",
         "ticket-06-authorization-init",
+        "ticket-06-source-probe",
         "ticket-06-api",
         "ticket-06-api-ingress",
         "ticket-06-acceptance",
@@ -362,8 +363,19 @@ def test_compose_declares_ticket_06_finmind_credential_lifecycle_acceptance() ->
     ]
     assert "--base-url" in acceptance["command"]
     assert "--key-file" in acceptance["command"]
-    assert "--source-adapter-key-file" in acceptance["command"]
-    assert "--source-secret-root" in acceptance["command"]
+    assert "--source-adapter-key-file" not in acceptance["command"]
+    assert "--source-secret-root" not in acceptance["command"]
+    assert all("source-adapter" not in volume for volume in acceptance["volumes"])
+    assert all("source-secrets" not in volume for volume in acceptance["volumes"])
+    source_probe = services["ticket-06-source-probe"]
+    assert source_probe["profiles"] == profile
+    assert "ticket-06-source-probe" in source_probe["command"]
+    assert "ticket-06-local-key" not in " ".join(source_probe["volumes"])
+    assert "ticket-06-source-adapter-key" in " ".join(source_probe["volumes"])
+    assert "ticket-06-source-secrets" not in " ".join(source_probe["volumes"])
+    assert acceptance["depends_on"]["ticket-06-source-probe"]["condition"] == (
+        "service_completed_successfully"
+    )
     assert acceptance["depends_on"]["ticket-06-api"]["condition"] == "service_healthy"
     assert acceptance["depends_on"]["ticket-06-api-ingress"]["condition"] == ("service_healthy")
 

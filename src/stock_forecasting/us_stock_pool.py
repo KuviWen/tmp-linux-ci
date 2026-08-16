@@ -106,8 +106,24 @@ class UnitedStatesStockPoolManifest:
             or self.source_basis.source_basis_id != "ALPACA-BASIC-US-MARKET-DATA-01"
             or self.source_basis.provider_id != ALPACA_PROVIDER_ID
             or self.source_basis.credential_kind != "api_key_pair"
-            or {member.dataset_id for member in self.source_basis.members}
-            != {distribution.distribution_id for distribution in ALPACA_PROVIDER_DISTRIBUTIONS}
+            or {
+                (member.dataset_id, member.distribution_url) for member in self.source_basis.members
+            }
+            != {
+                (distribution.distribution_id, distribution.distribution_url)
+                for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
+            }
+            or {
+                (member.provider_id, member.dataset_id, member.distribution_url)
+                for member in self.source_basis.supplemental_references
+            }
+            != {
+                (
+                    "nasdaq-trader-public-reference",
+                    "nasdaq-current-symbol-directory",
+                    "https://www.nasdaqtrader.com/Trader.aspx?id=symbollookup",
+                )
+            }
             or self.source_basis.terms_content_sha256 is None
         ):
             raise ValueError("us_stock_pool_manifest_invalid")

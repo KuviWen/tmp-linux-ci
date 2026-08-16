@@ -557,6 +557,37 @@ services:
       timeout: 3s
       retries: 30
 
+  ticket-06-source-probe:
+    <<: *application
+    profiles: ["ticket-06-acceptance"]
+    environment:
+      <<: *application-environment
+      AUTHORIZATION_POLICY_SET_ID: ticket-06-finmind-zero-fee-engineering-v1
+    volumes:
+      - fixture-objects:/var/lib/stock-forecasting/objects:ro
+      - ticket-06-source-adapter-key:/run/stock-forecasting-source-adapter:ro
+    command:
+      - python
+      - -m
+      - stock_forecasting.cli
+      - acceptance
+      - ticket-06-source-probe
+      - --database-url
+      - postgresql+psycopg://stock@postgres:5432/stock_forecasting
+      - --object-root
+      - /var/lib/stock-forecasting/objects
+      - --information-cutoff
+      - *fixture-information-cutoff
+      - --observed-at
+      - *fixture-collection-observed-at
+      - --source-adapter-key-file
+      - /run/stock-forecasting-source-adapter/local-api-key.json
+    depends_on:
+      database-grants:
+        condition: service_completed_successfully
+      ticket-06-authorization-init:
+        condition: service_completed_successfully
+
   ticket-06-acceptance:
     <<: *application
     profiles: ["ticket-06-acceptance"]
@@ -564,13 +595,9 @@ services:
       <<: *application-environment
       LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
       AUTHORIZATION_POLICY_SET_ID: ticket-06-finmind-zero-fee-engineering-v1
-      SOURCE_SECRET_ROOT: /var/lib/stock-forecasting/source-secrets
     volumes:
-      - fixture-objects:/var/lib/stock-forecasting/objects
-      - dagster-home:/var/lib/dagster
-      - ticket-06-local-key:/run/stock-forecasting
-      - ticket-06-source-adapter-key:/run/stock-forecasting-source-adapter:ro
-      - ticket-06-source-secrets:/var/lib/stock-forecasting/source-secrets
+      - fixture-objects:/var/lib/stock-forecasting/objects:ro
+      - ticket-06-local-key:/run/stock-forecasting:ro
     command:
       - python
       - -m
@@ -589,10 +616,6 @@ services:
       - http://ticket-06-api:8080
       - --key-file
       - /run/stock-forecasting/local-api-key.json
-      - --source-adapter-key-file
-      - /run/stock-forecasting-source-adapter/local-api-key.json
-      - --source-secret-root
-      - /var/lib/stock-forecasting/source-secrets
     depends_on:
       ticket-06-api:
         condition: service_healthy
@@ -601,6 +624,8 @@ services:
       database-grants:
         condition: service_completed_successfully
       ticket-06-authorization-init:
+        condition: service_completed_successfully
+      ticket-06-source-probe:
         condition: service_completed_successfully
 
   ticket-07-local-key-init:

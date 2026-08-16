@@ -31,7 +31,10 @@ from stock_forecasting.authorization_repository import (
 )
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.runtime import RuntimeSettings
-from stock_forecasting.ticket_06_acceptance import run_ticket_06_acceptance
+from stock_forecasting.ticket_06_acceptance import (
+    run_ticket_06_acceptance,
+    run_ticket_06_source_probe,
+)
 from stock_forecasting.ticket_07_acceptance import run_ticket_07_acceptance
 
 
@@ -138,6 +141,7 @@ def _parser() -> argparse.ArgumentParser:
             "ticket-04",
             "ticket-05",
             "ticket-06",
+            "ticket-06-source-probe",
             "ticket-07",
         ],
     )
@@ -250,16 +254,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         "ticket-04",
         "ticket-05",
         "ticket-06",
+        "ticket-06-source-probe",
         "ticket-07",
     }:
-        if arguments.ticket not in {"ticket-06", "ticket-07"} and (
+        if arguments.ticket not in {"ticket-06", "ticket-06-source-probe", "ticket-07"} and (
             (arguments.base_url is None) != (arguments.dagster_url is None)
         ):
             parser.error("--base-url and --dagster-url must be provided together")
         if arguments.ticket in {"ticket-06", "ticket-07"}:
             if arguments.base_url is None or arguments.key_file is None:
                 parser.error(f"{arguments.ticket} requires --base-url and --key-file")
-            if arguments.ticket in {"ticket-06", "ticket-07"} and (
+            if arguments.ticket == "ticket-07" and (
                 arguments.source_secret_root is None or arguments.source_adapter_key_file is None
             ):
                 parser.error(
@@ -268,12 +273,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             report = (
                 run_ticket_06_acceptance(
-                    database_url=arguments.database_url,
-                    object_root=arguments.object_root,
                     base_url=arguments.base_url,
                     key_file=arguments.key_file,
-                    source_adapter_key_file=arguments.source_adapter_key_file,
-                    source_secret_root=arguments.source_secret_root,
                 )
                 if arguments.ticket == "ticket-06"
                 else run_ticket_07_acceptance(
@@ -284,6 +285,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source_adapter_key_file=arguments.source_adapter_key_file,
                     source_secret_root=arguments.source_secret_root,
                 )
+            )
+            print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+            return 0 if report["status"] == "passed" else 1
+        if arguments.ticket == "ticket-06-source-probe":
+            if arguments.source_adapter_key_file is None:
+                parser.error("ticket-06-source-probe requires --source-adapter-key-file")
+            report = run_ticket_06_source_probe(
+                database_url=arguments.database_url,
+                object_root=arguments.object_root,
+                source_adapter_key_file=arguments.source_adapter_key_file,
             )
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
             return 0 if report["status"] == "passed" else 1

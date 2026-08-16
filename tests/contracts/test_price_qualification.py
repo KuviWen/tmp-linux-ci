@@ -6,6 +6,8 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
+from typing import cast
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
@@ -14,6 +16,7 @@ from stock_forecasting.authorization import (
     AuthorizationAction,
     AuthorizationPolicy,
     LocalApiKeyIdentity,
+    SourceAccessMode,
     SourceDistribution,
     SourceEntitlement,
     SourcePolicyVersion,
@@ -26,6 +29,7 @@ from stock_forecasting.data_supply import (
     CollectedSourcePartition,
     DataSupply,
     DecodedSourcePartition,
+    HistoricalArchiveAttestation,
     HistoricalAvailabilityClaim,
     ListingLifecycleRecord,
     LoadedSourcePartition,
@@ -43,9 +47,16 @@ from stock_forecasting.price_qualification import (
     QualificationAuthorizationError,
     TaiwanPriceQualificationWorkflow,
 )
+from stock_forecasting.source_credentials import (
+    CredentialValidationEvidence,
+    SourceContractAssessment,
+    pin_source_credential_lease,
+)
 
 
 class _QualificationLiteralAdapter:
+    source_access_mode: SourceAccessMode = "live_provider"
+
     def __init__(self, loaded: LoadedSourcePartition) -> None:
         self.loaded = loaded
 
@@ -504,6 +515,7 @@ def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
             reference_graph_lifecycle_verified=True,
             company_action_completeness_verified=True,
             market_calendar_evidence_version_id="engineering-xtai-calendar-2024-01-03-v1",
+            historical_archive_attestation=archive_attestation,
         )
         decoded = DecodedSourcePartition(
             source_id=primary.policy_dataset_id,
@@ -540,7 +552,123 @@ def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
         return LoadedSourcePartition(collection=collection, decoded=decoded)
 
     state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
-    adapter = _QualificationLiteralAdapter(loaded("finmind-assessment", "assessment-v1"))
+    credential_authorization: dict[str, object] = {
+        "evaluation_id": "ticket-06-finmind-test-credential-set",
+        "action": "source_credential.manage",
+        "reason_code": "source_credential_manage_authorized",
+    }
+    configured = state_store.publish_source_credential(
+        provider_id="finmind-free-api",
+        secret_ref_id="secret-ref:finmind-test-contract",
+        readiness="configured",
+        reason_code="source_credential_configured",
+        configured_at=now.isoformat(),
+        expires_at=(now + timedelta(days=1)).isoformat(),
+        authorization=credential_authorization,
+        trace_id="trace-finmind-test-credential-set",
+    )
+    contract_assessment = SourceContractAssessment(
+        contract_id="finmind-ticket-06-live-v1",
+        live_validation="passed",
+        ticker_count=10,
+        datasets=tuple(
+            sorted(distribution.distribution_id for distribution in FINMIND_PROVIDER_DISTRIBUTIONS)
+        ),
+        symbol_lifecycle_probe="passed",
+        universe_manifest_id=manifest.manifest_id,
+        reference_graph_version_id=manifest.selection_evidence_version,
+        listing_ids=listing_ids,
+    )
+    validation = state_store.record_source_credential_validation(
+        provider_id="finmind-free-api",
+        readiness="valid",
+        reason_code="source_credential_valid",
+        validated_at=now.isoformat(),
+        expected_version=cast(int, configured["version"]),
+        expected_secret_ref_id=cast(str, configured["secret_ref_id"]),
+        validation_evidence=CredentialValidationEvidence(
+            authentication_status="passed"
+        ).as_payload(),
+        source_contract_assessment=contract_assessment.as_payload(),
+        authorization={
+            "evaluation_id": "ticket-06-finmind-test-credential-validate",
+            "action": "source_credential.manage",
+            "reason_code": "source_credential_manage_authorized",
+        },
+        trace_id="trace-finmind-test-credential-validate",
+    )
+    current_credential = cast(dict[str, object], validation["credential"])
+    pin_source_credential_lease(
+        state_store,
+        provider_id="finmind-free-api",
+        current=current_credential,
+        trace_id="trace-finmind-assessment",
+        workload_principal_id=identity.context.principal_id,
+        environment="development",
+        source_id=primary.policy_dataset_id,
+        destination="finmind-free-api",
+        purpose="price_research_ingest",
+        request_id="finmind-assessment",
+        work_id="finmind-assessment:finmind-collect",
+        lease_duration=timedelta(minutes=5),
+        lease_issued_at=now,
+    )
+    contract_artifact_id = validation["source_contract_assessment_artifact_id"]
+    assert isinstance(contract_artifact_id, str)
+    archive_attestation = HistoricalArchiveAttestation(
+        provider_id="finmind-free-api",
+        archive_id="finmind-historical-reconstruction-contract",
+        archive_version_id="finmind-archive-snapshot-2024-01-03-v1",
+        revision_as_of=now - timedelta(days=1),
+        credential_version=cast(int, current_credential["version"]),
+        credential_lease_pin_event_id=str(
+            uuid5(
+                NAMESPACE_URL,
+                "source-credential-lease-pin:finmind-free-api:finmind-assessment:finmind-collect",
+            )
+        ),
+        source_contract_assessment_artifact_id=contract_artifact_id,
+    )
+    engineering_adapter = _QualificationLiteralAdapter(
+        loaded("finmind-engineering", "engineering-v1")
+    )
+    engineering_adapter.source_access_mode = "engineering_double"
+    engineering_supply = DataSupply(
+        authorization_policy=policy,
+        security_context=identity.context,
+        adapters={primary.policy_dataset_id: engineering_adapter},
+        object_repository=repository,
+        state_store=state_store,
+        clock=lambda: now,
+    )
+    engineering_outcome = engineering_supply.materialize(
+        SourcePartitionRequest(
+            request_id="finmind-engineering",
+            trace_id="trace-finmind-engineering",
+            source_id=primary.policy_dataset_id,
+            mode="historical",
+            listing_ids=listing_ids,
+            start_date=coverage.requested_start,
+            end_date=coverage.requested_end,
+            expected_checkpoint=None,
+            distribution_id=primary.distribution_id,
+            distribution_url=primary.distribution_url,
+            source_basis_id=manifest.authenticated_source_basis.source_basis_id,
+            bundle_members=bundle_requests,
+        )
+    )
+    assert engineering_outcome.status == "quarantined"
+    assert (
+        "historical_qualification_assessment"
+        not in state_store.get_trace_evidence("trace-finmind-engineering")["artifact_kinds"]
+    )
+    adapter = _QualificationLiteralAdapter(
+        loaded(
+            "finmind-assessment",
+            "assessment-v1",
+            checkpoint_before="checkpoint:engineering-v1",
+        )
+    )
     data_supply = DataSupply(
         authorization_policy=policy,
         security_context=identity.context,
@@ -573,7 +701,13 @@ def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
             historical_availability_claim_id=claim_id,
         )
 
-    assessment_outcome = data_supply.materialize(request("finmind-assessment", "historical"))
+    assessment_outcome = data_supply.materialize(
+        request(
+            "finmind-assessment",
+            "historical",
+            expected_checkpoint="checkpoint:engineering-v1",
+        )
+    )
     assert assessment_outcome.status == "quarantined"
     assessment_trace = state_store.get_trace_evidence("trace-finmind-assessment")
     assessment_id = next(
@@ -663,6 +797,16 @@ def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
         payload=persisted_gate[1],
     )
     assert workflow.formal_qualification_available(reloaded_manifest, sources) is True
+    state_store.revoke_source_credential(
+        provider_id="finmind-free-api",
+        revoked_at=now.isoformat(),
+        authorization={
+            "evaluation_id": "ticket-06-finmind-test-credential-revoke",
+            "action": "source_credential.manage",
+            "reason_code": "source_credential_manage_authorized",
+        },
+        trace_id="trace-finmind-test-credential-revoke",
+    )
     result = PriceEligibilityQuery(
         state_store,
         authorization_policy=policy,
@@ -674,7 +818,9 @@ def test_finmind_materialization_evidence_reaches_the_formal_eligibility_query(
         security_context=identity.context,
     )
     assert isinstance(result, dict)
-    assert result["formally_qualified"] is True, result
+    assert result["status"] == "credential_required"
+    assert result["reason_code"] == "source_credential_revoked"
+    assert result["formally_qualified"] is False, result
     assert result["source_basis_id"] == "FINMIND-FREE-TAIWAN-MARKET-DATA-01"
 
 

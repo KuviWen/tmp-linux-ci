@@ -201,7 +201,7 @@ class PriceEligibilityQuery:
             "reason_code": reason_code,
             "source_basis_id": str(source_basis["source_basis_id"]),
             "source_basis": source_basis,
-            "formally_qualified": (formal_evidence_available and not current_source_rights_denied),
+            "formally_qualified": status == "qualified",
             "downstream_readiness": {
                 "new_collection": downstream_state,
                 "feature_materialization": downstream_state,

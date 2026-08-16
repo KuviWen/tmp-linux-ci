@@ -13,6 +13,7 @@ from stock_forecasting.authorization import (
     ActionGrant,
     AuthorizationPolicy,
     LocalApiKeyIdentity,
+    SourceAccessMode,
     SourceDistribution,
     SourceEntitlement,
     SourcePolicyVersion,
@@ -44,6 +45,8 @@ TWSE_EOD_DISTRIBUTION_URL = (
 
 
 class ForbiddenPriceAdapter:
+    source_access_mode: SourceAccessMode = "engineering_double"
+
     calls = 0
 
     def load(self, request: SourcePartitionRequest) -> NoReturn:
@@ -52,6 +55,8 @@ class ForbiddenPriceAdapter:
 
 
 class LiteralPriceAdapter:
+    source_access_mode: SourceAccessMode = "engineering_double"
+
     def __init__(self, loaded: LoadedSourcePartition) -> None:
         self.loaded = loaded
         self.requests: list[SourcePartitionRequest] = []
@@ -1062,6 +1067,7 @@ def test_rate_limited_collection_is_deferred_without_advancing_the_checkpoint(
         mode="current",
         adapter_version="taiwan-price-adapter-v1",
         rate_limit_policy_id="provider-rate-limit-v1",
+        source_access_mode="engineering_double",
         collector=collector,
         decoder=LiteralPriceDecoder(loaded.decoded),
     )

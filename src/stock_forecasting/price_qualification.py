@@ -320,6 +320,7 @@ class TaiwanPriceQualificationWorkflow:
                 else manifest.source_basis.datasets
             )
             coverage = cast(dict[str, object], assessment["coverage"])
+            historical_evidence = cast(dict[str, object], assessment["historical_evidence"])
             if (
                 assessment["source_id"] != manifest.historical_source_id
                 or assessment["listing_ids"]
@@ -328,6 +329,8 @@ class TaiwanPriceQualificationWorkflow:
                 != sorted(member.dataset_id for member in expected_basis_members)
                 or coverage["requested_start"] != coverage["observed_start"]
                 or coverage["requested_end"] != coverage["observed_end"]
+                or historical_evidence["provider_id"]
+                != manifest.authenticated_source_basis.provider_id
             ):
                 raise ValueError("historical_qualification_assessment_invalid")
         except (KeyError, TypeError, ValueError) as error:
@@ -345,7 +348,7 @@ class TaiwanPriceQualificationWorkflow:
             artifact_kind="historical_qualification_evidence",
             payload={
                 "source_id": manifest.historical_source_id,
-                "evidence_level": "archive_attested",
+                "evidence_level": historical_evidence["evidence_level"],
                 "verification_status": "verified",
                 "observed_start": coverage["observed_start"],
                 "observed_end": coverage["observed_end"],
@@ -420,6 +423,7 @@ class TaiwanPriceQualificationWorkflow:
             or artifact.get("execution_purpose") != "price_research"
             or not isinstance(payload, dict)
             or payload.get("source_mode") != "historical"
+            or payload.get("source_access_mode") != "live_provider"
             or payload.get("exact_sessions_verified") is not True
             or payload.get("company_actions_verified") is not True
             or payload.get("listing_lifecycle_verified") is not True
@@ -431,6 +435,10 @@ class TaiwanPriceQualificationWorkflow:
             or cast(dict[str, object], payload["coverage"]).get("complete") is not True
             or not isinstance(payload.get("integrity_objects"), list)
             or not payload["integrity_objects"]
+            or not isinstance(payload.get("retrieval_receipt_id"), str)
+            or not isinstance(payload.get("request_id"), str)
+            or not isinstance(payload.get("acquired_at"), str)
+            or not isinstance(payload.get("historical_evidence"), dict)
         ):
             raise ValueError("historical_qualification_assessment_invalid")
         coverage = cast(dict[str, object], payload["coverage"])
@@ -459,7 +467,126 @@ class TaiwanPriceQualificationWorkflow:
                     or binding["object_id"] != f"sha256:{binding['sha256']}"
                 ):
                     raise ValueError
-        except (OSError, ObjectIntegrityError, ValueError) as error:
+            historical_evidence = cast(dict[str, object], payload["historical_evidence"])
+            if (
+                set(historical_evidence)
+                != {
+                    "evidence_level",
+                    "provider_id",
+                    "archive_id",
+                    "archive_version_id",
+                    "revision_as_of",
+                    "credential_version",
+                    "credential_lease_pin_event_id",
+                    "source_contract_assessment_artifact_id",
+                }
+                or historical_evidence.get("evidence_level") != "archive_attested"
+            ):
+                raise ValueError
+            text_fields = (
+                historical_evidence.get("provider_id"),
+                historical_evidence.get("archive_id"),
+                historical_evidence.get("archive_version_id"),
+                historical_evidence.get("revision_as_of"),
+                historical_evidence.get("credential_lease_pin_event_id"),
+                historical_evidence.get("source_contract_assessment_artifact_id"),
+            )
+            credential_version = historical_evidence.get("credential_version")
+            if (
+                any(not isinstance(value, str) or not value for value in text_fields)
+                or not isinstance(credential_version, int)
+                or credential_version < 1
+            ):
+                raise ValueError
+            acquired_at = datetime.fromisoformat(
+                cast(str, payload["acquired_at"]).replace("Z", "+00:00")
+            )
+            revision_as_of = datetime.fromisoformat(
+                cast(str, historical_evidence["revision_as_of"]).replace("Z", "+00:00")
+            )
+            if revision_as_of > acquired_at:
+                raise ValueError
+            receipt = self._state_store.get_canonical_artifact(
+                cast(str, payload["retrieval_receipt_id"])
+            )
+            receipt_payload = receipt.get("payload")
+            first_integrity_binding = cast(list[dict[str, object]], payload["integrity_objects"])[0]
+            if (
+                receipt.get("artifact_kind") != "source_retrieval_receipt"
+                or receipt.get("execution_purpose") != "price_research"
+                or not isinstance(receipt_payload, dict)
+                or receipt_payload.get("object_id") != first_integrity_binding.get("object_id")
+                or receipt_payload.get("request_id") != payload["request_id"]
+                or receipt_payload.get("source_id") != payload["source_id"]
+                or receipt_payload.get("source_mode") != "historical"
+                or receipt_payload.get("acquired_at") != payload["acquired_at"]
+            ):
+                raise ValueError
+            contract = self._state_store.get_canonical_artifact(
+                cast(str, historical_evidence["source_contract_assessment_artifact_id"])
+            )
+            contract_payload = contract.get("payload")
+            contract_assessment = (
+                contract_payload.get("assessment") if isinstance(contract_payload, dict) else None
+            )
+            if (
+                contract.get("artifact_kind") != "source_contract_assessment"
+                or contract.get("execution_purpose") != "source_administration"
+                or not isinstance(contract_payload, dict)
+                or contract_payload.get("provider_id") != historical_evidence["provider_id"]
+                or contract_payload.get("credential_version") != credential_version
+                or not isinstance(contract_assessment, dict)
+                or contract_assessment.get("live_validation") != "passed"
+                or not isinstance(contract_assessment.get("contract_id"), str)
+                or contract_assessment.get("datasets") != payload["observed_dataset_ids"]
+            ):
+                raise ValueError
+            assessed_at = datetime.fromisoformat(
+                cast(str, contract_payload["assessed_at"]).replace("Z", "+00:00")
+            )
+            if assessed_at > acquired_at:
+                raise ValueError
+            lease_event = self._state_store.get_security_event(
+                event_id=cast(str, historical_evidence["credential_lease_pin_event_id"])
+            )
+            lease = lease_event.get("authorization") if lease_event is not None else None
+            if (
+                lease_event is None
+                or lease_event.get("action") != "source_credential.lease_pin"
+                or lease_event.get("outcome") != "allowed"
+                or not isinstance(lease, dict)
+                or lease.get("provider_id") != historical_evidence["provider_id"]
+                or lease.get("destination") != historical_evidence["provider_id"]
+                or lease.get("source_id") != payload["source_id"]
+                or lease.get("request_id") != payload["request_id"]
+                or lease.get("credential_version") != credential_version
+                or lease.get("purpose") != "price_research_ingest"
+            ):
+                raise ValueError
+            lease_not_before = datetime.fromisoformat(
+                cast(str, lease["lease_not_before"]).replace("Z", "+00:00")
+            )
+            lease_expires_at = datetime.fromisoformat(
+                cast(str, lease["lease_expires_at"]).replace("Z", "+00:00")
+            )
+            current_credential = self._state_store.get_source_credential(
+                provider_id=cast(str, historical_evidence["provider_id"])
+            )
+            validation_evidence = (
+                current_credential.get("validation_evidence")
+                if current_credential is not None
+                else None
+            )
+            if (
+                not lease_not_before <= acquired_at < lease_expires_at
+                or current_credential is None
+                or current_credential.get("readiness") != "valid"
+                or current_credential.get("version") != credential_version
+                or not isinstance(validation_evidence, dict)
+                or validation_evidence.get("authentication_status") != "passed"
+            ):
+                raise ValueError
+        except (KeyError, OSError, ObjectIntegrityError, TypeError, ValueError) as error:
             raise ValueError("historical_qualification_assessment_invalid") from error
         return cast(dict[str, object], payload)
 

@@ -241,6 +241,23 @@ def test_taiwan_candidate_rejects_the_wrong_provider_or_credential_kind() -> Non
         )
 
 
+def test_taiwan_candidate_rejects_a_noncanonical_distribution_url() -> None:
+    manifest = load_taiwan_stock_pool_manifest()
+    basis = manifest.authenticated_source_basis
+
+    with pytest.raises(ValueError, match="taiwan_stock_pool_manifest_invalid"):
+        replace(
+            manifest,
+            authenticated_source_basis=replace(
+                basis,
+                members=(
+                    replace(basis.members[0], distribution_url="https://evil.example/data"),
+                    *basis.members[1:],
+                ),
+            ),
+        )
+
+
 def test_finmind_provider_contract_catalog_matches_taiwan_candidate_manifest() -> None:
     source_basis = load_taiwan_stock_pool_manifest().authenticated_source_basis
 

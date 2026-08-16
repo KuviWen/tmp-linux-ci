@@ -139,7 +139,7 @@ def _bundle_member_requests() -> tuple[SourceBundleMemberRequest, ...]:
 
 
 class CredentialRequiredPriceAdapter:
-    source_access_mode = "engineering_double"
+    source_access_mode: SourceAccessMode = "engineering_double"
 
     def __init__(self, reason_code: str) -> None:
         self.reason_code = reason_code
@@ -151,7 +151,7 @@ class CredentialRequiredPriceAdapter:
 
 
 class LiveProviderCredentialRequiredAdapter(CredentialRequiredPriceAdapter):
-    source_access_mode = "live_provider"
+    source_access_mode: SourceAccessMode = "live_provider"
 
 
 class EngineeringCredentialResolver:
@@ -211,7 +211,7 @@ class EngineeringProviderTransport:
 
 
 class BundleQualityMutationAdapter:
-    source_access_mode = "engineering_double"
+    source_access_mode: SourceAccessMode = "engineering_double"
 
     def __init__(
         self,

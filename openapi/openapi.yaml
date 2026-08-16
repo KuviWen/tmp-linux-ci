@@ -424,10 +424,11 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [dataset_id, dataset_url, qualification_scope]
+            required: [dataset_id, dataset_url, distribution_url, qualification_scope]
             properties:
               dataset_id: {type: string}
               dataset_url: {type: string, format: uri}
+              distribution_url: {type: string, format: uri}
               qualification_scope:
                 type: string
                 enum:

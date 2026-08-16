@@ -193,6 +193,35 @@ class HistoricalAvailabilityClaim:
 
 
 @dataclass(frozen=True)
+class HistoricalArchiveAttestation:
+    provider_id: str
+    archive_id: str
+    archive_version_id: str
+    revision_as_of: datetime
+    credential_version: int
+    credential_lease_pin_event_id: str
+    source_contract_assessment_artifact_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            any(
+                not value.strip()
+                for value in (
+                    self.provider_id,
+                    self.archive_id,
+                    self.archive_version_id,
+                    self.credential_lease_pin_event_id,
+                    self.source_contract_assessment_artifact_id,
+                )
+            )
+            or self.credential_version < 1
+            or self.revision_as_of.tzinfo is None
+            or self.revision_as_of.utcoffset() is None
+        ):
+            raise ValueError("historical_archive_attestation_invalid")
+
+
+@dataclass(frozen=True)
 class CollectedSourceBundleMember:
     dataset_id: str
     distribution_id: str
@@ -224,6 +253,7 @@ class CollectedSourcePartition:
     expected_company_action_ids: frozenset[str] = frozenset()
     market_calendar_evidence_version_id: str | None = None
     revision_kind: SourceRevisionKind = "original"
+    historical_archive_attestation: HistoricalArchiveAttestation | None = None
 
 
 @dataclass(frozen=True)
@@ -304,6 +334,8 @@ class SourceDecoder(Protocol):
 
 
 class PriceSourceAdapter(Protocol):
+    source_access_mode: SourceAccessMode
+
     def load(self, request: SourcePartitionRequest) -> LoadedSourcePartition: ...
 
 
@@ -342,7 +374,7 @@ class CollectorDecoderPriceSourceAdapter:
         rate_limit_policy_id: str,
         collector: SourceCollector,
         decoder: SourceDecoder,
-        source_access_mode: SourceAccessMode = "live_provider",
+        source_access_mode: SourceAccessMode,
     ) -> None:
         self.source_id = source_id
         self.mode = mode
@@ -493,10 +525,14 @@ class DataSupply:
             raise ValueError("source_policy_decision_must_be_internal")
         evaluated_at = self._clock()
         adapter = self._adapters.get(request.source_id)
-        source_access_mode = cast(
-            SourceAccessMode,
-            getattr(adapter, "source_access_mode", "live_provider"),
+        candidate_access_mode = (
+            "engineering_double"
+            if adapter is None
+            else getattr(adapter, "source_access_mode", None)
         )
+        if candidate_access_mode not in {"live_provider", "engineering_double"}:
+            raise ValueError("source_adapter_access_mode_invalid")
+        source_access_mode = cast(SourceAccessMode, candidate_access_mode)
         decision = self._evaluate_collection_rights(
             dataset_id=request.source_id,
             distribution_id=request.distribution_id,
@@ -809,7 +845,9 @@ class DataSupply:
                 quarantine_reason=quarantine_reason,
                 raw_object_id=raw_object.object_id,
                 raw_sha256=raw_object.checksum,
+                retrieval_receipt_id=str(retrieval_receipt["artifact_id"]),
                 bundle_member_lineage=member_lineage,
+                source_access_mode=source_access_mode,
             )
             if historical_assessment is not None:
                 quarantine_artifacts.append(historical_assessment)
@@ -1375,7 +1413,9 @@ def _historical_qualification_assessment_artifact(
     quarantine_reason: str,
     raw_object_id: str,
     raw_sha256: str,
+    retrieval_receipt_id: str,
     bundle_member_lineage: list[dict[str, object]],
+    source_access_mode: SourceAccessMode,
 ) -> dict[str, object] | None:
     observed_listing_ids = {
         item.listing_id
@@ -1384,6 +1424,8 @@ def _historical_qualification_assessment_artifact(
     }
     if (
         request.mode != "historical"
+        or source_access_mode != "live_provider"
+        or collection.historical_archive_attestation is None
         or quarantine_reason != "historical_evidence_unverified"
         or decoded.schema_version not in _APPROVED_PRICE_SCHEMA_VERSIONS
         or decoded.revision_kind != "original"
@@ -1410,10 +1452,16 @@ def _historical_qualification_assessment_artifact(
             for lineage in bundle_member_lineage
         ],
     ]
+    archive = collection.historical_archive_attestation
+    if archive.revision_as_of > collection.acquired_at:
+        return None
     payload: dict[str, object] = {
         "source_id": request.source_id,
         "source_mode": request.mode,
+        "source_access_mode": source_access_mode,
         "request_id": request.request_id,
+        "retrieval_receipt_id": retrieval_receipt_id,
+        "acquired_at": _instant(collection.acquired_at),
         "schema_version": decoded.schema_version,
         "listing_ids": sorted(request.listing_ids),
         "observed_dataset_ids": sorted(
@@ -1429,6 +1477,18 @@ def _historical_qualification_assessment_artifact(
         "listing_lifecycle_verified": True,
         "reference_graph_version_id": collection.reference_graph_version_id,
         "market_calendar_evidence_version_id": (collection.market_calendar_evidence_version_id),
+        "historical_evidence": {
+            "evidence_level": "archive_attested",
+            "provider_id": archive.provider_id,
+            "archive_id": archive.archive_id,
+            "archive_version_id": archive.archive_version_id,
+            "revision_as_of": _instant(archive.revision_as_of),
+            "credential_version": archive.credential_version,
+            "credential_lease_pin_event_id": archive.credential_lease_pin_event_id,
+            "source_contract_assessment_artifact_id": (
+                archive.source_contract_assessment_artifact_id
+            ),
+        },
     }
     return {
         "artifact_id": _artifact_id("historical_qualification_assessment", payload),
@@ -1742,12 +1802,14 @@ class TaiwanStockPoolManifest:
 
     def __post_init__(self) -> None:
         from stock_forecasting.finmind_provider_contract import (
+            FINMIND_DATA_URL,
             FINMIND_PROVIDER_DISTRIBUTIONS,
             FINMIND_PROVIDER_ID,
         )
 
-        authenticated_member_ids = {
-            member.dataset_id for member in self.authenticated_source_basis.members
+        authenticated_members = {
+            (member.dataset_id, member.distribution_url)
+            for member in self.authenticated_source_basis.members
         }
         if len(self.listings) != self.taiwan_target:
             raise ValueError("taiwan_stock_pool_target_mismatch")
@@ -1755,17 +1817,16 @@ class TaiwanStockPoolManifest:
             self.authenticated_source_basis.source_basis_id != "FINMIND-FREE-TAIWAN-MARKET-DATA-01"
             or self.authenticated_source_basis.provider_id != FINMIND_PROVIDER_ID
             or self.authenticated_source_basis.credential_kind != "bearer_token"
-            or authenticated_member_ids
-            != {distribution.distribution_id for distribution in FINMIND_PROVIDER_DISTRIBUTIONS}
-            or any(
-                member.provider_id != FINMIND_PROVIDER_ID
-                for member in self.authenticated_source_basis.supplemental_references
-            )
+            or authenticated_members
+            != {
+                (distribution.distribution_id, distribution.distribution_url)
+                for distribution in FINMIND_PROVIDER_DISTRIBUTIONS
+            }
             or {
-                member.dataset_id
+                (member.provider_id, member.dataset_id, member.distribution_url)
                 for member in self.authenticated_source_basis.supplemental_references
             }
-            != {"TaiwanStockInfo"}
+            != {(FINMIND_PROVIDER_ID, "TaiwanStockInfo", FINMIND_DATA_URL)}
             or not self.source_path_id
             or not self.authenticated_source_path_id
             or self.authenticated_current_source_id != "finmind-taiwan-stock-price"

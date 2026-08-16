@@ -97,6 +97,7 @@ def test_current_and_historical_sources_use_the_same_collector_decoder_contract(
         mode=request.mode,
         adapter_version="taiwan-price-adapter-v1",
         rate_limit_policy_id="provider-rate-limit-v1",
+        source_access_mode="engineering_double",
         collector=collector,
         decoder=decoder,
     )
@@ -164,6 +165,7 @@ def test_adapter_rejects_a_checkpoint_mismatch_without_decoding() -> None:
         mode="current",
         adapter_version="taiwan-price-adapter-v1",
         rate_limit_policy_id="provider-rate-limit-v1",
+        source_access_mode="engineering_double",
         collector=collector,
         decoder=decoder,
     )
