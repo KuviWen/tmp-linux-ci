@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -37,6 +38,10 @@ from stock_forecasting.data_supply import (
     load_taiwan_stock_pool_manifest,
 )
 from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_DISTRIBUTIONS
+from stock_forecasting.historical_evidence import (
+    HistoricalEvidenceCommand,
+    HistoricalEvidenceWorkflow,
+)
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository, ObjectRef
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_qualification import (
@@ -53,6 +58,194 @@ class _QualificationLiteralAdapter:
 
     def load(self, request: SourcePartitionRequest) -> LoadedSourcePartition:
         return self.loaded
+
+
+def test_independently_verified_claim_can_create_formal_qualification_gate(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 16, 1, 0, tzinfo=UTC)
+    terms_content = b"Pinned OGDL terms for ticket 08 formal qualification"
+    terms_sha256 = hashlib.sha256(terms_content).hexdigest()
+    manifest = load_taiwan_stock_pool_manifest()
+    repository = FilesystemObjectRepository(tmp_path / "objects")
+    archived_manifest, _ = _archive_selection_sources(
+        manifest,
+        repository=repository,
+        acquired_at=datetime(2026, 8, 14, 1, 0, tzinfo=UTC),
+    )
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-08-qualification-governor",
+        environment="development",
+        scopes={"price_qualification.govern"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"public_source"},
+    )
+    required_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_observed_history",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
+    )
+    policy = AuthorizationPolicy(
+        action_grants=(
+            ActionGrant(
+                version_id="ticket-08-formal-gate-grant-v1",
+                principal_id=identity.context.principal_id,
+                actions=frozenset({"price_qualification.govern"}),
+                environment="development",
+                valid_from=now - timedelta(days=1),
+                valid_to=now + timedelta(days=1),
+            ),
+        ),
+        source_policies=tuple(
+            SourcePolicyVersion(
+                version_id=f"ticket-08-{source_id}-policy-v1",
+                dataset_id=source_id,
+                allowed_actions=frozenset({"price_qualification.govern"}),
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="public_source",
+                resource_states=frozenset({"active"}),
+                allowed_uses=required_uses,
+                access_basis="open_data_terms",
+                license_id="OGDL-1.0",
+                terms_url="https://data.gov.tw/license",
+                terms_content_sha256=terms_sha256,
+                attribution="政府資料開放授權條款－第1版（OGDL 1.0）",
+                distributions=tuple(
+                    SourceDistribution(
+                        dataset_id=dataset.dataset_id,
+                        distribution_url=dataset.distribution_url,
+                    )
+                    for dataset in manifest.source_basis.datasets
+                ),
+            )
+            for source_id in (manifest.current_source_id, manifest.historical_source_id)
+        ),
+        source_entitlements=(),
+    )
+    state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
+    listing_id = manifest.listings[0].listing_id
+    evidence = {
+        "schema_version": "historical-reconstruction-evidence/v1",
+        "price_schema_version": "taiwan-unadjusted-eod-v1",
+        "evidence_version": "ticket-08-formal-platform-history-v1",
+        "revision": "rev-1",
+        "observation_kind": "platform_observation",
+        "observation_reference": "platform://ticket-08/formal-taiwan-history",
+        "observed_at": "2026-08-15T22:00:00+00:00",
+        "coverage": {"start": "2019-08-14", "end": "2026-08-14"},
+        "validity": {
+            "valid_from": "2026-08-15T22:00:00+00:00",
+            "valid_until": "2026-09-15T22:00:00+00:00",
+        },
+        "public_terms_url": "https://data.gov.tw/license",
+        "calendar_version": "xtai-realized-calendar-v1",
+        "listings": [
+            {
+                "listing_id": listing_id,
+                "market": "XTAI",
+                "security_id": manifest.listings[0].security_id,
+                "symbols": [
+                    {
+                        "symbol": manifest.listings[0].external_security_code,
+                        "valid_from": "2019-08-14",
+                        "valid_to": None,
+                    }
+                ],
+                "sessions": ["2019-08-14", "2026-08-14"],
+                "unadjusted_prices": [
+                    {"session_date": "2019-08-14", "close": "100.00"},
+                    {"session_date": "2026-08-14", "close": "200.00"},
+                ],
+                "company_actions": [],
+                "company_actions_status": "complete",
+                "lifecycle": [
+                    {
+                        "status": "active",
+                        "effective_date": "2019-08-14",
+                        "source_event_id": "ticket-08-formal-listing",
+                    }
+                ],
+            }
+        ],
+    }
+    content = json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+    evidence_object_id = repository.put_verified(
+        BytesIO(content),
+        expected_checksum=hashlib.sha256(content).hexdigest(),
+        metadata={"content_type": "application/json"},
+    ).object_id
+    claim = HistoricalEvidenceWorkflow(
+        state_store,
+        object_repository=repository,
+        observed_at=now,
+    ).execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id=listing_id,
+            market="XTAI",
+            source_id=manifest.historical_source_id,
+            evidence_level="platform_observed",
+            evidence_object_id=evidence_object_id,
+            source_policy_id=f"ticket-08-{manifest.historical_source_id}-policy-v1",
+            public_terms_url="https://data.gov.tw/license",
+            trace_id="trace-ticket-08-formal-claim",
+        )
+    )
+    assert claim.claim_id is not None
+    workflow = TaiwanPriceQualificationWorkflow(
+        state_store,
+        authorization_policy=policy,
+        security_context=identity.context,
+        clock=lambda: now,
+        object_repository=repository,
+    )
+    source_basis_id = workflow.register_open_data_source_basis_evidence(
+        manifest=manifest,
+        source_id=manifest.historical_source_id,
+        terms_content=terms_content,
+        trace_id="trace-ticket-08-source-basis",
+    )
+
+    gate_id = workflow.register_formal_qualification_gate(
+        manifest=archived_manifest,
+        historical_availability_claim_id=claim.claim_id,
+        source_basis_evidence_id=source_basis_id,
+        trace_id="trace-ticket-08-formal-gate",
+    )
+    gate_payload = state_store.get_verified_governance_artifact(
+        artifact_id=gate_id,
+        artifact_kind="taiwan_price_qualification_gate",
+    )
+    qualified_manifest = archived_manifest.with_formal_qualification_gate(
+        artifact_id=gate_id,
+        payload=gate_payload,
+    )
+    sources: list[dict[str, object]] = [
+        {
+            "source_id": qualified_manifest.current_source_id,
+            "source_mode": "current",
+            "status": "published",
+            "dataset_version_id": "sha256:current-dataset",
+            "adjustment_version_id": "sha256:current-adjustment",
+            "historical_availability_claim_id": None,
+        },
+        {
+            "source_id": qualified_manifest.historical_source_id,
+            "source_mode": "historical",
+            "status": "published",
+            "dataset_version_id": "sha256:historical-dataset",
+            "adjustment_version_id": "sha256:historical-adjustment",
+            "historical_availability_claim_id": claim.claim_id,
+        },
+    ]
+    assert workflow.formal_qualification_available(qualified_manifest, sources) is True
 
 
 def test_historical_claim_cannot_be_minted_without_qualification_authorization() -> None:

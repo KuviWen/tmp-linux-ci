@@ -444,13 +444,20 @@ def create_web_app(application: Application) -> FastAPI:
         request: Request,
         security_context: SecurityContext = research_authentication,
     ) -> dict[str, object] | Response:
+        trace_id = request.headers.get("X-Trace-Id", f"trace-{uuid4()}")
         outcome = application.price_eligibility_query.list_sources(
-            trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+            trace_id=trace_id,
             security_context=security_context,
         )
         if isinstance(outcome, PolicyDeniedOutcome):
             return authorization_denied(request, outcome)
-        return {"items": outcome}
+        historical = application.operations_control.list_historical_qualifications(
+            trace_id=trace_id,
+            security_context=security_context,
+        )
+        if isinstance(historical, PolicyDeniedOutcome):
+            return authorization_denied(request, historical)
+        return {"items": outcome + historical}
 
     @app.get("/api/v1/operations/source-credentials", response_model=None)
     def list_source_credentials(
@@ -944,6 +951,22 @@ for (const button of document.querySelectorAll('[data-operation]')) {
         downstream_text = "、".join(
             f"{name}={escape(str(readiness))}" for name, readiness in downstream_readiness.items()
         )
+        historical = outcome.get("historical_reconstruction")
+        if isinstance(historical, dict):
+            historical_html = (
+                '<section class="panel"><h2>歷史重建</h2><dl>'
+                f"<dt>狀態</dt><dd>{escape(str(historical['status']))}</dd>"
+                f"<dt>原因</dt><dd>{escape(str(historical['reason_code']))}</dd>"
+                "<dt>顯示模式</dt><dd>historical_reconstruction；"
+                "不得視為 production prediction</dd>"
+                "<dt>HistoricalAvailabilityClaim</dt>"
+                f"<dd>{escape(str(historical['claim_id']))}</dd>"
+                f"<dt>FeatureSnapshot</dt><dd>{escape(str(historical['feature_snapshot_id']))}</dd>"
+                f"<dt>Fold manifest</dt><dd>{escape(str(historical['fold_manifest_id']))}</dd>"
+                "</dl></section>"
+            )
+        else:
+            historical_html = ""
         if source_basis.get("basis_type") == "zero_fee_plan":
             provider_name = (
                 "Alpaca Market Data Basic"
@@ -976,6 +999,7 @@ for (const button of document.querySelectorAll('[data-operation]')) {
             f"<p>資料集版本：{escape(str(dataset_id)) if dataset_id else '尚未建立'}</p>"
             f"<p>調整版本：{escape(str(adjustment_id)) if adjustment_id else '尚未建立'}</p>"
             "</section>"
+            f"{historical_html}"
             '<section class="panel"><h2>來源狀態</h2><table><thead><tr>'
             "<th>模式</th><th>來源</th><th>狀態</th><th>原因</th>"
             f"</tr></thead><tbody>{source_rows}</tbody></table></section></main>"

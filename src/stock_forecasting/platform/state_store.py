@@ -1246,6 +1246,98 @@ class StateStore:
             raise KeyError(artifact_id)
         return deepcopy(cast(dict[str, object], payload))
 
+    def publish_historical_evidence_artifact(
+        self,
+        *,
+        artifact_kind: str,
+        payload: dict[str, object],
+        trace_id: str,
+    ) -> str:
+        if artifact_kind not in {
+            "historical_availability_claim",
+            "historical_evidence_verification",
+            "historical_qualification_report",
+            "historical_claim_impact",
+            "historical_reconstruction_dataset",
+            "historical_adjustment_version",
+            "historical_mature_labels",
+            "historical_feature_snapshot",
+            "historical_fold_manifest",
+        }:
+            raise ValueError("unsupported_historical_evidence_artifact_kind")
+        execution_purpose = (
+            "governance"
+            if artifact_kind
+            in {
+                "historical_availability_claim",
+                "historical_evidence_verification",
+                "historical_qualification_report",
+                "historical_claim_impact",
+            }
+            else "historical_reconstruction"
+        )
+        return self._publish_trace_artifact(
+            artifact_kind=artifact_kind,
+            execution_purpose=execution_purpose,
+            payload=payload,
+            trace_id=trace_id,
+            authorization_outcomes=[],
+        )
+
+    def list_historical_claim_impacts(self, *, claim_id: str) -> list[dict[str, object]]:
+        with self.engine.connect() as connection:
+            payloads = connection.execute(
+                select(canonical_artifacts.c.payload)
+                .select_from(
+                    trace_artifact_refs.join(
+                        canonical_artifacts,
+                        trace_artifact_refs.c.artifact_id == canonical_artifacts.c.artifact_id,
+                    )
+                )
+                .where(canonical_artifacts.c.artifact_kind == "historical_claim_impact")
+                .order_by(trace_artifact_refs.c.sequence)
+            ).scalars()
+            return [
+                deepcopy(cast(dict[str, object], payload))
+                for payload in payloads
+                if isinstance(payload, dict) and payload.get("prior_claim_id") == claim_id
+            ]
+
+    def list_historical_qualification_reports(
+        self,
+        *,
+        listing_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    canonical_artifacts.c.artifact_id,
+                    canonical_artifacts.c.payload,
+                )
+                .select_from(
+                    trace_artifact_refs.join(
+                        canonical_artifacts,
+                        trace_artifact_refs.c.artifact_id == canonical_artifacts.c.artifact_id,
+                    )
+                )
+                .where(canonical_artifacts.c.artifact_kind == "historical_qualification_report")
+                .order_by(trace_artifact_refs.c.sequence.desc())
+            ).mappings()
+            reports: list[dict[str, object]] = []
+            for row in rows:
+                payload = row["payload"]
+                if not isinstance(payload, dict):
+                    continue
+                if listing_id is not None and payload.get("listing_id") != listing_id:
+                    continue
+                reports.append(
+                    {
+                        "qualification_report_id": str(row["artifact_id"]),
+                        **deepcopy(cast(dict[str, object], payload)),
+                    }
+                )
+            return reports
+
     def has_canonical_artifact(self, artifact_id: str) -> bool:
         with self.engine.connect() as connection:
             return (

@@ -15,6 +15,7 @@ from stock_forecasting.authorization import (
     authorization_audit_payload,
 )
 from stock_forecasting.data_supply import PRICE_RESEARCH_REQUIRED_USES
+from stock_forecasting.historical_evidence import historical_qualification_projections
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.source_credentials import (
     AuditedSecretCheckout,
@@ -57,6 +58,37 @@ class OperationsControl:
         self._clock = clock
         self._source_adapter_security_context = source_adapter_security_context
         self._source_adapter_authorization_policy = source_adapter_authorization_policy
+
+    def list_historical_qualifications(
+        self,
+        *,
+        trace_id: str,
+        security_context: SecurityContext,
+    ) -> list[dict[str, object]] | PolicyDeniedOutcome:
+        decision = self._authorization_policy.evaluate(
+            security_context,
+            OperationIntent(
+                action="price_research_eligibility.read",
+                dataset_id="price-research-eligibility",
+                purpose="price_research",
+                environment=security_context.environment,
+                resource_state="active",
+                evaluated_at=self._clock(),
+                trace_id=trace_id,
+                correlation_id=trace_id,
+            ),
+        )
+        self._state_store.record_authorization_decision(
+            authorization=authorization_audit_payload(decision),
+            outcome="allowed" if decision.allowed else "denied",
+            trace_id=trace_id,
+        )
+        if not decision.allowed:
+            return PolicyDeniedOutcome.from_decision(decision)
+        return historical_qualification_projections(
+            self._state_store,
+            evaluated_at=self._clock(),
+        )
 
     def list_source_credentials(
         self,

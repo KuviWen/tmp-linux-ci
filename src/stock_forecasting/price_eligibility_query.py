@@ -20,6 +20,7 @@ from stock_forecasting.data_supply import (
     load_taiwan_stock_pool_manifest,
 )
 from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_DISTRIBUTIONS
+from stock_forecasting.historical_evidence import historical_qualification_projections
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_qualification import TaiwanPriceQualificationWorkflow
@@ -60,9 +61,17 @@ class PriceEligibilityQuery:
         if denied is not None:
             return denied
         sources = self._state_store.list_price_research_eligibility(listing_id=listing_id)
-        if not sources:
-            raise KeyError(listing_id)
         evaluated_at = self._authorization_time or datetime.now(UTC)
+        historical_reconstructions = historical_qualification_projections(
+            self._state_store,
+            evaluated_at=evaluated_at,
+            listing_id=listing_id,
+        )
+        historical_reconstruction = (
+            historical_reconstructions[0] if historical_reconstructions else None
+        )
+        if not sources and historical_reconstruction is None:
+            raise KeyError(listing_id)
         sources = self._apply_current_source_rights(
             sources=sources,
             evaluated_at=evaluated_at,
@@ -210,6 +219,7 @@ class PriceEligibilityQuery:
             },
             "checks": checks,
             "sources": sources,
+            "historical_reconstruction": historical_reconstruction,
         }
 
     def list_sources(

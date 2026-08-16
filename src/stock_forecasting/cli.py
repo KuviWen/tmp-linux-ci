@@ -19,6 +19,7 @@ from stock_forecasting.acceptance import (
 from stock_forecasting.acceptance_bundle import is_sha256_reference
 from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
+    build_historical_reconstruction_engineering_authorization_policy,
     build_taiwan_finmind_engineering_authorization_policy,
     build_us_zero_fee_engineering_authorization_policy,
 )
@@ -26,6 +27,7 @@ from stock_forecasting.authorization_repository import (
     FIXTURE_REVOKED_POLICY_SET,
     TICKET_06_FINMIND_ENGINEERING_POLICY_SET,
     TICKET_07_ENGINEERING_POLICY_SET,
+    TICKET_08_ENGINEERING_POLICY_SET,
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
 )
@@ -36,6 +38,7 @@ from stock_forecasting.ticket_06_acceptance import (
     run_ticket_06_source_probe,
 )
 from stock_forecasting.ticket_07_acceptance import run_ticket_07_acceptance
+from stock_forecasting.ticket_08_acceptance import run_ticket_08_acceptance
 
 
 def _instant(value: str) -> datetime:
@@ -143,6 +146,7 @@ def _parser() -> argparse.ArgumentParser:
             "ticket-06",
             "ticket-06-source-probe",
             "ticket-07",
+            "ticket-08",
         ],
     )
     acceptance.add_argument("--database-url", required=True)
@@ -241,6 +245,9 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
     )
+    ticket_08_authorization = authorization_commands.add_parser("init-ticket-08")
+    ticket_08_authorization.add_argument("--database-url", required=True)
+    ticket_08_authorization.add_argument("--key-file", type=Path, required=True)
     return parser
 
 
@@ -256,12 +263,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "ticket-06",
         "ticket-06-source-probe",
         "ticket-07",
+        "ticket-08",
     }:
-        if arguments.ticket not in {"ticket-06", "ticket-06-source-probe", "ticket-07"} and (
-            (arguments.base_url is None) != (arguments.dagster_url is None)
-        ):
+        if arguments.ticket not in {
+            "ticket-06",
+            "ticket-06-source-probe",
+            "ticket-07",
+            "ticket-08",
+        } and ((arguments.base_url is None) != (arguments.dagster_url is None)):
             parser.error("--base-url and --dagster-url must be provided together")
-        if arguments.ticket in {"ticket-06", "ticket-07"}:
+        if arguments.ticket in {"ticket-06", "ticket-07", "ticket-08"}:
             if arguments.base_url is None or arguments.key_file is None:
                 parser.error(f"{arguments.ticket} requires --base-url and --key-file")
             if arguments.ticket == "ticket-07" and (
@@ -271,13 +282,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"{arguments.ticket} requires --source-secret-root and "
                     "--source-adapter-key-file"
                 )
-            report = (
-                run_ticket_06_acceptance(
+            if arguments.ticket == "ticket-06":
+                report = run_ticket_06_acceptance(
                     base_url=arguments.base_url,
                     key_file=arguments.key_file,
                 )
-                if arguments.ticket == "ticket-06"
-                else run_ticket_07_acceptance(
+            elif arguments.ticket == "ticket-07":
+                report = run_ticket_07_acceptance(
                     database_url=arguments.database_url,
                     object_root=arguments.object_root,
                     base_url=arguments.base_url,
@@ -285,7 +296,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     source_adapter_key_file=arguments.source_adapter_key_file,
                     source_secret_root=arguments.source_secret_root,
                 )
-            )
+            else:
+                report = run_ticket_08_acceptance(
+                    database_url=arguments.database_url,
+                    object_root=arguments.object_root,
+                    observed_at=arguments.observed_at,
+                    base_url=arguments.base_url,
+                    key_file=arguments.key_file,
+                )
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
             return 0 if report["status"] == "passed" else 1
         if arguments.ticket == "ticket-06-source-probe":
@@ -500,6 +518,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_us_zero_fee_engineering_authorization_policy(source_adapter_identity.context),
         )
         print(json.dumps({"status": "initialized", "policy_set_count": 2}, sort_keys=True))
+        return 0
+    if arguments.command == "authorization" and arguments.authorization_command == (
+        "init-ticket-08"
+    ):
+        identity = LocalApiKeyIdentity.load(arguments.key_file)
+        repository = AuthorizationPolicyRepository(
+            StateStore(arguments.database_url, create_schema=False)
+        )
+        repository.install(
+            TICKET_08_ENGINEERING_POLICY_SET,
+            build_historical_reconstruction_engineering_authorization_policy(identity.context),
+        )
+        print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
         return 0
     return 2
 

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 from typing import NoReturn
 
@@ -35,6 +37,11 @@ from stock_forecasting.data_supply import (
     SourcePartitionRequest,
     SourceRateLimited,
     TaiwanPriceSourceAdapter,
+)
+from stock_forecasting.historical_evidence import (
+    HistoricalEvidenceCommand,
+    HistoricalEvidenceWorkflow,
+    QualifiedHistoricalAvailabilityClaimVerifier,
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
@@ -851,6 +858,134 @@ def test_stale_qualified_claim_is_quarantined_until_independent_verification(
         "source_retrieval_receipt",
         "quarantine_record",
     ]
+
+
+def test_independently_qualified_claim_unlocks_historical_data_supply(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 16, 1, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="ticket-08-qualified-history-test",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed"},
+    )
+    listing_id = "10000000-0000-4000-8000-000000000001"
+    loaded = _loaded_partition(
+        now=now,
+        listing_id=listing_id,
+        request_id="request-ticket-08-qualified-history",
+        source_revision="revision-ticket-08-qualified-history",
+        raw_payload=b'{"mode":"historical","qualification":"ticket-08"}',
+    )
+    state_store = StateStore(
+        f"sqlite+pysqlite:///{tmp_path / 'ticket-08-qualified-history.db'}",
+        create_schema=True,
+    )
+    object_repository = FilesystemObjectRepository(tmp_path / "objects")
+    evidence = {
+        "schema_version": "historical-reconstruction-evidence/v1",
+        "price_schema_version": "taiwan-unadjusted-eod-v1",
+        "evidence_version": "ticket-08-data-supply-evidence-v1",
+        "revision": "rev-1",
+        "observation_kind": "platform_observation",
+        "observation_reference": "platform://ticket-08/taiwan-history",
+        "observed_at": "2026-08-15T22:00:00+00:00",
+        "coverage": {"start": "2019-08-14", "end": "2026-08-14"},
+        "validity": {
+            "valid_from": "2026-08-15T22:00:00+00:00",
+            "valid_until": "2026-09-15T22:00:00+00:00",
+        },
+        "public_terms_url": "https://example.test/taiwan-platform-terms",
+        "calendar_version": "xtai-realized-calendar-v1",
+        "listings": [
+            {
+                "listing_id": listing_id,
+                "market": "XTAI",
+                "security_id": "security-tw-2330",
+                "symbols": [{"symbol": "2330", "valid_from": "1994-09-05", "valid_to": None}],
+                "sessions": ["2019-08-14", "2026-08-14"],
+                "unadjusted_prices": [
+                    {"session_date": "2019-08-14", "close": "250.00"},
+                    {"session_date": "2026-08-14", "close": "1010.00"},
+                ],
+                "company_actions": [],
+                "company_actions_status": "complete",
+                "lifecycle": [
+                    {
+                        "status": "active",
+                        "effective_date": "1994-09-05",
+                        "source_event_id": "twse-2330-listing",
+                    }
+                ],
+            }
+        ],
+    }
+    content = json.dumps(
+        evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    checksum = hashlib.sha256(content).hexdigest()
+    evidence_object_id = object_repository.put_verified(
+        BytesIO(content),
+        expected_checksum=checksum,
+        metadata={"content_type": "application/json"},
+    ).object_id
+    qualification = HistoricalEvidenceWorkflow(
+        state_store,
+        object_repository=object_repository,
+        observed_at=now,
+    ).execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id=listing_id,
+            market="XTAI",
+            source_id=loaded.collection.source_id,
+            evidence_level="platform_observed",
+            evidence_object_id=evidence_object_id,
+            source_policy_id="policy-ticket-08-taiwan-history-v1",
+            public_terms_url="https://example.test/taiwan-platform-terms",
+            trace_id="trace-ticket-08-independent-qualification",
+        )
+    )
+    assert qualification.claim_id is not None
+    data_supply = DataSupply(
+        authorization_policy=_qualified_price_policy(identity, now),
+        security_context=identity.context,
+        adapters={loaded.collection.source_id: LiteralPriceAdapter(loaded)},
+        object_repository=object_repository,
+        state_store=state_store,
+        clock=lambda: now,
+        historical_claim_verifier=QualifiedHistoricalAvailabilityClaimVerifier(
+            state_store,
+            evaluated_at=now,
+        ),
+    )
+
+    outcome = data_supply.materialize(
+        SourcePartitionRequest(
+            request_id=loaded.collection.request_id,
+            trace_id="trace-ticket-08-qualified-materialization",
+            source_id=loaded.collection.source_id,
+            distribution_id=TWSE_EOD_DISTRIBUTION_ID,
+            distribution_url=TWSE_EOD_DISTRIBUTION_URL,
+            mode="historical",
+            listing_ids=(listing_id,),
+            start_date=loaded.collection.coverage.requested_start,
+            end_date=loaded.collection.coverage.requested_end,
+            expected_checkpoint=None,
+            historical_availability_claim_id=qualification.claim_id,
+        )
+    )
+
+    assert outcome.status == "published"
+    assert outcome.reason_code == "qualified_price_materialized"
+    assert outcome.historical_availability_claim_id == qualification.claim_id
+    assert outcome.dataset_version_id is not None
 
 
 @pytest.mark.parametrize(

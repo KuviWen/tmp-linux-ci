@@ -17,6 +17,9 @@ from stock_forecasting.data_supply import (
     HistoricalAvailabilityClaim,
     TaiwanStockPoolManifest,
 )
+from stock_forecasting.historical_evidence import (
+    QualifiedHistoricalAvailabilityClaimVerifier,
+)
 from stock_forecasting.platform.object_repository import (
     FilesystemObjectRepository,
     ObjectIntegrityError,
@@ -301,13 +304,19 @@ class TaiwanPriceQualificationWorkflow:
 
     def _validate_historical_evidence(
         self,
-        _claim: HistoricalAvailabilityClaim,
+        claim: HistoricalAvailabilityClaim,
+        *,
+        claim_id: str | None = None,
     ) -> None:
-        # Ticket 06 deliberately has no archive-qualification issuer. A candidate
-        # materialization may be preserved and inspected, but Ticket 08 must add
-        # the independent archive manifest/attestation workflow before any
-        # qualified historical claim can be minted.
-        raise ValueError("qualified_claim_requires_historical_evidence")
+        if (
+            claim_id is None
+            or self._clock is None
+            or not QualifiedHistoricalAvailabilityClaimVerifier(
+                self._state_store,
+                evaluated_at=self._clock(),
+            ).is_usable(claim_id=claim_id, claim=claim)
+        ):
+            raise ValueError("qualified_claim_requires_historical_evidence")
 
     def _validate_source_basis_evidence(
         self,
@@ -537,7 +546,7 @@ class TaiwanPriceQualificationWorkflow:
                 or claim.source_id != manifest.historical_source_id
             ):
                 return False
-            self._validate_historical_evidence(claim)
+            self._validate_historical_evidence(claim, claim_id=claim_id)
             gate_payload = self._state_store.get_verified_governance_artifact(
                 artifact_id=gate_id,
                 artifact_kind="taiwan_price_qualification_gate",
@@ -605,7 +614,10 @@ class TaiwanPriceQualificationWorkflow:
                 or claim.source_id != manifest.historical_source_id
             ):
                 raise ValueError("formal_gate_requires_qualified_historical_claim")
-            self._validate_historical_evidence(claim)
+            self._validate_historical_evidence(
+                claim,
+                claim_id=historical_availability_claim_id,
+            )
         except (KeyError, ValueError) as error:
             self._state_store._publish_governance_rejection(
                 payload={

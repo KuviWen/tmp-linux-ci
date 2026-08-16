@@ -1598,6 +1598,17 @@ def build_taiwan_finmind_engineering_authorization_policy(
     )
 
 
+def build_historical_reconstruction_engineering_authorization_policy(
+    context: SecurityContext,
+) -> AuthorizationPolicy:
+    return _build_zero_fee_engineering_authorization_policy(
+        context,
+        distributions=(),
+        namespace="ticket-08-historical-reconstruction",
+        source_basis_id="ENGINEERING-HISTORICAL-RECONSTRUCTION-01",
+    )
+
+
 def _build_zero_fee_engineering_authorization_policy(
     context: SecurityContext,
     *,
