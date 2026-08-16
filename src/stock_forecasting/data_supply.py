@@ -521,13 +521,12 @@ class DataSupply:
                         trace_id=request.trace_id,
                     )
                     return self._publish_policy_blocked(request, member_decision)
-                member_decisions[member.dataset_id] = member_decision
-            for member_decision in member_decisions.values():
                 self._state_store.record_authorization_decision(
                     authorization=authorization_audit_payload(member_decision),
                     outcome="allowed",
                     trace_id=request.trace_id,
                 )
+                member_decisions[member.dataset_id] = member_decision
             return self._materialize_allowed(
                 request,
                 decision,

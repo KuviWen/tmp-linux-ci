@@ -12,6 +12,7 @@ from stock_forecasting.authorization_repository import (
 )
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.runtime import RuntimeSettings
+from stock_forecasting.source_credentials import SecretUseContext
 
 
 def _install_fixture_policy_catalog(
@@ -141,7 +142,22 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
         },
     )
     third = settings.build_application()
-    assert third.secret_provider.checkout(secret_ref.secret_ref_id).credential_fields() == {
+    accessed_at = datetime.now(UTC)
+    use_context = SecretUseContext(
+        workload_principal_id=third.security_context.principal_id,
+        environment=third.security_context.environment,
+        source_id="alpaca-us-stock-bars",
+        destination="alpaca-market-data-basic",
+        purpose="runtime_persistence_test",
+        request_id="request-runtime-persistence",
+        work_id="work-runtime-persistence",
+        credential_version=1,
+        issued_at=accessed_at,
+        lease_duration=timedelta(minutes=5),
+    )
+    assert third.secret_provider.checkout(secret_ref, use_context).credential_fields(
+        accessed_at=accessed_at
+    ) == {
         "api_key_id": "PK-RUNTIME-PERSISTENCE",
         "api_secret_key": "runtime-persistence-secret",
     }

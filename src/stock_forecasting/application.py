@@ -162,6 +162,8 @@ class Application:
                 credential_resolver=ManagedSourceCredentialResolver(
                     self.state_store,
                     self.secret_provider,
+                    workload_principal_id=self.security_context.principal_id,
+                    environment=self.security_context.environment,
                     clock=lambda: self._fixed_security_time or datetime.now(UTC),
                 ),
                 transport=transport,

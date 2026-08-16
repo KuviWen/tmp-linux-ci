@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from email.message import Message
 from urllib.request import Request
@@ -37,7 +37,12 @@ from stock_forecasting.data_supply import (
     SourceRateLimited,
     SymbolIdentityRecord,
 )
-from stock_forecasting.source_credentials import CredentialNotReady
+from stock_forecasting.source_credentials import (
+    CredentialNotReady,
+    SecretLease,
+    SecretRef,
+    SecretUseContext,
+)
 
 
 def _bundle_member_requests() -> tuple[SourceBundleMemberRequest, ...]:
@@ -93,7 +98,15 @@ class MissingCredentialResolver:
     def __init__(self, reason_code: str = "source_credential_missing") -> None:
         self.reason_code = reason_code
 
-    def resolve_valid(self, provider_id: str, *, trace_id: str) -> dict[str, str]:
+    def resolve_valid(
+        self,
+        provider_id: str,
+        *,
+        trace_id: str,
+        request_id: str,
+        work_id: str,
+        source_id: str,
+    ) -> SecretLease:
         raise CredentialNotReady(self.reason_code)
 
 
@@ -101,12 +114,35 @@ class LiteralCredentialResolver:
     def __init__(self) -> None:
         self.provider_ids: list[str] = []
 
-    def resolve_valid(self, provider_id: str, *, trace_id: str) -> dict[str, str]:
+    def resolve_valid(
+        self,
+        provider_id: str,
+        *,
+        trace_id: str,
+        request_id: str,
+        work_id: str,
+        source_id: str,
+    ) -> SecretLease:
         self.provider_ids.append(provider_id)
-        return {
-            "api_key_id": "PK-COLLECTOR-CONTRACT",
-            "api_secret_key": "collector-contract-secret",
-        }
+        return SecretLease(
+            SecretRef("secret-ref:collector-contract"),
+            {
+                "api_key_id": "PK-COLLECTOR-CONTRACT",
+                "api_secret_key": "collector-contract-secret",
+            },
+            SecretUseContext(
+                workload_principal_id="workload:collector-contract",
+                environment="development",
+                source_id=source_id,
+                destination=provider_id,
+                purpose="price_research_ingest",
+                request_id=request_id,
+                work_id=work_id,
+                credential_version=1,
+                issued_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+                lease_duration=timedelta(minutes=5),
+            ),
+        )
 
 
 class SequenceProviderTransport:

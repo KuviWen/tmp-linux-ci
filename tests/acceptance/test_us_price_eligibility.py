@@ -47,6 +47,9 @@ from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.source_credentials import (
     CredentialValidationEvidence,
     CredentialValidationResult,
+    SecretLease,
+    SecretRef,
+    SecretUseContext,
 )
 
 ALPACA_BARS_DISTRIBUTION_ID = "alpaca-us-stock-bars-v2"
@@ -151,12 +154,35 @@ class LiveProviderCredentialRequiredAdapter(CredentialRequiredPriceAdapter):
 
 
 class EngineeringCredentialResolver:
-    def resolve_valid(self, provider_id: str, *, trace_id: str) -> dict[str, str]:
+    def resolve_valid(
+        self,
+        provider_id: str,
+        *,
+        trace_id: str,
+        request_id: str,
+        work_id: str,
+        source_id: str,
+    ) -> SecretLease:
         assert provider_id == "alpaca-market-data-basic"
-        return {
-            "api_key_id": "PK-ENGINEERING-ONLY",
-            "api_secret_key": "engineering-contract-secret",
-        }
+        return SecretLease(
+            SecretRef("secret-ref:engineering-contract"),
+            {
+                "api_key_id": "PK-ENGINEERING-ONLY",
+                "api_secret_key": "engineering-contract-secret",
+            },
+            SecretUseContext(
+                workload_principal_id="workload:engineering-source-adapter",
+                environment="development",
+                source_id=source_id,
+                destination=provider_id,
+                purpose="price_research_ingest",
+                request_id=request_id,
+                work_id=work_id,
+                credential_version=1,
+                issued_at=datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
+                lease_duration=timedelta(minutes=5),
+            ),
+        )
 
 
 class ValidCredentialValidator:
@@ -1060,7 +1086,7 @@ def test_bundle_member_policy_is_checked_before_any_provider_contact(tmp_path: P
         source_policies=tuple(
             source_policy
             for source_policy in policy.source_policies
-            if source_policy.dataset_id != "alpaca-us-corporate-actions-v1"
+            if source_policy.dataset_id != "alpaca-us-trading-calendar-v2"
         ),
         source_entitlements=policy.source_entitlements,
     )
@@ -1096,6 +1122,13 @@ def test_bundle_member_policy_is_checked_before_any_provider_contact(tmp_path: P
     assert outcome.status == "policy_blocked"
     assert adapter.calls == 0
     assert outcome.source_basis_id == ENGINEERING_SOURCE_BASIS_ID
+    audit = state_store.list_audit_events(trace_id=outcome.trace_id)
+    assert [event["dataset_id"] for event in audit] == [
+        "alpaca-us-corporate-actions-v1",
+        ALPACA_SOURCE_ID,
+        "alpaca-us-trading-calendar-v2",
+    ]
+    assert [event["outcome"] for event in audit] == ["allowed", "allowed", "denied"]
 
 
 def test_engineering_contract_cannot_authorize_a_live_provider_adapter(tmp_path: Path) -> None:

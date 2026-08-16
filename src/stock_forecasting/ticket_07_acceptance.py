@@ -87,6 +87,8 @@ def run_ticket_07_acceptance(
             credential_resolver=ManagedSourceCredentialResolver(
                 state_store,
                 secret_provider,
+                workload_principal_id=identity.context.principal_id,
+                environment=identity.context.environment,
             ),
             transport=transport,
             clock=lambda: datetime.now(UTC),

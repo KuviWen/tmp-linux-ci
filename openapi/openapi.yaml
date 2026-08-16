@@ -141,6 +141,7 @@ paths:
         '401': {$ref: '#/components/responses/ProblemResponse'}
         '403': {$ref: '#/components/responses/ProblemResponse'}
         '404': {$ref: '#/components/responses/ProblemResponse'}
+        '413': {$ref: '#/components/responses/ProblemResponse'}
         '422': {$ref: '#/components/responses/ProblemResponse'}
     delete:
       operationId: revokeSourceCredential
@@ -177,6 +178,7 @@ paths:
         '401': {$ref: '#/components/responses/ProblemResponse'}
         '403': {$ref: '#/components/responses/ProblemResponse'}
         '404': {$ref: '#/components/responses/ProblemResponse'}
+        '413': {$ref: '#/components/responses/ProblemResponse'}
         '422': {$ref: '#/components/responses/ProblemResponse'}
   /api/v1/operations/source-credentials/{provider_id}/validations:
     parameters:
@@ -845,10 +847,16 @@ components:
         credential_fields:
           type: object
           minProperties: 1
+          maxProperties: 8
+          propertyNames:
+            minLength: 1
+            maxLength: 128
           additionalProperties:
             type: string
+            minLength: 1
+            maxLength: 4096
             writeOnly: true
-        expires_at: {type: [string, 'null'], format: date-time}
+        expires_at: {type: [string, 'null'], format: date-time, maxLength: 64}
     ProblemDetails:
       type: object
       additionalProperties: false

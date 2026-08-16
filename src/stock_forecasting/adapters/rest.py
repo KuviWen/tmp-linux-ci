@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import cast
+from typing import Annotated, cast
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -16,7 +16,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Res
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from stock_forecasting.application import Application
 from stock_forecasting.authorization import (
@@ -38,9 +39,85 @@ P1_PHASE_BOUNDARIES = {
 }
 
 
+_MAX_REQUEST_BODY_BYTES = 16 * 1024
+CredentialFieldName = Annotated[str, StringConstraints(min_length=1, max_length=128)]
+CredentialFieldValue = Annotated[str, StringConstraints(min_length=1, max_length=4096)]
+
+
 class SourceCredentialWriteRequest(BaseModel):
-    credential_fields: dict[str, str]
-    expires_at: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    credential_fields: Annotated[
+        dict[CredentialFieldName, CredentialFieldValue],
+        Field(min_length=1, max_length=8),
+    ]
+    expires_at: Annotated[str, StringConstraints(max_length=64)] | None = None
+
+
+class _RequestBodyTooLarge(Exception):
+    pass
+
+
+class RequestBodyLimitMiddleware:
+    def __init__(self, app: ASGIApp, *, max_body_bytes: int) -> None:
+        self._app = app
+        self._max_body_bytes = max_body_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        headers = {key.lower(): value for key, value in scope["headers"]}
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                declared_bytes = int(content_length)
+            except ValueError:
+                declared_bytes = 0
+            if declared_bytes > self._max_body_bytes:
+                await self._send_problem(scope, receive, send, headers)
+                return
+        received_bytes = 0
+
+        async def limited_receive() -> Message:
+            nonlocal received_bytes
+            message = await receive()
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body", b""))
+                if received_bytes > self._max_body_bytes:
+                    raise _RequestBodyTooLarge
+            return message
+
+        try:
+            await self._app(scope, limited_receive, send)
+        except _RequestBodyTooLarge:
+            await self._send_problem(scope, receive, send, headers)
+
+    async def _send_problem(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        headers: dict[bytes, bytes],
+    ) -> None:
+        trace_header = headers.get(b"x-trace-id")
+        trace_id = (
+            trace_header.decode("utf-8", errors="replace") if trace_header else f"trace-{uuid4()}"
+        )
+        response = JSONResponse(
+            {
+                "type": "https://example.invalid/problems/request-body-too-large",
+                "title": "Request body too large",
+                "status": 413,
+                "detail": f"The request body exceeds the {self._max_body_bytes}-byte limit.",
+                "instance": scope["path"],
+                "trace_id": trace_id,
+                "code": "request_body_too_large",
+            },
+            status_code=413,
+            media_type="application/problem+json",
+        )
+        await response(scope, receive, send)
 
 
 def _etag(payload: object) -> str:
@@ -143,6 +220,7 @@ def create_web_app(application: Application) -> FastAPI:
         docs_url=None,
         redoc_url=None,
     )
+    app.add_middleware(RequestBodyLimitMiddleware, max_body_bytes=_MAX_REQUEST_BODY_BYTES)
     browser_sessions: dict[str, tuple[SecurityContext, str, float]] = {}
     browser_session_ttl_seconds = 300
     browser_session_max_entries = 256

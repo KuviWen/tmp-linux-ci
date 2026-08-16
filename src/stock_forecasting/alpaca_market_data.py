@@ -814,12 +814,16 @@ class AlpacaSourceCollector:
         if declared_members != self._REQUIRED_BUNDLE_MEMBERS:
             raise ValueError("source_bundle_member_request_mismatch")
         try:
-            credential_fields = self._credential_resolver.resolve_valid(
+            lease = self._credential_resolver.resolve_valid(
                 self._provider_id,
                 trace_id=request.trace_id,
+                request_id=request.request_id,
+                work_id=request.request_id,
+                source_id=request.source_id,
             )
         except CredentialNotReady as error:
             raise SourceCredentialRequired(error.reason_code) from error
+        credential_fields = lease.credential_fields(accessed_at=self._clock())
         if request.source_id != self._source_id:
             raise ValueError("source_adapter_request_mismatch")
         try:

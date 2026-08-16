@@ -249,11 +249,28 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert validation_schema == {"$ref": "#/components/schemas/SourceCredentialValidationResponse"}
     assert "expired" in credential["properties"]["readiness"]["enum"]
     write_request = contract["components"]["schemas"]["SourceCredentialWriteRequest"]
+    assert write_request["additionalProperties"] is False
+    assert write_request["properties"]["credential_fields"]["minProperties"] == 1
+    assert write_request["properties"]["credential_fields"]["maxProperties"] == 8
+    assert write_request["properties"]["credential_fields"]["propertyNames"] == {
+        "minLength": 1,
+        "maxLength": 128,
+    }
     assert write_request["properties"]["credential_fields"]["additionalProperties"] == {
         "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
         "writeOnly": True,
     }
     assert write_request["properties"]["expires_at"] == {
         "type": ["string", "null"],
         "format": "date-time",
+        "maxLength": 64,
     }
+    for path, method in (
+        ("/api/v1/operations/source-credentials/{provider_id}", "put"),
+        ("/api/v1/operations/source-credentials/{provider_id}/rotations", "post"),
+    ):
+        assert contract["paths"][path][method]["responses"]["413"] == {
+            "$ref": "#/components/responses/ProblemResponse"
+        }

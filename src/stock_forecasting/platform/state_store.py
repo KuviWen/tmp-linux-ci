@@ -477,6 +477,21 @@ class StateStore:
                 return
             connection.execute(security_audit_events.insert().values(**expected))
 
+    def get_security_event(self, *, event_id: str) -> dict[str, object] | None:
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(security_audit_events).where(
+                        security_audit_events.c.event_id == event_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        if row is None:
+            return None
+        return deepcopy(dict(row))
+
     def get_authorization_decision(self, *, evaluation_id: str) -> dict[str, object]:
         with self.engine.connect() as connection:
             row = (

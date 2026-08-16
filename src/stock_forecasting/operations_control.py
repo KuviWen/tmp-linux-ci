@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
 
 from stock_forecasting.authorization import (
     AuthorizationAction,
@@ -18,12 +17,16 @@ from stock_forecasting.authorization import (
 from stock_forecasting.data_supply import PRICE_RESEARCH_REQUIRED_USES
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.source_credentials import (
+    AuditedSecretCheckout,
     CredentialValidationEvidence,
     SecretCorruptError,
     SecretProvider,
+    SecretRef,
     SecretUnavailableError,
+    SecretUseContext,
     SourceContractAssessment,
     SourceCredentialValidator,
+    pin_source_credential_lease,
     project_source_credential_readiness,
 )
 from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
@@ -56,6 +59,7 @@ class OperationsControl:
         self._state_store = state_store
         self._authorization_policy = authorization_policy
         self._secret_provider = secret_provider
+        self._secret_checkout = AuditedSecretCheckout(state_store, secret_provider)
         self._source_credential_validators = source_credential_validators
         self._clock = clock
 
@@ -139,7 +143,7 @@ class OperationsControl:
             )
         except Exception:
             try:
-                self._secret_provider.revoke(secret_ref.secret_ref_id)
+                self._secret_provider.revoke(secret_ref)
             except Exception:
                 self._state_store.queue_source_secret_cleanup(
                     secret_ref_id=secret_ref.secret_ref_id,
@@ -195,7 +199,7 @@ class OperationsControl:
             )
         except Exception:
             try:
-                self._secret_provider.revoke(secret_ref.secret_ref_id)
+                self._secret_provider.revoke(secret_ref)
             except Exception:
                 self._state_store.queue_source_secret_cleanup(
                     secret_ref_id=secret_ref.secret_ref_id,
@@ -275,6 +279,8 @@ class OperationsControl:
         expires_at = current.get("expires_at")
         validation_evidence: CredentialValidationEvidence | None
         source_contract_assessment: SourceContractAssessment | None = None
+        expected_version = current["version"]
+        expected_secret_ref_id = str(current["secret_ref_id"])
         if (
             isinstance(expires_at, str)
             and datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= evaluated_at
@@ -285,25 +291,44 @@ class OperationsControl:
                 authentication_status="not_run",
             )
         else:
-            self._state_store.record_security_event(
-                event_id=str(
-                    uuid5(
-                        NAMESPACE_URL,
-                        f"{trace_id}:{provider_id}:{current['version']}:validation-checkout",
-                    )
-                ),
-                action="source_credential.checkout",
-                outcome="allowed",
-                reason_code="source_credential_checkout_authorized",
+            pinned = pin_source_credential_lease(
+                self._state_store,
+                provider_id=provider_id,
+                current=current,
                 trace_id=trace_id,
-                authorization={
-                    "provider_id": provider_id,
-                    "credential_version": current["version"],
-                    "secret_ref_id": current["secret_ref_id"],
-                },
+                workload_principal_id=security_context.principal_id,
+                environment=security_context.environment,
+                source_id=provider_id,
+                destination=provider_id,
+                purpose="source_credential_validation",
+                request_id=trace_id,
+                work_id=trace_id,
+                lease_duration=timedelta(minutes=5),
+            )
+            credential_version = pinned.get("credential_version")
+            secret_ref_id = pinned.get("secret_ref_id")
+            if not isinstance(credential_version, int) or not isinstance(secret_ref_id, str):
+                raise ValueError("source_credential_lease_pin_invalid")
+            expected_version = credential_version
+            expected_secret_ref_id = secret_ref_id
+            use_context = SecretUseContext(
+                workload_principal_id=security_context.principal_id,
+                environment=security_context.environment,
+                source_id=provider_id,
+                destination=provider_id,
+                purpose="source_credential_validation",
+                request_id=trace_id,
+                work_id=trace_id,
+                credential_version=credential_version,
+                issued_at=evaluated_at,
+                lease_duration=timedelta(minutes=5),
             )
             try:
-                lease = self._secret_provider.checkout(str(current["secret_ref_id"]))
+                lease = self._secret_checkout.checkout(
+                    secret_ref_id=secret_ref_id,
+                    trace_id=trace_id,
+                    use_context=use_context,
+                )
             except (SecretUnavailableError, SecretCorruptError) as error:
                 validation_readiness = "validation_failed"
                 validation_reason = str(error.args[0])
@@ -311,7 +336,7 @@ class OperationsControl:
                     authentication_status="not_run",
                 )
             else:
-                credential_fields = lease.credential_fields()
+                credential_fields = lease.credential_fields(accessed_at=evaluated_at)
                 try:
                     validation = validator.validate(credential_fields)
                     serialized_validation = json.dumps(
@@ -346,7 +371,6 @@ class OperationsControl:
                         validation_reason = validation.reason_code
                         validation_evidence = validation.evidence
                         source_contract_assessment = validation.source_contract_assessment
-        expected_version = current["version"]
         if not isinstance(expected_version, int):
             raise ValueError("source_credential_version_invalid")
         return self._state_store.record_source_credential_validation(
@@ -355,7 +379,7 @@ class OperationsControl:
             reason_code=validation_reason,
             validated_at=self._instant(evaluated_at),
             expected_version=expected_version,
-            expected_secret_ref_id=str(current["secret_ref_id"]),
+            expected_secret_ref_id=expected_secret_ref_id,
             validation_evidence=(
                 validation_evidence.as_payload() if validation_evidence is not None else {}
             ),
@@ -426,7 +450,7 @@ class OperationsControl:
             provider_id=provider_id
         ):
             try:
-                self._secret_provider.revoke(secret_ref_id)
+                self._secret_provider.revoke(SecretRef(secret_ref_id))
             except Exception:
                 continue
             self._state_store.complete_source_secret_cleanup(
