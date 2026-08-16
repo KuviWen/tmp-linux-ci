@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from stock_forecasting.authorization import SourceAccessMode
 from stock_forecasting.data_supply import (
     CanonicalPriceRow,
     CollectedSourceBundleMember,
@@ -399,6 +400,8 @@ class UrllibProviderHttpTransport:
 
 
 class AlpacaCredentialValidator:
+    source_access_mode: SourceAccessMode = "live_provider"
+
     _VALIDATION_URL = "https://data.alpaca.markets/v2/stocks/AAPL/bars"
     _VALIDATION_QUERY = {
         "adjustment": "raw",
@@ -501,6 +504,8 @@ class AlpacaCredentialValidator:
 
 
 class AlpacaLiveContractValidator:
+    source_access_mode: SourceAccessMode = "live_provider"
+
     """Opt-in provider contract probe; evidence never contains credential material."""
 
     _REGULAR_SYMBOLS = ("AAPL", "AMZN", "BRK.B", "GME", "GOOG", "GOOGL", "META", "NVDA", "TSM")

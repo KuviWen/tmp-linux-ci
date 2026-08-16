@@ -146,8 +146,10 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
     assert first.local_identity.credential.authorization_header() == (
         second.local_identity.credential.authorization_header()
     )
-    assert first.source_adapter_security_context.principal_id == (
-        adapter_identity.context.principal_id
+    assert first.source_adapter_security_context is not None
+    assert second.source_adapter_security_context is not None
+    assert (
+        first.source_adapter_security_context.principal_id == adapter_identity.context.principal_id
     )
     assert first.source_adapter_security_context.principal_id != first.security_context.principal_id
     secret_ref = first.secret_provider.put(
@@ -179,6 +181,40 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
     persisted = b"".join(path.read_bytes() for path in source_secret_root.iterdir())
     assert b"PK-RUNTIME-PERSISTENCE" not in persisted
     assert b"runtime-persistence-secret" not in persisted
+
+
+def test_runtime_without_a_source_adapter_key_keeps_the_adapter_path_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed_at = datetime(2026, 8, 12, 6, 55, tzinfo=UTC)
+    key_file = tmp_path / "run" / "local-api-key.json"
+    identity = LocalApiKeyIdentity.issue(
+        owner="local-researcher",
+        environment="development",
+        scopes={"fixture_pipeline.execute", "research_prediction.read"},
+        issued_at=observed_at - timedelta(minutes=1),
+        expires_at=observed_at + timedelta(hours=24),
+    )
+    identity.save(key_file)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'runtime-disabled-adapter.db'}"
+    _install_fixture_policy_catalog(database_url, identity)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("OBJECT_ROOT", str(tmp_path / "objects"))
+    monkeypatch.setenv("SOURCE_SECRET_ROOT", str(tmp_path / "source-secrets"))
+    monkeypatch.setenv("FIXTURE_INFORMATION_CUTOFF", "2026-08-12T07:00:00Z")
+    monkeypatch.setenv("FIXTURE_COLLECTION_OBSERVED_AT", "2026-08-12T06:55:00Z")
+    monkeypatch.setenv("RUNTIME_ENVIRONMENT", "development")
+    monkeypatch.setenv("PUBLIC_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("LOCAL_API_KEY_MODE", "enabled")
+    monkeypatch.setenv("LOCAL_API_KEY_FILE", str(key_file))
+    monkeypatch.delenv("SOURCE_ADAPTER_API_KEY_FILE", raising=False)
+    monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", FIXTURE_ACTIVE_POLICY_SET)
+
+    application = RuntimeSettings.from_environment().build_application()
+
+    assert application.source_adapter_security_context is None
+    assert application.alpaca_price_adapter is None
 
 
 def test_runtime_loads_selected_immutable_policy_set_for_denied_adapter_process(

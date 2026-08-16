@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Lock, Timer
 from time import monotonic
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, SupportsIndex
@@ -16,6 +17,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from stock_forecasting.authorization import SourceAccessMode
 from stock_forecasting.platform.state_store import StateStore
 
 _CREDENTIAL_VALIDATION_REASON_CODES = frozenset(
@@ -57,6 +59,23 @@ _SECRET_CHECKOUT_UNAVAILABLE_REASONS = frozenset(
 )
 _SECRET_CHECKOUT_CORRUPT_REASONS = frozenset({"source_credential_secret_corrupt"})
 _MAX_CACHED_SECRET_LEASES = 64
+
+
+class LeaseExpiryHandle(Protocol):
+    def cancel(self) -> None: ...
+
+
+LeaseExpiryScheduler = Callable[[float, Callable[[], None]], LeaseExpiryHandle]
+
+
+def _schedule_lease_expiry(
+    delay_seconds: float,
+    callback: Callable[[], None],
+) -> LeaseExpiryHandle:
+    timer = Timer(delay_seconds, callback)
+    timer.daemon = True
+    timer.start()
+    return timer
 
 
 @dataclass(frozen=True)
@@ -122,6 +141,8 @@ class SecretLease:
         "_credential_version",
         "_expires_at",
         "_issued_at",
+        "_expiry_handle",
+        "_lock",
         "_monotonic_clock",
         "_monotonic_deadline",
         "_purpose",
@@ -137,6 +158,7 @@ class SecretLease:
         *,
         clock: Callable[[], datetime],
         monotonic_clock: Callable[[], float],
+        expiry_scheduler: LeaseExpiryScheduler = _schedule_lease_expiry,
     ) -> None:
         issued_at = clock()
         if issued_at.tzinfo is None or issued_at.utcoffset() is None:
@@ -156,8 +178,16 @@ class SecretLease:
         self._purpose = use_context.purpose
         self._revoked = False
         self._credential_fields = MappingProxyType(dict(credential_fields))
+        self._lock = Lock()
+        self._expiry_handle: LeaseExpiryHandle | None = None
         self._monotonic_clock = monotonic_clock
-        self._monotonic_deadline = monotonic_clock() + (expires_at - issued_at).total_seconds()
+        lease_seconds = (expires_at - issued_at).total_seconds()
+        self._monotonic_deadline = monotonic_clock() + lease_seconds
+        expiry_handle = expiry_scheduler(lease_seconds, self.revoke)
+        with self._lock:
+            self._expiry_handle = expiry_handle
+            if self._revoked:
+                expiry_handle.cancel()
 
     def __repr__(self) -> str:
         return (
@@ -171,7 +201,8 @@ class SecretLease:
 
     @property
     def revoked(self) -> bool:
-        return self._revoked
+        with self._lock:
+            return self._revoked
 
     @property
     def secret_ref_id(self) -> str:
@@ -200,20 +231,33 @@ class SecretLease:
         raise TypeError("secret_lease_not_serializable")
 
     def credential_fields(self) -> dict[str, str]:
-        if self.revoked:
-            raise SecretUnavailableError("source_credential_lease_revoked")
-        if self._monotonic_clock() >= self._monotonic_deadline:
-            self.revoke()
-            raise SecretUnavailableError("source_credential_lease_expired")
-        return dict(self._credential_fields)
+        with self._lock:
+            if self._revoked:
+                raise SecretUnavailableError("source_credential_lease_revoked")
+            if self._monotonic_clock() >= self._monotonic_deadline:
+                self._revoke_locked()
+                raise SecretUnavailableError("source_credential_lease_expired")
+            return dict(self._credential_fields)
 
     @property
     def active(self) -> bool:
-        return not self.revoked and self._monotonic_clock() < self._monotonic_deadline
+        with self._lock:
+            if self._revoked:
+                return False
+            if self._monotonic_clock() >= self._monotonic_deadline:
+                self._revoke_locked()
+                return False
+            return True
 
     def revoke(self) -> None:
+        with self._lock:
+            self._revoke_locked()
+
+    def _revoke_locked(self) -> None:
         self._revoked = True
         self._credential_fields = MappingProxyType({})
+        if self._expiry_handle is not None:
+            self._expiry_handle.cancel()
 
 
 class SecretUnavailableError(KeyError):
@@ -371,6 +415,8 @@ class CredentialValidationResult:
 
 
 class SourceCredentialValidator(Protocol):
+    source_access_mode: SourceAccessMode
+
     def validate(
         self,
         credential_fields: Mapping[str, str],
@@ -523,7 +569,8 @@ class AuditedSecretCheckout:
             supplied_reason = error.args[0] if error.args else None
             reason_code = (
                 supplied_reason
-                if supplied_reason in _SECRET_CHECKOUT_UNAVAILABLE_REASONS
+                if type(supplied_reason) is str
+                and supplied_reason in _SECRET_CHECKOUT_UNAVAILABLE_REASONS
                 else "source_credential_secret_unavailable"
             )
             failure = (SecretUnavailableError, str(reason_code), str(reason_code))
@@ -531,7 +578,8 @@ class AuditedSecretCheckout:
             supplied_reason = error.args[0] if error.args else None
             reason_code = (
                 supplied_reason
-                if supplied_reason in _SECRET_CHECKOUT_CORRUPT_REASONS
+                if type(supplied_reason) is str
+                and supplied_reason in _SECRET_CHECKOUT_CORRUPT_REASONS
                 else "source_credential_secret_corrupt"
             )
             failure = (SecretCorruptError, str(reason_code), str(reason_code))
@@ -770,10 +818,12 @@ class InMemorySecretProvider:
         *,
         clock: Callable[[], datetime] | None = None,
         monotonic_clock: Callable[[], float] = monotonic,
+        expiry_scheduler: LeaseExpiryScheduler | None = None,
     ) -> None:
         self._secrets: dict[str, dict[str, str]] = {}
         self._clock = clock or (lambda: datetime.now(UTC))
         self._monotonic_clock = monotonic_clock
+        self._expiry_scheduler = expiry_scheduler or _schedule_lease_expiry
 
     def put(self, *, provider_id: str, credential_fields: Mapping[str, str]) -> SecretRef:
         secret_ref_id = f"secret-ref:{provider_id}:{uuid4()}"
@@ -791,6 +841,7 @@ class InMemorySecretProvider:
             use_context,
             clock=self._clock,
             monotonic_clock=self._monotonic_clock,
+            expiry_scheduler=self._expiry_scheduler,
         )
 
     def revoke(self, secret_ref: SecretRef) -> None:
@@ -806,10 +857,12 @@ class EncryptedFilesystemSecretProvider:
         *,
         clock: Callable[[], datetime] | None = None,
         monotonic_clock: Callable[[], float] = monotonic,
+        expiry_scheduler: LeaseExpiryScheduler | None = None,
     ) -> None:
         self._root = root
         self._clock = clock or (lambda: datetime.now(UTC))
         self._monotonic_clock = monotonic_clock
+        self._expiry_scheduler = expiry_scheduler or _schedule_lease_expiry
         self._root.mkdir(parents=True, exist_ok=True)
         key_path = self._root / self._KEY_FILENAME
         try:
@@ -855,6 +908,7 @@ class EncryptedFilesystemSecretProvider:
             use_context,
             clock=self._clock,
             monotonic_clock=self._monotonic_clock,
+            expiry_scheduler=self._expiry_scheduler,
         )
 
     def revoke(self, secret_ref: SecretRef) -> None:

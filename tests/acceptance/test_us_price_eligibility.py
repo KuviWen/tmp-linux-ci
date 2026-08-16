@@ -27,6 +27,7 @@ from stock_forecasting.authorization import (
     AuthorizationAction,
     AuthorizationPolicy,
     LocalApiKeyIdentity,
+    SourceAccessMode,
     SourceDistribution,
     SourceEntitlement,
     SourcePolicyVersion,
@@ -189,6 +190,8 @@ class EngineeringCredentialResolver:
 
 
 class ValidCredentialValidator:
+    source_access_mode: SourceAccessMode = "engineering_double"
+
     def validate(self, _credential_fields: Mapping[str, str]) -> CredentialValidationResult:
         return CredentialValidationResult(
             readiness="valid",
@@ -609,14 +612,29 @@ def test_provider_unavailability_is_published_through_materialize_rest_and_ui(
         data_protection_classes={"licensed"},
     )
     policy = _qualified_zero_fee_policy(identity, now)
+    source_adapter_identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-provider-unavailable-adapter",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=1),
+        expires_at=now + timedelta(hours=1),
+        data_protection_classes={"licensed"},
+    )
+    policy_set_id = "ticket-07-provider-unavailable-v1"
     application = build_test_application(
         database_url=f"sqlite+pysqlite:///{tmp_path / 'ticket-07-unavailable.db'}",
         object_root=tmp_path / "objects",
         observed_at=now,
         authorization_time=now,
         local_identity=identity,
+        authorization_policy_set_id=policy_set_id,
         authorization_policy_override=policy,
+        source_adapter_security_context=source_adapter_identity.context,
         source_credential_validators={"alpaca-market-data-basic": ValidCredentialValidator()},
+    )
+    application.authorization_policy_repository.install(
+        policy_set_id,
+        _qualified_zero_fee_policy(source_adapter_identity, now),
     )
     application.operations_control.set_source_credential(
         provider_id="alpaca-market-data-basic",

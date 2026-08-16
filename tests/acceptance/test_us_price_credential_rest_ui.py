@@ -18,8 +18,10 @@ from stock_forecasting.authorization import (
     AuthorizationPolicy,
     LocalApiKeyIdentity,
     PolicyDeniedOutcome,
+    SourceAccessMode,
     SourceEntitlement,
     SourcePolicyVersion,
+    build_us_zero_fee_engineering_authorization_policy,
 )
 from stock_forecasting.data_supply import (
     SourceBundleMemberRequest,
@@ -45,6 +47,8 @@ from stock_forecasting.source_credentials import (
 
 
 class LiteralCredentialValidator:
+    source_access_mode: SourceAccessMode = "engineering_double"
+
     def __init__(self, result: CredentialValidationResult) -> None:
         self.result = result
         self.calls: list[dict[str, str]] = []
@@ -55,6 +59,8 @@ class LiteralCredentialValidator:
 
 
 class CallbackCredentialValidator:
+    source_access_mode: SourceAccessMode = "engineering_double"
+
     def __init__(self) -> None:
         self.callback: Callable[[], None] | None = None
 
@@ -70,8 +76,38 @@ class CallbackCredentialValidator:
 
 
 class SecretBearingExceptionValidator:
+    source_access_mode: SourceAccessMode = "engineering_double"
+
     def validate(self, credential_fields: Mapping[str, str]) -> CredentialValidationResult:
         raise ValueError(f"provider rejected credential fields: {credential_fields}")
+
+
+class ManualLeaseExpiryHandle:
+    def __init__(self, callback: Callable[[], None]) -> None:
+        self.callback = callback
+        self.cancelled = False
+
+    def cancel(self) -> None:
+        self.cancelled = True
+
+
+class ManualLeaseExpiryScheduler:
+    def __init__(self) -> None:
+        self.scheduled: list[tuple[float, ManualLeaseExpiryHandle]] = []
+
+    def __call__(
+        self,
+        delay_seconds: float,
+        callback: Callable[[], None],
+    ) -> ManualLeaseExpiryHandle:
+        handle = ManualLeaseExpiryHandle(callback)
+        self.scheduled.append((delay_seconds, handle))
+        return handle
+
+    def fire_all(self) -> None:
+        for _, handle in tuple(self.scheduled):
+            if not handle.cancelled:
+                handle.callback()
 
 
 class RecordingSecretProvider:
@@ -80,10 +116,12 @@ class RecordingSecretProvider:
         *,
         clock: Callable[[], datetime] | None = None,
         monotonic_clock: Callable[[], float] = monotonic,
+        expiry_scheduler: ManualLeaseExpiryScheduler | None = None,
     ) -> None:
         self.delegate = InMemorySecretProvider(
             clock=clock or (lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC)),
             monotonic_clock=monotonic_clock,
+            expiry_scheduler=expiry_scheduler,
         )
         self.refs: set[str] = set()
         self.fail_put = False
@@ -152,6 +190,8 @@ def _credential_application(
     credential_validator: LiteralCredentialValidator | None = None,
     secret_provider: SecretProvider | None = None,
     source_adapter_identity: LocalApiKeyIdentity | None = None,
+    install_source_adapter_policy: bool = True,
+    source_adapter_enabled: bool = True,
 ) -> tuple[Application, TestClient, dict[str, str]]:
     now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
     identity = LocalApiKeyIdentity.issue(
@@ -199,12 +239,28 @@ def _credential_application(
             ),
         ),
     )
+    resolved_source_adapter_identity = (
+        source_adapter_identity
+        or LocalApiKeyIdentity.issue(
+            owner="ticket-07-alpaca-source-adapter",
+            environment="development",
+            scopes={"market_data.collect"},
+            issued_at=now - timedelta(minutes=1),
+            expires_at=now + timedelta(hours=1),
+            data_protection_classes={"licensed", "secret"},
+            principal_classification="individual_non_commercial",
+        )
+        if source_adapter_enabled
+        else None
+    )
+    policy_set_id = "ticket-07-credential-acceptance-v1"
     application = build_test_application(
         database_url=f"sqlite+pysqlite:///{tmp_path / 'ticket-07.db'}",
         object_root=tmp_path / "objects",
         observed_at=now,
         authorization_time=now,
         local_identity=identity,
+        authorization_policy_set_id=policy_set_id,
         authorization_policy_override=policy,
         source_credential_validators=(
             {"alpaca-market-data-basic": credential_validator}
@@ -213,9 +269,18 @@ def _credential_application(
         ),
         secret_provider=secret_provider,
         source_adapter_security_context=(
-            source_adapter_identity.context if source_adapter_identity is not None else None
+            resolved_source_adapter_identity.context
+            if resolved_source_adapter_identity is not None
+            else None
         ),
     )
+    if install_source_adapter_policy and resolved_source_adapter_identity is not None:
+        application.authorization_policy_repository.install(
+            policy_set_id,
+            build_us_zero_fee_engineering_authorization_policy(
+                resolved_source_adapter_identity.context
+            ),
+        )
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     return application, client, {"Authorization": identity.credential.authorization_header()}
 
@@ -817,6 +882,119 @@ def test_validation_checkout_uses_an_injected_source_adapter_identity(tmp_path: 
     assert checkout_context.workload_principal_id != application.security_context.principal_id
 
 
+@pytest.mark.parametrize(
+    ("adapter_policy_installed", "adapter_expired", "expected_reason"),
+    [
+        (False, False, "action_grant_missing"),
+        (True, True, "identity_expired"),
+    ],
+)
+def test_validation_fails_closed_before_checkout_when_adapter_authorization_is_not_current(
+    tmp_path: Path,
+    adapter_policy_installed: bool,
+    adapter_expired: bool,
+    expected_reason: str,
+) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    adapter_identity = LocalApiKeyIdentity.issue(
+        owner="ticket-07-alpaca-source-adapter",
+        environment="development",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(hours=2),
+        expires_at=(now - timedelta(hours=1) if adapter_expired else now + timedelta(hours=1)),
+        data_protection_classes={"licensed", "secret"},
+        principal_classification="individual_non_commercial",
+    )
+    secret_provider = RecordingSecretProvider(clock=lambda: now)
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+        secret_provider=secret_provider,
+        source_adapter_identity=adapter_identity,
+        install_source_adapter_policy=adapter_policy_installed,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    configured = client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-ADAPTER-AUTHORIZATION",
+                "api_secret_key": "adapter-authorization-secret",
+            }
+        },
+    )
+    assert configured.status_code == 200
+    secret_provider.checkout_calls.clear()
+    trace_id = f"trace-adapter-authorization-{expected_reason}"
+
+    response = client.post(
+        f"{endpoint}/validations",
+        headers={**headers, "X-Trace-Id": trace_id},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "authorization_denied"
+    assert secret_provider.checkout_calls == []
+    assert validator.calls == []
+    audit = application.state_store.list_audit_events(trace_id=trace_id)
+    assert expected_reason in {event["reason_code"] for event in audit}
+    assert "adapter-authorization-secret" not in str(audit)
+
+
+def test_validation_uses_a_disabled_path_when_no_source_adapter_identity_exists(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    secret_provider = RecordingSecretProvider(clock=lambda: now)
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+        secret_provider=secret_provider,
+        source_adapter_enabled=False,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-DISABLED-ADAPTER",
+                "api_secret_key": "disabled-adapter-secret",
+            }
+        },
+    )
+    secret_provider.checkout_calls.clear()
+
+    response = client.post(
+        f"{endpoint}/validations",
+        headers={**headers, "X-Trace-Id": "trace-disabled-source-adapter"},
+    )
+
+    assert application.source_adapter_security_context is None
+    assert application.alpaca_price_adapter is None
+    assert response.status_code == 409
+    assert response.json()["detail"] == "source_adapter_identity_unavailable"
+    assert secret_provider.checkout_calls == []
+    assert validator.calls == []
+    audit = application.state_store.list_audit_events(trace_id="trace-disabled-source-adapter")
+    assert "disabled-adapter-secret" not in str(audit)
+
+
 def test_credential_validation_rejects_arbitrary_secret_bearing_evidence() -> None:
     with pytest.raises(ValueError, match="source_credential_validation_evidence_invalid"):
         CredentialValidationResult(
@@ -1384,6 +1562,63 @@ def test_resolver_revokes_expired_and_capacity_evicted_plaintext_leases(
     assert bounded_first.revoked is True
 
 
+def test_secret_lease_expiry_clears_plaintext_without_another_resolver_call(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+    expiry_scheduler = ManualLeaseExpiryScheduler()
+    secret_provider = RecordingSecretProvider(
+        clock=lambda: now,
+        expiry_scheduler=expiry_scheduler,
+    )
+    validator = LiteralCredentialValidator(
+        CredentialValidationResult(
+            readiness="valid",
+            reason_code="source_credential_valid",
+            evidence=CredentialValidationEvidence(authentication_status="passed"),
+        )
+    )
+    application, client, headers = _credential_application(
+        tmp_path,
+        credential_validator=validator,
+        secret_provider=secret_provider,
+    )
+    endpoint = "/api/v1/operations/source-credentials/alpaca-market-data-basic"
+    client.put(
+        endpoint,
+        headers=headers,
+        json={
+            "credential_fields": {
+                "api_key_id": "PK-IDLE-LEASE",
+                "api_secret_key": "idle-lease-secret",
+            }
+        },
+    )
+    client.post(f"{endpoint}/validations", headers=headers)
+    resolver = ManagedSourceCredentialResolver(
+        application.state_store,
+        secret_provider,
+        workload_principal_id="workload:alpaca-source-adapter",
+        environment="development",
+        clock=lambda: now,
+    )
+    lease = resolver.resolve_valid(
+        "alpaca-market-data-basic",
+        trace_id="trace-idle-lease-expiry",
+        request_id="request-idle-lease-expiry",
+        work_id="work-idle-lease-expiry",
+        source_id="alpaca-us-stock-bars",
+    )
+    assert lease.credential_fields()["api_secret_key"] == "idle-lease-secret"
+    assert {delay for delay, _ in expiry_scheduler.scheduled} == {300.0}
+
+    expiry_scheduler.fire_all()
+
+    assert lease.revoked is True
+    with pytest.raises(SecretUnavailableError, match="source_credential_lease_revoked"):
+        lease.credential_fields()
+
+
 def test_each_failed_secret_checkout_has_a_distinct_terminal_audit(
     tmp_path: Path,
 ) -> None:
@@ -1520,6 +1755,16 @@ def test_successful_checkout_is_not_returned_when_terminal_audit_fails(
             "source_credential_secret_corrupt",
             "source_credential_secret_corrupt",
         ),
+        (
+            SecretUnavailableError({"api_secret_key": "unexpected-checkout-secret"}),
+            "source_credential_secret_unavailable",
+            "source_credential_secret_unavailable",
+        ),
+        (
+            SecretCorruptError(["unexpected-checkout-secret"]),
+            "source_credential_secret_corrupt",
+            "source_credential_secret_corrupt",
+        ),
     ],
 )
 def test_unexpected_secret_provider_failure_has_a_redacted_terminal_audit(
@@ -1573,7 +1818,18 @@ def test_unexpected_secret_provider_failure_has_a_redacted_terminal_audit(
 
     assert "SHOULD-NOT-BE-AUDITED" not in str(raised.value)
     assert "unexpected-checkout-secret" not in str(raised.value)
-    assert "SHOULD-NOT-BE-AUDITED" not in repr(raised.value.__cause__)
+    exception_tree: list[BaseException] = []
+    pending: list[BaseException] = [raised.value]
+    while pending:
+        current = pending.pop()
+        exception_tree.append(current)
+        pending.extend(
+            linked
+            for linked in (current.__cause__, current.__context__)
+            if linked is not None and linked not in exception_tree
+        )
+    assert "SHOULD-NOT-BE-AUDITED" not in repr(exception_tree)
+    assert "unexpected-checkout-secret" not in repr(exception_tree)
 
     events = application.state_store.list_audit_events(trace_id="trace-unexpected-checkout-failure")
     checkout_events = [event for event in events if event["action"] == "source_credential.checkout"]
@@ -1977,6 +2233,13 @@ def test_validation_result_cannot_be_applied_to_a_concurrently_rotated_secret(
         source_credential_validators={"alpaca-market-data-basic": validator},
         clock=lambda: datetime(2026, 8, 15, 8, 0, tzinfo=UTC),
         source_adapter_security_context=application.source_adapter_security_context,
+        source_adapter_authorization_policy=lambda: (
+            build_us_zero_fee_engineering_authorization_policy(
+                application.source_adapter_security_context
+            )
+            if application.source_adapter_security_context is not None
+            else AuthorizationPolicy((), (), ())
+        ),
     )
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     client.put(

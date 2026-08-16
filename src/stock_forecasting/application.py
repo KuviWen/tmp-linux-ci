@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import mkdtemp
@@ -70,19 +70,20 @@ class Application:
         authorization_policy_set_id: str,
         authorization_policy_bootstrap: AuthorizationPolicy | None,
         fixed_security_time: datetime | None,
-        source_adapter_security_context: SecurityContext,
+        source_adapter_security_context: SecurityContext | None,
         secret_provider: SecretProvider | None = None,
         source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
         self.local_identity = local_identity
         self.security_context: SecurityContext = local_identity.context
-        if source_adapter_security_context.principal_id == self.security_context.principal_id:
-            raise ValueError("source_adapter_identity_must_be_distinct")
-        if source_adapter_security_context.environment != self.security_context.environment:
-            raise ValueError("source_adapter_identity_environment_mismatch")
-        if source_adapter_security_context.scopes != frozenset({"market_data.collect"}):
-            raise ValueError("source_adapter_identity_scope_invalid")
+        if source_adapter_security_context is not None:
+            if source_adapter_security_context.principal_id == self.security_context.principal_id:
+                raise ValueError("source_adapter_identity_must_be_distinct")
+            if source_adapter_security_context.environment != self.security_context.environment:
+                raise ValueError("source_adapter_identity_environment_mismatch")
+            if source_adapter_security_context.scopes != frozenset({"market_data.collect"}):
+                raise ValueError("source_adapter_identity_scope_invalid")
         self.source_adapter_security_context = source_adapter_security_context
         self.authorization_policy_repository = AuthorizationPolicyRepository(self.state_store)
         if authorization_policy_bootstrap is not None:
@@ -119,6 +120,17 @@ class Application:
         self.secret_provider = secret_provider or InMemorySecretProvider(
             clock=lambda: self._fixed_security_time or datetime.now(UTC)
         )
+        source_adapter_authorization_policy: Callable[[], AuthorizationPolicy] | None = None
+        if self.source_adapter_security_context is not None:
+            source_adapter_principal_id = self.source_adapter_security_context.principal_id
+
+            def load_source_adapter_authorization_policy() -> AuthorizationPolicy:
+                return self.authorization_policy_repository.get(
+                    authorization_policy_set_id,
+                    principal_id=source_adapter_principal_id,
+                )
+
+            source_adapter_authorization_policy = load_source_adapter_authorization_policy
         self.operations_control = OperationsControl(
             self.state_store,
             authorization_policy=self.authorization_policy,
@@ -126,10 +138,15 @@ class Application:
             source_credential_validators=source_credential_validators or {},
             clock=lambda: self._fixed_security_time or datetime.now(UTC),
             source_adapter_security_context=self.source_adapter_security_context,
+            source_adapter_authorization_policy=source_adapter_authorization_policy,
         )
-        self.alpaca_price_adapter = self.build_alpaca_price_adapter(
-            transport=UrllibProviderHttpTransport(),
-            source_access_mode="live_provider",
+        self.alpaca_price_adapter = (
+            self.build_alpaca_price_adapter(
+                transport=UrllibProviderHttpTransport(),
+                source_access_mode="live_provider",
+            )
+            if self.source_adapter_security_context is not None
+            else None
         )
         self._relay_fault = relay_fault or NoRelayFault()
         self._event_compatibility = event_compatibility or EventCompatibility.current()
@@ -159,6 +176,8 @@ class Application:
         transport: ProviderHttpTransport,
         source_access_mode: SourceAccessMode,
     ) -> AlpacaPriceSourceAdapter:
+        if self.source_adapter_security_context is None:
+            raise ValueError("source_adapter_identity_unavailable")
         reference_graph = load_candidate_alpaca_reference_graph()
         market_calendar_evidence = load_candidate_alpaca_market_calendar_evidence()
         return AlpacaPriceSourceAdapter(
@@ -193,12 +212,11 @@ class Application:
         self,
         principal_id: str,
     ) -> CurrentSourcePrincipalAttributes:
-        contexts = {
-            self.security_context.principal_id: self.security_context,
-            self.source_adapter_security_context.principal_id: (
+        contexts = {self.security_context.principal_id: self.security_context}
+        if self.source_adapter_security_context is not None:
+            contexts[self.source_adapter_security_context.principal_id] = (
                 self.source_adapter_security_context
-            ),
-        }
+            )
         context = contexts.get(principal_id)
         if context is None:
             raise KeyError("source_principal_attributes_unavailable")
@@ -271,18 +289,6 @@ def build_test_application(
             policy_markets=policy_markets,
         )
     )
-    resolved_source_adapter_context = (
-        source_adapter_security_context
-        or LocalApiKeyIdentity.issue(
-            owner="test-source-adapter",
-            environment=resolved_identity.context.environment,
-            scopes={"market_data.collect"},
-            issued_at=identity_time - timedelta(minutes=1),
-            expires_at=identity_time + timedelta(hours=1),
-            data_protection_classes={"licensed", "secret"},
-            principal_classification="individual_non_commercial",
-        ).context
-    )
     return Application(
         observed_at=observed_at,
         object_root=root,
@@ -296,7 +302,7 @@ def build_test_application(
         authorization_policy_set_id=authorization_policy_set_id or f"test-policy-{uuid4()}",
         authorization_policy_bootstrap=authorization_policy_bootstrap,
         fixed_security_time=authorization_time or observed_at,
-        source_adapter_security_context=resolved_source_adapter_context,
+        source_adapter_security_context=source_adapter_security_context,
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
     )
@@ -317,18 +323,6 @@ def build_application(
     secret_provider: SecretProvider | None = None,
     source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
 ) -> Application:
-    resolved_source_adapter_context = (
-        source_adapter_security_context
-        or LocalApiKeyIdentity.issue(
-            owner="acceptance-source-adapter",
-            environment=local_identity.context.environment,
-            scopes={"market_data.collect"},
-            issued_at=observed_at - timedelta(minutes=1),
-            expires_at=observed_at + timedelta(hours=1),
-            data_protection_classes={"licensed", "secret"},
-            principal_classification="individual_non_commercial",
-        ).context
-    )
     return Application(
         observed_at=observed_at,
         object_root=object_root,
@@ -342,7 +336,7 @@ def build_application(
         authorization_policy_set_id=authorization_policy_set_id,
         authorization_policy_bootstrap=None,
         fixed_security_time=None,
-        source_adapter_security_context=resolved_source_adapter_context,
+        source_adapter_security_context=source_adapter_security_context,
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
     )

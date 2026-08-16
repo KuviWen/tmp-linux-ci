@@ -45,6 +45,28 @@ _SOURCE_CREDENTIAL_PROVIDERS: tuple[dict[str, object], ...] = (
         "key_management_url": "https://app.alpaca.markets/paper/dashboard/overview",
     },
 )
+_SOURCE_CREDENTIAL_VALIDATION_TARGETS: dict[
+    str,
+    tuple[tuple[str, str, str], ...],
+] = {
+    "alpaca-market-data-basic": (
+        (
+            "alpaca-us-stock-bars",
+            "alpaca-us-stock-bars-v2",
+            "https://data.alpaca.markets/v2/stocks/bars",
+        ),
+        (
+            "alpaca-us-corporate-actions-v1",
+            "alpaca-us-corporate-actions-v1",
+            "https://data.alpaca.markets/v1/corporate-actions",
+        ),
+        (
+            "alpaca-us-trading-calendar-v2",
+            "alpaca-us-trading-calendar-v2",
+            "https://paper-api.alpaca.markets/v2/calendar",
+        ),
+    ),
+}
 
 
 class OperationsControl:
@@ -56,7 +78,8 @@ class OperationsControl:
         secret_provider: SecretProvider,
         source_credential_validators: Mapping[str, SourceCredentialValidator],
         clock: Callable[[], datetime],
-        source_adapter_security_context: SecurityContext,
+        source_adapter_security_context: SecurityContext | None,
+        source_adapter_authorization_policy: Callable[[], AuthorizationPolicy] | None,
     ) -> None:
         self._state_store = state_store
         self._authorization_policy = authorization_policy
@@ -66,6 +89,7 @@ class OperationsControl:
         self._source_credential_validators = source_credential_validators
         self._clock = clock
         self._source_adapter_security_context = source_adapter_security_context
+        self._source_adapter_authorization_policy = source_adapter_authorization_policy
 
     def list_source_credentials(
         self,
@@ -313,6 +337,29 @@ class OperationsControl:
                 authentication_status="not_run",
             )
         else:
+            if (
+                self._source_adapter_security_context is None
+                or self._source_adapter_authorization_policy is None
+            ):
+                self._state_store.record_authorization_decision(
+                    authorization=authorization,
+                    outcome="allowed",
+                    trace_id=trace_id,
+                )
+                raise ValueError("source_adapter_identity_unavailable")
+            adapter_denial = self._authorize_source_adapter_validation(
+                provider_id=provider_id,
+                validator=validator,
+                trace_id=trace_id,
+                evaluated_at=evaluated_at,
+            )
+            if adapter_denial is not None:
+                self._state_store.record_authorization_decision(
+                    authorization=authorization,
+                    outcome="allowed",
+                    trace_id=trace_id,
+                )
+                return adapter_denial
             pinned = pin_source_credential_lease(
                 self._state_store,
                 provider_id=provider_id,
@@ -422,6 +469,55 @@ class OperationsControl:
             authorization=authorization,
             trace_id=trace_id,
         )
+
+    def _authorize_source_adapter_validation(
+        self,
+        *,
+        provider_id: str,
+        validator: SourceCredentialValidator,
+        trace_id: str,
+        evaluated_at: datetime,
+    ) -> PolicyDeniedOutcome | None:
+        context = self._source_adapter_security_context
+        policy_loader = self._source_adapter_authorization_policy
+        if context is None or policy_loader is None:
+            raise ValueError("source_adapter_identity_unavailable")
+        try:
+            policy = policy_loader()
+        except KeyError:
+            policy = AuthorizationPolicy(
+                action_grants=(),
+                source_policies=(),
+                source_entitlements=(),
+            )
+        for dataset_id, distribution_id, distribution_url in _SOURCE_CREDENTIAL_VALIDATION_TARGETS[
+            provider_id
+        ]:
+            decision = policy.evaluate(
+                context,
+                OperationIntent(
+                    action="market_data.collect",
+                    dataset_id=dataset_id,
+                    purpose="price_research",
+                    environment=context.environment,
+                    resource_state="active",
+                    evaluated_at=evaluated_at,
+                    trace_id=trace_id,
+                    correlation_id=trace_id,
+                    required_uses=PRICE_RESEARCH_REQUIRED_USES,
+                    distribution_id=distribution_id,
+                    distribution_url=distribution_url,
+                    source_access_mode=validator.source_access_mode,
+                ),
+            )
+            self._state_store.record_authorization_decision(
+                authorization=authorization_audit_payload(decision),
+                outcome="allowed" if decision.allowed else "denied",
+                trace_id=trace_id,
+            )
+            if not decision.allowed:
+                return PolicyDeniedOutcome.from_decision(decision)
+        return None
 
     def _authorize(
         self,
