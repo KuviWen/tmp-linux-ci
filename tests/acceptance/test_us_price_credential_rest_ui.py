@@ -48,6 +48,7 @@ from stock_forecasting.source_credentials import (
     SourceContractAssessment,
     SourceCredentialValidator,
 )
+from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
 
 class LiteralCredentialValidator:
@@ -766,6 +767,7 @@ def test_alpaca_credential_can_be_revoked_without_erasing_prior_metadata(
 def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
     tmp_path: Path,
 ) -> None:
+    manifest = load_us_stock_pool_manifest()
     validator = LiteralCredentialValidator(
         CredentialValidationResult(
             readiness="valid",
@@ -784,6 +786,9 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
                     "alpaca-us-trading-calendar-v2",
                 ),
                 symbol_lifecycle_probe="passed",
+                universe_manifest_id=manifest.manifest_id,
+                reference_graph_version_id=manifest.selection_evidence_version,
+                listing_ids=tuple(listing.listing_id for listing in manifest.listings),
             ),
         )
     )
@@ -830,6 +835,9 @@ def test_alpaca_credential_validation_uses_the_secret_without_returning_it(
             "alpaca-us-trading-calendar-v2",
         ],
         "symbol_lifecycle_probe": "passed",
+        "universe_manifest_id": manifest.manifest_id,
+        "reference_graph_version_id": manifest.selection_evidence_version,
+        "listing_ids": [listing.listing_id for listing in manifest.listings],
         "source_contract_reason_code": None,
     }
     assert re.fullmatch(
@@ -1178,10 +1186,27 @@ def test_passed_source_contract_assessment_requires_contract_specific_evidence(
         SourceContractAssessment(**assessment_fields)  # type: ignore[arg-type]
 
 
+def test_passed_live_source_contract_assessment_requires_versioned_universe_identity() -> None:
+    with pytest.raises(ValueError, match="source_contract_assessment_invalid"):
+        SourceContractAssessment(
+            contract_id="alpaca-ticket-07-live-v1",
+            live_validation="passed",
+            ticker_count=10,
+            pagination_pages=2,
+            datasets=(
+                "alpaca-us-stock-bars-v2",
+                "alpaca-us-corporate-actions-v1",
+                "alpaca-us-trading-calendar-v2",
+            ),
+            symbol_lifecycle_probe="passed",
+        )
+
+
 def test_operations_rejects_validator_output_that_echoes_a_credential_value(
     tmp_path: Path,
 ) -> None:
     secret_value = "alpaca-ticket-07-live-v1"
+    manifest = load_us_stock_pool_manifest()
     validator = LiteralCredentialValidator(
         CredentialValidationResult(
             readiness="valid",
@@ -1198,6 +1223,9 @@ def test_operations_rejects_validator_output_that_echoes_a_credential_value(
                     "alpaca-us-trading-calendar-v2",
                 ),
                 symbol_lifecycle_probe="passed",
+                universe_manifest_id=manifest.manifest_id,
+                reference_graph_version_id=manifest.selection_evidence_version,
+                listing_ids=tuple(listing.listing_id for listing in manifest.listings),
             ),
         )
     )

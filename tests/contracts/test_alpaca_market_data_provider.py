@@ -43,6 +43,7 @@ from stock_forecasting.source_credentials import (
     SecretRef,
     SecretUseContext,
 )
+from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
 
 def _bundle_member_requests() -> tuple[SourceBundleMemberRequest, ...]:
@@ -551,7 +552,21 @@ def test_alpaca_credential_validator_separates_auth_from_source_contract_health(
 
 
 def test_alpaca_live_contract_probes_pool_data_pagination_actions_and_calendar() -> None:
-    regular_symbols = "AAPL,AMZN,BRK.B,GME,GOOG,GOOGL,META,NVDA,TSM"
+    manifest = load_us_stock_pool_manifest()
+    listing_ids = tuple(listing.listing_id for listing in manifest.listings)
+    regular_symbols = ",".join(
+        sorted(
+            alias.security_code
+            for listing in manifest.listings
+            for alias in listing.external_aliases
+            if alias.valid_to is None
+        )
+    )
+    historical_delisting_symbol = next(
+        listing.external_security_code
+        for listing in manifest.listings
+        if "historical_delisting" in listing.coverage_cases
+    )
     transport = SequenceProviderTransport(
         [
             ProviderHttpResponse(
@@ -619,6 +634,9 @@ def test_alpaca_live_contract_probes_pool_data_pagination_actions_and_calendar()
         "ticker_count": 10,
         "pagination_pages": 2,
         "symbol_lifecycle_probe": "passed",
+        "universe_manifest_id": manifest.manifest_id,
+        "reference_graph_version_id": manifest.selection_evidence_version,
+        "listing_ids": list(listing_ids),
         "datasets": [
             "alpaca-us-stock-bars-v2",
             "alpaca-us-corporate-actions-v1",
@@ -636,7 +654,7 @@ def test_alpaca_live_contract_probes_pool_data_pagination_actions_and_calendar()
         "https://paper-api.alpaca.markets/v2/calendar",
     ]
     assert transport.requests[0].query["symbols"] == regular_symbols
-    assert transport.requests[1].query["symbols"] == "SIVB"
+    assert transport.requests[1].query["symbols"] == historical_delisting_symbol
     assert transport.requests[2].query["limit"] == "1"
     assert transport.requests[2].query["symbols"] == "AAPL"
     assert transport.requests[3].query["page_token"] == "live-page-2"

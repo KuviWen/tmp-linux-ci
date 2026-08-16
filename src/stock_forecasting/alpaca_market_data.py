@@ -50,6 +50,7 @@ from stock_forecasting.source_credentials import (
     SourceContractAssessment,
     SourceCredentialResolver,
 )
+from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
 
 @dataclass(frozen=True)
@@ -519,13 +520,66 @@ class AlpacaLiveContractValidator:
 
     """Opt-in provider contract probe; evidence never contains credential material."""
 
-    _REGULAR_SYMBOLS = ("AAPL", "AMZN", "BRK.B", "GME", "GOOG", "GOOGL", "META", "NVDA", "TSM")
     _BARS_URL = ALPACA_BARS_DISTRIBUTION.distribution_url
     _ACTIONS_URL = ALPACA_CORPORATE_ACTIONS_DISTRIBUTION.distribution_url
     _CALENDAR_URL = ALPACA_TRADING_CALENDAR_DISTRIBUTION.distribution_url
 
     def __init__(self, transport: ProviderHttpTransport) -> None:
         self._transport = transport
+        self._manifest = load_us_stock_pool_manifest()
+        self._reference_graph = load_candidate_alpaca_reference_graph()
+        manifest_listing_ids = tuple(listing.listing_id for listing in self._manifest.listings)
+        graph_listing_ids = tuple(listing.listing_id for listing in self._reference_graph.listings)
+        if (
+            self._reference_graph.version_id != self._manifest.selection_evidence_version
+            or graph_listing_ids != manifest_listing_ids
+        ):
+            raise ValueError("alpaca_live_probe_universe_invalid")
+        self._listing_ids = manifest_listing_ids
+        self._regular_symbols = tuple(
+            sorted(
+                alias.security_code
+                for listing in self._reference_graph.listings
+                for alias in listing.aliases
+                if alias.valid_to is None
+            )
+        )
+        historical_delistings = tuple(
+            listing
+            for listing in self._manifest.listings
+            if "historical_delisting" in listing.coverage_cases
+        )
+        ticker_changes = tuple(
+            listing
+            for listing in self._manifest.listings
+            if "ticker_change" in listing.coverage_cases
+        )
+        company_actions = tuple(
+            listing
+            for listing in self._manifest.listings
+            if "company_action" in listing.coverage_cases
+        )
+        if len(historical_delistings) != 1 or len(ticker_changes) != 1 or not company_actions:
+            raise ValueError("alpaca_live_probe_universe_invalid")
+        self._historical_delisting_symbol = historical_delistings[0].external_security_code
+        ticker_change_aliases = tuple(
+            sorted(
+                ticker_changes[0].external_aliases,
+                key=lambda alias: alias.valid_from or date.min,
+            )
+        )
+        if len(ticker_change_aliases) != 2:
+            raise ValueError("alpaca_live_probe_universe_invalid")
+        old_ticker_alias, new_ticker_alias = ticker_change_aliases
+        old_ticker_valid_to = old_ticker_alias.valid_to
+        new_ticker_valid_from = new_ticker_alias.valid_from
+        if old_ticker_valid_to is None or new_ticker_valid_from is None:
+            raise ValueError("alpaca_live_probe_universe_invalid")
+        self._old_ticker_alias = old_ticker_alias
+        self._new_ticker_alias = new_ticker_alias
+        self._old_ticker_valid_to = old_ticker_valid_to
+        self._new_ticker_valid_from = new_ticker_valid_from
+        self._company_action_symbol = company_actions[0].external_security_code
 
     def validate(
         self,
@@ -547,14 +601,14 @@ class AlpacaLiveContractValidator:
                 "end": "2024-01-04T00:00:00Z",
                 "feed": "sip",
                 "start": "2024-01-03T00:00:00Z",
-                "symbols": ",".join(self._REGULAR_SYMBOLS),
+                "symbols": ",".join(self._regular_symbols),
                 "timeframe": "1Day",
             },
             headers,
         )
         if isinstance(regular, CredentialValidationResult):
             return regular
-        if not self._valid_multi_symbol_bars(regular, set(self._REGULAR_SYMBOLS)):
+        if not self._valid_multi_symbol_bars(regular, set(self._regular_symbols)):
             return self._source_contract_failure("source_contract_schema_invalid")
 
         sivb = self._request_json(
@@ -564,14 +618,14 @@ class AlpacaLiveContractValidator:
                 "end": "2023-03-09T00:00:00Z",
                 "feed": "sip",
                 "start": "2023-03-08T00:00:00Z",
-                "symbols": "SIVB",
+                "symbols": self._historical_delisting_symbol,
                 "timeframe": "1Day",
             },
             headers,
         )
         if isinstance(sivb, CredentialValidationResult):
             return self._after_authentication(sivb)
-        if not self._valid_multi_symbol_bars(sivb, {"SIVB"}):
+        if not self._valid_multi_symbol_bars(sivb, {self._historical_delisting_symbol}):
             return self._source_contract_failure("source_contract_schema_invalid")
 
         pagination_pages = 0
@@ -584,7 +638,7 @@ class AlpacaLiveContractValidator:
                 "feed": "sip",
                 "limit": "1",
                 "start": "2024-01-03T00:00:00Z",
-                "symbols": "AAPL",
+                "symbols": self._company_action_symbol,
                 "timeframe": "1Day",
             }
             if page_token is not None:
@@ -592,7 +646,7 @@ class AlpacaLiveContractValidator:
             page = self._request_json(self._BARS_URL, query, headers)
             if isinstance(page, CredentialValidationResult):
                 return self._after_authentication(page)
-            if not self._valid_single_symbol_page(page):
+            if not self._valid_single_symbol_page(page, self._company_action_symbol):
                 return self._source_contract_failure("source_contract_schema_invalid")
             pagination_pages += 1
             next_token = cast(dict[str, object], page).get("next_page_token")
@@ -612,7 +666,11 @@ class AlpacaLiveContractValidator:
 
         actions = self._request_json(
             self._ACTIONS_URL,
-            {"symbols": "AAPL", "start": "2024-02-01", "end": "2024-02-29"},
+            {
+                "symbols": self._company_action_symbol,
+                "start": "2024-02-01",
+                "end": "2024-02-29",
+            },
             headers,
         )
         if isinstance(actions, CredentialValidationResult):
@@ -620,7 +678,7 @@ class AlpacaLiveContractValidator:
         dividends = cast(dict[str, object], actions).get("cash_dividends")
         if not isinstance(dividends, list) or not any(
             isinstance(item, dict)
-            and item.get("symbol") == "AAPL"
+            and item.get("symbol") == self._company_action_symbol
             and isinstance(item.get("rate"), str | int | float)
             and isinstance(item.get("ex_date"), str)
             for item in dividends
@@ -630,9 +688,14 @@ class AlpacaLiveContractValidator:
         name_changes = self._request_json(
             self._ACTIONS_URL,
             {
-                "end": "2022-06-10",
-                "start": "2022-06-08",
-                "symbols": "FB,META",
+                "end": (self._new_ticker_valid_from + timedelta(days=1)).isoformat(),
+                "start": self._old_ticker_valid_to.isoformat(),
+                "symbols": ",".join(
+                    (
+                        self._old_ticker_alias.security_code,
+                        self._new_ticker_alias.security_code,
+                    )
+                ),
                 "types": "name_change",
             },
             headers,
@@ -642,24 +705,27 @@ class AlpacaLiveContractValidator:
         name_change_rows = cast(dict[str, object], name_changes).get("name_changes")
         if not isinstance(name_change_rows, list) or not any(
             isinstance(item, dict)
-            and item.get("old_symbol") == "FB"
-            and item.get("new_symbol") == "META"
-            and item.get("process_date") == "2022-06-09"
+            and item.get("old_symbol") == self._old_ticker_alias.security_code
+            and item.get("new_symbol") == self._new_ticker_alias.security_code
+            and item.get("process_date") == self._new_ticker_valid_from.isoformat()
             for item in name_change_rows
         ):
             return self._source_contract_failure("source_contract_schema_invalid")
 
         calendar = self._request_json(
             self._CALENDAR_URL,
-            {"start": "2024-11-29", "end": "2024-11-29"},
+            {
+                "start": self._manifest.market_calendar_evidence.session_date.isoformat(),
+                "end": self._manifest.market_calendar_evidence.session_date.isoformat(),
+            },
             headers,
         )
         if isinstance(calendar, CredentialValidationResult):
             return self._after_authentication(calendar)
         if not isinstance(calendar, list) or not any(
             isinstance(item, dict)
-            and item.get("date") == "2024-11-29"
-            and item.get("close") == "13:00"
+            and item.get("date") == self._manifest.market_calendar_evidence.session_date.isoformat()
+            and item.get("close") == self._manifest.market_calendar_evidence.close_time
             for item in calendar
         ):
             return self._source_contract_failure("source_contract_schema_invalid")
@@ -673,9 +739,12 @@ class AlpacaLiveContractValidator:
             source_contract_assessment=SourceContractAssessment(
                 contract_id=ALPACA_LIVE_VALIDATION_CONTRACT_ID,
                 live_validation="passed",
-                ticker_count=10,
+                ticker_count=len(self._listing_ids),
                 pagination_pages=pagination_pages,
                 symbol_lifecycle_probe="passed",
+                universe_manifest_id=self._manifest.manifest_id,
+                reference_graph_version_id=self._reference_graph.version_id,
+                listing_ids=self._listing_ids,
                 datasets=tuple(
                     distribution.distribution_id for distribution in ALPACA_PROVIDER_DISTRIBUTIONS
                 ),
@@ -722,14 +791,14 @@ class AlpacaLiveContractValidator:
         )
 
     @classmethod
-    def _valid_single_symbol_page(cls, payload: object) -> bool:
+    def _valid_single_symbol_page(cls, payload: object, symbol: str) -> bool:
         if not isinstance(payload, dict):
             return False
         bars = payload.get("bars")
         return (
             isinstance(bars, dict)
-            and isinstance(bars.get("AAPL"), list)
-            and all(cls._valid_bar(item) for item in bars["AAPL"])
+            and isinstance(bars.get(symbol), list)
+            and all(cls._valid_bar(item) for item in bars[symbol])
         )
 
     @staticmethod

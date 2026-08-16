@@ -300,6 +300,9 @@ class SourceContractAssessment:
     pagination_pages: int | None = None
     datasets: tuple[str, ...] = ()
     symbol_lifecycle_probe: Literal["passed"] | None = None
+    universe_manifest_id: str | None = None
+    reference_graph_version_id: str | None = None
+    listing_ids: tuple[str, ...] = ()
     source_contract_reason_code: str | None = None
 
     def __post_init__(self) -> None:
@@ -318,21 +321,36 @@ class SourceContractAssessment:
             raise ValueError("source_contract_assessment_invalid")
         if self.symbol_lifecycle_probe not in {None, "passed"}:
             raise ValueError("source_contract_assessment_invalid")
+        if any(
+            value is not None and not value.strip()
+            for value in (self.universe_manifest_id, self.reference_graph_version_id)
+        ):
+            raise ValueError("source_contract_assessment_invalid")
+        if any(not listing_id.strip() for listing_id in self.listing_ids) or len(
+            set(self.listing_ids)
+        ) != len(self.listing_ids):
+            raise ValueError("source_contract_assessment_invalid")
         if (
             self.source_contract_reason_code is not None
             and self.source_contract_reason_code not in _SOURCE_CONTRACT_REASON_CODES
         ):
             raise ValueError("source_contract_assessment_invalid")
-        has_measurement = any(
-            value is not None
-            for value in (
-                self.contract_id,
-                self.ticker_count,
-                self.pagination_pages,
-                self.symbol_lifecycle_probe,
-                self.source_contract_reason_code,
+        has_measurement = (
+            any(
+                value is not None
+                for value in (
+                    self.contract_id,
+                    self.ticker_count,
+                    self.pagination_pages,
+                    self.symbol_lifecycle_probe,
+                    self.universe_manifest_id,
+                    self.reference_graph_version_id,
+                    self.source_contract_reason_code,
+                )
             )
-        ) or bool(self.datasets)
+            or bool(self.datasets)
+            or bool(self.listing_ids)
+        )
         if self.live_validation == "not_run" and has_measurement:
             raise ValueError("source_contract_assessment_invalid")
         if self.live_validation == "passed" and (
@@ -343,6 +361,9 @@ class SourceContractAssessment:
                 pagination_pages=self.pagination_pages,
                 dataset_ids=self.datasets,
                 symbol_lifecycle_probe=self.symbol_lifecycle_probe,
+                universe_manifest_id=self.universe_manifest_id,
+                reference_graph_version_id=self.reference_graph_version_id,
+                listing_ids=self.listing_ids,
             )
         ):
             raise ValueError("source_contract_assessment_invalid")
@@ -359,6 +380,9 @@ class SourceContractAssessment:
             "pagination_pages": self.pagination_pages,
             "datasets": list(self.datasets),
             "symbol_lifecycle_probe": self.symbol_lifecycle_probe,
+            "universe_manifest_id": self.universe_manifest_id,
+            "reference_graph_version_id": self.reference_graph_version_id,
+            "listing_ids": list(self.listing_ids),
             "source_contract_reason_code": self.source_contract_reason_code,
         }
 

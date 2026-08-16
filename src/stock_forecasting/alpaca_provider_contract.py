@@ -21,6 +21,7 @@ class AlpacaValidationContract:
     required_dataset_ids: frozenset[str]
     minimum_pagination_pages: int | None = None
     requires_symbol_lifecycle_probe: bool = False
+    requires_versioned_universe: bool = False
 
     def accepts_passed_evidence(
         self,
@@ -29,7 +30,25 @@ class AlpacaValidationContract:
         pagination_pages: int | None,
         dataset_ids: tuple[str, ...],
         symbol_lifecycle_probe: str | None,
+        universe_manifest_id: str | None,
+        reference_graph_version_id: str | None,
+        listing_ids: tuple[str, ...],
     ) -> bool:
+        if self.requires_versioned_universe:
+            from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
+
+            manifest = load_us_stock_pool_manifest()
+            universe_identity_matches = (
+                universe_manifest_id == manifest.manifest_id
+                and reference_graph_version_id == manifest.selection_evidence_version
+                and listing_ids == tuple(listing.listing_id for listing in manifest.listings)
+            )
+        else:
+            universe_identity_matches = (
+                universe_manifest_id is None
+                and reference_graph_version_id is None
+                and not listing_ids
+            )
         return (
             ticker_count == self.required_ticker_count
             and len(dataset_ids) == len(self.required_dataset_ids)
@@ -42,6 +61,7 @@ class AlpacaValidationContract:
                 )
             )
             and (not self.requires_symbol_lifecycle_probe or symbol_lifecycle_probe == "passed")
+            and universe_identity_matches
         )
 
 
@@ -88,6 +108,7 @@ ALPACA_VALIDATION_CONTRACTS = (
         required_dataset_ids=ALPACA_VALIDATION_DATASET_IDS,
         minimum_pagination_pages=2,
         requires_symbol_lifecycle_probe=True,
+        requires_versioned_universe=True,
     ),
 )
 ALPACA_VALIDATION_CONTRACT_IDS = frozenset(
