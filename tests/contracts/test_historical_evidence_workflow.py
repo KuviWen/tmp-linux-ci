@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
@@ -83,6 +84,7 @@ def _authorized_workflow(
     source_id: str,
     now: datetime,
     separate_principals: bool = True,
+    issuer_clock: Callable[[], datetime] | None = None,
 ) -> tuple[HistoricalEvidenceWorkflow, HistoricalEvidenceAttestationIssuer]:
     collector = LocalApiKeyIdentity.issue(
         owner=f"{source_id}-collector",
@@ -222,7 +224,7 @@ def _authorized_workflow(
             object_repository=object_repository,
             authorization_policy=policy,
             security_context=collector.context,
-            clock=lambda: now,
+            clock=issuer_clock or (lambda: now),
         ),
     )
 
@@ -407,11 +409,13 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         metadata={"content_type": "application/json"},
     )
     now = datetime(2026, 8, 16, 2, 0, tzinfo=UTC)
+    issuer_now = [now]
     workflow, issuer = _authorized_workflow(
         state_store,
         object_repository,
         source_id="platform-us-prices",
         now=now,
+        issuer_clock=lambda: issuer_now[0],
     )
     attestation_id = _attest(
         issuer,
@@ -506,6 +510,51 @@ def test_platform_observation_creates_content_addressed_qualified_claim(tmp_path
         "checkpoint_before": None,
         "checkpoint_after": None,
     }
+    issuer_now[0] = now + timedelta(minutes=30)
+    repeated_attestation_id = _attest(
+        issuer,
+        object_repository,
+        evidence,
+        source_id="platform-us-prices",
+        listing_id="listing-us-xnas-meta",
+        market="XNAS",
+        trace_id="trace-ticket-08-platform-reattestation",
+    )
+    repeated_attestation = state_store.get_verified_governance_artifact(
+        artifact_id=repeated_attestation_id,
+        artifact_kind="historical_evidence_attestation",
+    )
+    assert repeated_attestation["observation_receipt_id"] == attestation["observation_receipt_id"]
+    assert repeated_attestation["first_observed_at"] == "2026-08-16T02:00:00+00:00"
+    assert repeated_attestation["attested_at"] == "2026-08-16T02:30:00+00:00"
+    repeated_trace = state_store.get_trace_evidence("trace-ticket-08-platform-reattestation")
+    repeated_receipt_ids = [
+        artifact_id
+        for artifact_id in repeated_trace["artifact_ids"]
+        if state_store.get_canonical_artifact(artifact_id)["artifact_kind"]
+        == "source_retrieval_receipt"
+    ]
+    assert len(repeated_receipt_ids) == 1
+    assert repeated_receipt_ids[0] != attestation["observation_receipt_id"]
+    repeated_workflow, _ = _authorized_workflow(
+        state_store,
+        object_repository,
+        source_id="platform-us-prices",
+        now=issuer_now[0],
+    )
+    repeated_outcome = repeated_workflow.execute(
+        HistoricalEvidenceCommand(
+            action="qualify",
+            listing_id="listing-us-xnas-meta",
+            market="XNAS",
+            source_id="platform-us-prices",
+            trace_id="trace-ticket-08-platform-requalification",
+            attestation_id=repeated_attestation_id,
+        )
+    )
+    assert repeated_outcome.status == "qualified"
+    assert repeated_outcome.reason_code == "historical_evidence_qualified"
+    issuer_now[0] = now
     assert {event["action"] for event in attestation_trace["audit_events"]} == {
         "market_data.collect"
     }

@@ -33,6 +33,10 @@ from stock_forecasting.price_adjustment import (
     UnadjustedClose,
     derive_adjusted_closes,
 )
+from stock_forecasting.source_retrieval_receipt import (
+    SourceRetrievalMode,
+    SourceRetrievalReceipt,
+)
 
 HistoricalEvidenceAction = Literal["qualify", "supersede", "revoke", "expire"]
 SubmittedHistoricalEvidenceLevel = Literal[
@@ -99,7 +103,7 @@ class HistoricalEvidenceAttestationIssuer:
         self._clock = clock
 
     def issue(self, command: HistoricalEvidenceAttestationCommand) -> str:
-        first_observed_at = self._clock()
+        attested_at = self._clock()
         authorizations, policy = _authorize_historical_evidence(
             state_store=self._state_store,
             authorization_policy=self._authorization_policy,
@@ -107,7 +111,7 @@ class HistoricalEvidenceAttestationIssuer:
             action="market_data.collect",
             source_id=command.source_id,
             trace_id=command.trace_id,
-            evaluated_at=first_observed_at,
+            evaluated_at=attested_at,
             rejection_operation="attest_historical_evidence",
             listing_id=command.listing_id,
             market=command.market,
@@ -130,8 +134,13 @@ class HistoricalEvidenceAttestationIssuer:
             if observation_kind == "official_archive"
             else "unknown"
         )
-        source_mode = "current" if evidence_level == "platform_observed" else "historical"
+        source_mode: SourceRetrievalMode = (
+            "current" if evidence_level == "platform_observed" else "historical"
+        )
         observation_reference = evidence.get("observation_reference")
+        source_revision = evidence.get("revision")
+        if not isinstance(source_revision, str):
+            source_revision = "unparseable"
         receipt_authorization = next(
             (
                 authorization
@@ -140,37 +149,38 @@ class HistoricalEvidenceAttestationIssuer:
             ),
             authorizations[0],
         )
-        acquired_at = first_observed_at.isoformat().replace("+00:00", "Z")
-        observation_receipt_id = self._state_store._publish_historical_observation_receipt(
-            payload={
-                "object_id": evidence_ref.object_id,
-                "request_id": f"{command.trace_id}:historical-observation",
-                "source_id": command.source_id,
-                "source_mode": source_mode,
-                "source_revision": (
-                    evidence["revision"]
-                    if isinstance(evidence.get("revision"), str)
-                    else "unparseable"
-                ),
-                "distribution_id": receipt_authorization["distribution_id"],
-                "distribution_url": receipt_authorization["distribution_url"],
-                "sanitized_source_uri": (
-                    observation_reference
-                    if isinstance(observation_reference, str)
-                    else str(receipt_authorization["distribution_url"])
-                ),
-                "acquired_at": acquired_at,
-                "checkpoint_before": None,
-                "checkpoint_after": None,
-            },
+        observation_receipt = SourceRetrievalReceipt(
+            object_id=evidence_ref.object_id,
+            request_id=f"{command.trace_id}:historical-observation",
+            source_id=command.source_id,
+            source_mode=source_mode,
+            source_revision=source_revision,
+            distribution_id=str(receipt_authorization["distribution_id"]),
+            distribution_url=str(receipt_authorization["distribution_url"]),
+            sanitized_source_uri=(
+                observation_reference
+                if isinstance(observation_reference, str)
+                else str(receipt_authorization["distribution_url"])
+            ),
+            acquired_at=attested_at,
+            checkpoint_before=None,
+            checkpoint_after=None,
+        )
+        self._state_store._publish_historical_observation_receipt(
+            receipt=observation_receipt,
             trace_id=command.trace_id,
             authorization=receipt_authorization,
         )
-        observation_receipt = self._state_store.get_canonical_artifact(observation_receipt_id)
-        receipt_payload = cast(dict[str, object], observation_receipt["payload"])
-        first_observed_at = datetime.fromisoformat(
-            str(receipt_payload["acquired_at"]).replace("Z", "+00:00")
+        first_observation = self._state_store.find_first_source_retrieval_receipt(
+            object_id=observation_receipt.object_id,
+            source_id=observation_receipt.source_id,
+            distribution_id=cast(str, observation_receipt.distribution_id),
+            distribution_url=cast(str, observation_receipt.distribution_url),
         )
+        if first_observation is None:
+            raise RuntimeError("historical_observation_receipt_missing")
+        observation_receipt_id, first_observation_receipt = first_observation
+        first_observed_at = first_observation_receipt.acquired_at
         return self._state_store._publish_historical_evidence_attestation(
             payload={
                 "attestation_schema_version": "historical-evidence-attestation/v1",
@@ -210,7 +220,7 @@ class HistoricalEvidenceAttestationIssuer:
                     ),
                 ),
                 "first_observed_at": first_observed_at.isoformat(),
-                "attested_at": first_observed_at.isoformat(),
+                "attested_at": attested_at.isoformat(),
             },
             trace_id=command.trace_id,
             authorizations=authorizations,
@@ -706,8 +716,8 @@ class HistoricalEvidenceWorkflow:
             raise ValueError("historical_evidence_validity_invalid")
         if (
             observed_at > first_observed_at
-            or first_observed_at != attested_at
-            or first_observed_at > self._observed_at
+            or first_observed_at > attested_at
+            or attested_at > self._observed_at
         ):
             raise ValueError("historical_evidence_observation_chronology_invalid")
         self._validate_listing_evidence(
@@ -743,31 +753,34 @@ class HistoricalEvidenceWorkflow:
             "current" if attestation.get("evidence_level") == "platform_observed" else "historical"
         )
         bindings = attestation.get("distribution_bindings")
+        try:
+            parsed_receipt = SourceRetrievalReceipt.from_payload(cast(dict[str, object], payload))
+        except (TypeError, ValueError):
+            raise ValueError("historical_observation_receipt_invalid") from None
         if (
             receipt.get("artifact_kind") != "source_retrieval_receipt"
             or receipt.get("execution_purpose") != "price_research"
             or not isinstance(payload, dict)
-            or payload.get("object_id") != attestation.get("evidence_object_id")
-            or payload.get("source_id") != source_id
-            or payload.get("source_mode") != expected_source_mode
-            or payload.get("source_revision") != evidence.get("revision")
+            or parsed_receipt.object_id != attestation.get("evidence_object_id")
+            or parsed_receipt.source_id != source_id
+            or parsed_receipt.source_mode != expected_source_mode
+            or parsed_receipt.source_revision != evidence.get("revision")
             or not isinstance(bindings, list)
             or not any(
                 isinstance(binding, dict)
-                and binding.get("distribution_id") == payload.get("distribution_id")
-                and binding.get("distribution_url") == payload.get("distribution_url")
+                and binding.get("distribution_id") == parsed_receipt.distribution_id
+                and binding.get("distribution_url") == parsed_receipt.distribution_url
                 for binding in bindings
             )
         ):
             raise ValueError("historical_observation_receipt_invalid")
         try:
-            acquired_at = datetime.fromisoformat(str(payload["acquired_at"]).replace("Z", "+00:00"))
             first_observed_at = datetime.fromisoformat(str(attestation["first_observed_at"]))
         except (KeyError, ValueError) as error:
             raise ValueError("historical_observation_receipt_invalid") from error
-        if acquired_at.tzinfo is None or acquired_at != first_observed_at:
+        if parsed_receipt.acquired_at != first_observed_at:
             raise ValueError("historical_observation_receipt_invalid")
-        return cast(dict[str, object], payload)
+        return parsed_receipt.to_payload()
 
     def _verified_attested_object(
         self,

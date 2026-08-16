@@ -42,6 +42,7 @@ from stock_forecasting.platform.schema import (
     trace_artifact_refs,
     work_attempts,
 )
+from stock_forecasting.source_retrieval_receipt import SourceRetrievalReceipt
 
 
 class ImmutableStateConflict(RuntimeError):
@@ -1376,54 +1377,59 @@ class StateStore:
     def _publish_historical_observation_receipt(
         self,
         *,
-        payload: dict[str, object],
+        receipt: SourceRetrievalReceipt,
         trace_id: str,
         authorization: dict[str, object],
     ) -> str:
-        required_fields = {
-            "object_id",
-            "request_id",
-            "source_id",
-            "source_mode",
-            "source_revision",
-            "distribution_id",
-            "distribution_url",
-            "sanitized_source_uri",
-            "acquired_at",
-            "checkpoint_before",
-            "checkpoint_after",
-        }
         if (
-            set(payload) != required_fields
-            or payload.get("source_mode") not in {"current", "historical"}
-            or any(
-                not isinstance(payload.get(field_name), str)
-                for field_name in (
-                    "object_id",
-                    "request_id",
-                    "source_id",
-                    "source_revision",
-                    "distribution_id",
-                    "distribution_url",
-                    "sanitized_source_uri",
-                    "acquired_at",
-                )
-            )
-            or authorization.get("action") != "market_data.collect"
+            authorization.get("action") != "market_data.collect"
             or authorization.get("reason_code") != "authorized"
-            or authorization.get("dataset_id") != payload.get("source_id")
-            or authorization.get("distribution_id") != payload.get("distribution_id")
-            or authorization.get("distribution_url") != payload.get("distribution_url")
-            or authorization.get("evaluated_at") != payload.get("acquired_at")
+            or authorization.get("dataset_id") != receipt.source_id
+            or authorization.get("distribution_id") != receipt.distribution_id
+            or authorization.get("distribution_url") != receipt.distribution_url
+            or authorization.get("evaluated_at") != receipt.acquired_at_text
         ):
             raise ValueError("historical_observation_receipt_invalid")
         return self._publish_trace_artifact(
             artifact_kind="source_retrieval_receipt",
             execution_purpose="price_research",
-            payload=payload,
+            payload=receipt.to_payload(),
             trace_id=trace_id,
             authorization_outcomes=[(authorization, "allowed")],
         )
+
+    def find_first_source_retrieval_receipt(
+        self,
+        *,
+        object_id: str,
+        source_id: str,
+        distribution_id: str,
+        distribution_url: str,
+    ) -> tuple[str, SourceRetrievalReceipt] | None:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    canonical_artifacts.c.artifact_id,
+                    canonical_artifacts.c.payload,
+                ).where(
+                    canonical_artifacts.c.artifact_kind == "source_retrieval_receipt",
+                    canonical_artifacts.c.execution_purpose == "price_research",
+                )
+            ).mappings()
+            matches: list[tuple[str, SourceRetrievalReceipt]] = []
+            for row in rows:
+                payload = row["payload"]
+                if not isinstance(payload, dict):
+                    raise ValueError("source_retrieval_receipt_invalid")
+                receipt = SourceRetrievalReceipt.from_payload(payload)
+                if (
+                    receipt.object_id == object_id
+                    and receipt.source_id == source_id
+                    and receipt.distribution_id == distribution_id
+                    and receipt.distribution_url == distribution_url
+                ):
+                    matches.append((str(row["artifact_id"]), receipt))
+        return min(matches, key=lambda match: (match[1].acquired_at, match[0])) if matches else None
 
     def _publish_historical_policy_blocked(
         self,

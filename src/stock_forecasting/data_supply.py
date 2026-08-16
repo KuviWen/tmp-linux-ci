@@ -30,6 +30,7 @@ from stock_forecasting.price_adjustment import (
     UnadjustedClose,
     derive_adjusted_closes,
 )
+from stock_forecasting.source_retrieval_receipt import SourceRetrievalReceipt
 from stock_forecasting.zero_fee_source import (
     ZeroFeeAuthenticatedSourceBasis,
     source_bundle_member_from_payload,
@@ -1306,31 +1307,21 @@ def _source_retrieval_receipt_artifact(
     collection: CollectedSourcePartition,
     raw_object_id: str,
 ) -> dict[str, Any]:
-    payload: dict[str, object] = {
-        "object_id": raw_object_id,
-        "request_id": request.request_id,
-        "source_id": request.source_id,
-        "source_mode": request.mode,
-        "source_revision": collection.source_revision,
-        "distribution_id": request.distribution_id,
-        "distribution_url": request.distribution_url,
-        "sanitized_source_uri": collection.sanitized_source_uri,
-        "acquired_at": _instant(collection.acquired_at),
-        "checkpoint_before": collection.checkpoint_before,
-        "checkpoint_after": collection.checkpoint_after,
-    }
-    reference_graph = _reference_graph_lineage_payload(collection)
-    if reference_graph is not None:
-        payload["reference_graph"] = reference_graph
-    if collection.market_calendar_evidence_version_id is not None:
-        payload["market_calendar_evidence_version_id"] = (
-            collection.market_calendar_evidence_version_id
-        )
-    return {
-        "artifact_id": _artifact_id("source_retrieval_receipt", payload),
-        "artifact_kind": "source_retrieval_receipt",
-        "payload": payload,
-    }
+    return SourceRetrievalReceipt(
+        object_id=raw_object_id,
+        request_id=request.request_id,
+        source_id=request.source_id,
+        source_mode=request.mode,
+        source_revision=collection.source_revision,
+        distribution_id=request.distribution_id,
+        distribution_url=request.distribution_url,
+        sanitized_source_uri=collection.sanitized_source_uri,
+        acquired_at=collection.acquired_at,
+        checkpoint_before=collection.checkpoint_before,
+        checkpoint_after=collection.checkpoint_after,
+        reference_graph=_reference_graph_lineage_payload(collection),
+        market_calendar_evidence_version_id=(collection.market_calendar_evidence_version_id),
+    ).to_artifact()
 
 
 def _reference_graph_lineage_payload(
