@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections.abc import Callable
 
 import pytest
 
@@ -15,7 +16,28 @@ from stock_forecasting.forecasting import (
 )
 
 
+def _literal_calibrator(*, temperature: float = 1.0) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "market": "XTAI",
+        "horizon_sessions": 1,
+        "temperature": temperature,
+        "fit_method": "temperature_scaling",
+        "sample_count": 9,
+        "class_counts": [3, 3, 3],
+        "pre_nll": 1.0,
+        "post_nll": 1.0,
+        "status": "sufficient_data",
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    calibrator_id = hashlib.sha256(b"temperature_calibrator" + serialized).hexdigest()
+    return {
+        "calibrator_id": f"sha256:{calibrator_id}",
+        **payload,
+    }
+
+
 def _literal_logistic_payload() -> dict[str, object]:
+    calibrator = _literal_calibrator(temperature=2.0)
     return {
         "artifact_format": "safe-json-v1",
         "model_family": "regularized_multinomial_logistic",
@@ -38,25 +60,13 @@ def _literal_logistic_payload() -> dict[str, object]:
         "loss_weighting": "equal_market_horizon_cells",
         "regularization": 0.05,
         "weights": [[2.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
-        "calibrator_ids": ["sha256:literal-temperature"],
-        "calibrators": [
-            {
-                "calibrator_id": "sha256:literal-temperature",
-                "market": "XTAI",
-                "horizon_sessions": 1,
-                "temperature": 2.0,
-                "fit_method": "temperature_scaling",
-                "sample_count": 9,
-                "class_counts": [3, 3, 3],
-                "pre_nll": 1.0,
-                "post_nll": 1.0,
-                "status": "sufficient_data",
-            }
-        ],
+        "calibrator_ids": [calibrator["calibrator_id"]],
+        "calibrators": [calibrator],
     }
 
 
 def _literal_class_prior_payload() -> dict[str, object]:
+    calibrator = _literal_calibrator()
     return {
         "artifact_format": "safe-json-v1",
         "model_family": "class_prior",
@@ -64,21 +74,8 @@ def _literal_class_prior_payload() -> dict[str, object]:
         "manifest_ids": ["feature", "source", "label", "fold", "cost"],
         "training_selection_id": "sha256:selection",
         "probabilities_by_cell": {"XTAI:1": {"up": 0.5, "flat": 0.25, "down": 0.25}},
-        "calibrator_ids": ["sha256:literal-prior-temperature"],
-        "calibrators": [
-            {
-                "calibrator_id": "sha256:literal-prior-temperature",
-                "market": "XTAI",
-                "horizon_sessions": 1,
-                "temperature": 1.0,
-                "fit_method": "temperature_scaling",
-                "sample_count": 9,
-                "class_counts": [3, 3, 3],
-                "pre_nll": 1.0,
-                "post_nll": 1.0,
-                "status": "sufficient_data",
-            }
-        ],
+        "calibrator_ids": [calibrator["calibrator_id"]],
+        "calibrators": [calibrator],
     }
 
 
@@ -194,6 +191,53 @@ def test_class_prior_offline_loader_rejects_unknown_fields_and_calibrator_drift(
         serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         with pytest.raises(ValueError, match="artifact_schema_invalid"):
             ClassPriorTrendForecaster.load(serialized)
+
+
+@pytest.mark.parametrize(
+    ("payload_factory", "loader"),
+    [
+        (_literal_class_prior_payload, ClassPriorTrendForecaster.load),
+        (_literal_logistic_payload, RegularizedMultinomialLogisticTrendForecaster.load),
+    ],
+)
+def test_offline_loaders_reject_stale_calibrator_content_ids(
+    payload_factory: Callable[[], dict[str, object]],
+    loader: Callable[[bytes], object],
+) -> None:
+    payload = payload_factory()
+    calibrators = payload["calibrators"]
+    assert isinstance(calibrators, list)
+    calibrator = calibrators[0]
+    assert isinstance(calibrator, dict)
+    calibrator["temperature"] = 1.5
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+    with pytest.raises(ValueError, match="artifact_schema_invalid"):
+        loader(serialized)
+
+
+def test_logistic_offline_loader_rejects_missing_or_orphan_calibrator_cells() -> None:
+    missing = _literal_logistic_payload()
+    missing["calibrator_ids"] = []
+    missing["calibrators"] = []
+
+    orphan = _literal_logistic_payload()
+    orphan_calibrator = _literal_calibrator()
+    orphan_calibrator["market"] = "XNAS"
+    orphan_payload = {
+        key: value for key, value in orphan_calibrator.items() if key != "calibrator_id"
+    }
+    serialized_orphan = json.dumps(orphan_payload, sort_keys=True, separators=(",", ":")).encode()
+    orphan_calibrator["calibrator_id"] = (
+        f"sha256:{hashlib.sha256(b'temperature_calibrator' + serialized_orphan).hexdigest()}"
+    )
+    orphan["calibrator_ids"] = [orphan_calibrator["calibrator_id"]]
+    orphan["calibrators"] = [orphan_calibrator]
+
+    for payload in (missing, orphan):
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        with pytest.raises(ValueError, match="artifact_schema_invalid"):
+            RegularizedMultinomialLogisticTrendForecaster.load(serialized)
 
 
 def test_logistic_artifact_loads_offline_and_prediction_is_order_invariant() -> None:
@@ -324,6 +368,9 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
 
 def test_logistic_offline_artifact_applies_bound_market_horizon_temperature() -> None:
     payload = _literal_logistic_payload()
+    calibrator_ids = payload["calibrator_ids"]
+    assert isinstance(calibrator_ids, list)
+    assert isinstance(calibrator_ids[0], str)
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     artifact = ModelArtifact(
         artifact_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
@@ -333,7 +380,7 @@ def test_logistic_offline_artifact_applies_bound_market_horizon_temperature() ->
         training_selection_id="sha256:selection",
         model_parameters_id="sha256:parameters",
         serialized=serialized,
-        calibrator_ids=("sha256:literal-temperature",),
+        calibrator_ids=(calibrator_ids[0],),
     )
 
     forecast = RegularizedMultinomialLogisticTrendForecaster.load(serialized).predict(

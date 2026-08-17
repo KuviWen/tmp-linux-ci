@@ -742,7 +742,10 @@ def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
         ):
             raise ValueError("artifact_schema_invalid")
 
-    _validate_artifact_calibrators(payload)
+    _validate_artifact_calibrators(
+        payload,
+        expected_cells={cast(str, cell) for cell in class_weights},
+    )
     if "evaluation_report_id" in payload and not isinstance(payload["evaluation_report_id"], str):
         raise ValueError("artifact_schema_invalid")
     return payload
@@ -800,13 +803,20 @@ def _load_class_prior_artifact(serialized: bytes) -> dict[str, object]:
         probability_sum = sum(cast(float, value) for value in probabilities.values())
         if abs(probability_sum - 1.0) > 1e-12:
             raise ValueError("artifact_schema_invalid")
-    _validate_artifact_calibrators(payload)
+    _validate_artifact_calibrators(
+        payload,
+        expected_cells={cast(str, cell) for cell in probabilities_by_cell},
+    )
     if "evaluation_report_id" in payload and not isinstance(payload["evaluation_report_id"], str):
         raise ValueError("artifact_schema_invalid")
     return payload
 
 
-def _validate_artifact_calibrators(payload: dict[str, object]) -> None:
+def _validate_artifact_calibrators(
+    payload: dict[str, object],
+    *,
+    expected_cells: set[str],
+) -> None:
     calibrator_ids = payload.get("calibrator_ids")
     calibrators = payload.get("calibrators")
     if (calibrator_ids is None) != (calibrators is None):
@@ -859,12 +869,22 @@ def _validate_artifact_calibrators(payload: dict[str, object]) -> None:
                 or cast(float, calibrator["post_nll"]) > cast(float, calibrator["pre_nll"])
             ):
                 raise ValueError("artifact_schema_invalid")
-            parsed_ids.append(cast(str, calibrator["calibrator_id"]))
+            calibrator_id = cast(str, calibrator["calibrator_id"])
+            content = {key: value for key, value in calibrator.items() if key != "calibrator_id"}
+            if calibrator_id != _content_id("temperature_calibrator", content):
+                raise ValueError("artifact_schema_invalid")
+            parsed_ids.append(calibrator_id)
             parsed_bindings.add((calibrator["market"], calibrator["horizon_sessions"]))
+        expected_bindings = {
+            (market, int(raw_horizon))
+            for cell in expected_cells
+            for market, raw_horizon in (cell.split(":", maxsplit=1),)
+        }
         if (
             calibrator_ids != parsed_ids
             or len(set(parsed_ids)) != len(parsed_ids)
             or len(parsed_bindings) != len(parsed_ids)
+            or parsed_bindings != expected_bindings
         ):
             raise ValueError("artifact_schema_invalid")
 
