@@ -6,8 +6,8 @@ import random
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import date
-from math import exp, log
-from typing import Literal, Protocol, cast
+from math import exp, isfinite, log
+from typing import Literal, Protocol, TypeGuard, cast
 
 from stock_forecasting.contracts import (
     HistoricalTrainingLineage,
@@ -325,6 +325,13 @@ class RegularizedMultinomialLogisticTrendForecaster:
                 )
                 for label in self._labels
             }
+        cell_loss_normalizers: dict[str, float] = {}
+        for cell, cell_rows in rows_by_cell.items():
+            weighted_total = 0.0
+            for row in cell_rows:
+                assert row.label is not None
+                weighted_total += class_weights_by_cell[cell][row.label]
+            cell_loss_normalizers[cell] = weighted_total
         generator = random.Random(request.seed)
         weights = [
             [generator.uniform(-0.01, 0.01) for _ in range(feature_count + 1)] for _ in self._labels
@@ -346,7 +353,7 @@ class RegularizedMultinomialLogisticTrendForecaster:
                 assert row.label is not None
                 cell = _cell_key(row)
                 sample_weight = class_weights_by_cell[cell][row.label] / (
-                    len(rows_by_cell[cell]) * len(rows_by_cell)
+                    cell_loss_normalizers[cell] * len(rows_by_cell)
                 )
                 for label_index, label in enumerate(self._labels):
                     error = (
@@ -380,6 +387,7 @@ class RegularizedMultinomialLogisticTrendForecaster:
             "training_selection_id": training_selection_id,
             "normalizers": normalizers,
             "class_weights_by_cell": class_weights_by_cell,
+            "cell_loss_normalizers": cell_loss_normalizers,
             "loss_weighting": "equal_market_horizon_cells",
             "regularization": regularization,
             "weights": weights,
@@ -418,10 +426,7 @@ class RegularizedMultinomialLogisticTrendForecaster:
 
     @classmethod
     def load(cls, serialized: bytes) -> RegularizedMultinomialLogisticTrendForecaster:
-        payload = cast(dict[str, object], json.loads(serialized))
-        if payload.get("model_family") != "regularized_multinomial_logistic":
-            raise ValueError("wrong_model_family")
-        return cls(payload)
+        return cls(_load_logistic_artifact(serialized))
 
     def predict(self, request: PredictionRequest) -> ForecastBatch:
         if self._payload is None:
@@ -571,11 +576,11 @@ def _bind_calibrators(
     payload: dict[str, object],
     calibrators: tuple[CalibrationEvidence, ...],
 ) -> dict[str, object]:
+    base_payload = {**payload, "artifact_format": "safe-json-v1"}
     if not calibrators:
-        return payload
+        return base_payload
     return {
-        **payload,
-        "artifact_format": "safe-json-v1",
+        **base_payload,
         "calibrator_ids": [item.calibrator_id for item in calibrators],
         "calibrators": [
             {
@@ -603,6 +608,186 @@ def _apply_temperature(probabilities: ProbabilityVector, temperature: float) -> 
     ]
     total = sum(values)
     return {"up": values[0] / total, "flat": values[1] / total, "down": values[2] / total}
+
+
+def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
+    try:
+        raw_payload = json.loads(serialized)
+    except (TypeError, ValueError) as error:
+        raise ValueError("artifact_schema_invalid") from error
+    if not isinstance(raw_payload, dict):
+        raise ValueError("artifact_schema_invalid")
+    payload = cast(dict[str, object], raw_payload)
+    required = {
+        "artifact_format",
+        "model_family",
+        "seed",
+        "manifest_ids",
+        "training_selection_id",
+        "normalizers",
+        "class_weights_by_cell",
+        "cell_loss_normalizers",
+        "loss_weighting",
+        "regularization",
+        "weights",
+    }
+    optional = {"calibrator_ids", "calibrators", "evaluation_report_id"}
+    if (
+        not required.issubset(payload)
+        or not set(payload).issubset(required | optional)
+        or payload["artifact_format"] != "safe-json-v1"
+        or payload["model_family"] != "regularized_multinomial_logistic"
+        or isinstance(payload["seed"], bool)
+        or not isinstance(payload["seed"], int)
+        or not isinstance(payload["training_selection_id"], str)
+        or payload["loss_weighting"] != "equal_market_horizon_cells"
+        or not _is_finite_number(payload["regularization"])
+        or payload["regularization"] < 0
+    ):
+        raise ValueError("artifact_schema_invalid")
+    manifest_ids = payload["manifest_ids"]
+    if (
+        not isinstance(manifest_ids, list)
+        or len(manifest_ids) != 5
+        or not all(isinstance(item, str) for item in manifest_ids)
+    ):
+        raise ValueError("artifact_schema_invalid")
+
+    normalizers = payload["normalizers"]
+    if not isinstance(normalizers, dict) or not normalizers:
+        raise ValueError("artifact_schema_invalid")
+    feature_count: int | None = None
+    for market, raw_normalizer in normalizers.items():
+        if market not in {"XTAI", "XNAS"} or not isinstance(raw_normalizer, dict):
+            raise ValueError("artifact_schema_invalid")
+        if set(raw_normalizer) != {
+            "method",
+            "lower_quantile",
+            "upper_quantile",
+            "medians",
+            "iqrs",
+            "lower_bounds",
+            "upper_bounds",
+        }:
+            raise ValueError("artifact_schema_invalid")
+        if (
+            raw_normalizer["method"] != "median_iqr_winsorized"
+            or raw_normalizer["lower_quantile"] != 0.01
+            or raw_normalizer["upper_quantile"] != 0.99
+        ):
+            raise ValueError("artifact_schema_invalid")
+        arrays = (
+            raw_normalizer["medians"],
+            raw_normalizer["iqrs"],
+            raw_normalizer["lower_bounds"],
+            raw_normalizer["upper_bounds"],
+        )
+        if any(not isinstance(values, list) or not values for values in arrays):
+            raise ValueError("artifact_schema_invalid")
+        medians, iqrs, lower_bounds, upper_bounds = cast(
+            tuple[list[object], list[object], list[object], list[object]], arrays
+        )
+        if not (
+            len(medians) == len(iqrs) == len(lower_bounds) == len(upper_bounds)
+            and all(_is_finite_number(value) for values in arrays for value in values)
+        ):
+            raise ValueError("artifact_schema_invalid")
+        if feature_count is None:
+            feature_count = len(medians)
+        if feature_count != len(medians):
+            raise ValueError("artifact_schema_invalid")
+        for iqr, lower, upper in zip(iqrs, lower_bounds, upper_bounds, strict=True):
+            if (
+                not _is_finite_number(iqr)
+                or not _is_finite_number(lower)
+                or not _is_finite_number(upper)
+                or iqr <= 0
+                or lower > upper
+            ):
+                raise ValueError("artifact_schema_invalid")
+
+    if feature_count is None:
+        raise ValueError("artifact_schema_invalid")
+    raw_weights = payload["weights"]
+    if (
+        not isinstance(raw_weights, list)
+        or len(raw_weights) != 3
+        or any(
+            not isinstance(label_weights, list)
+            or len(label_weights) != feature_count + 1
+            or not all(_is_finite_number(value) for value in label_weights)
+            for label_weights in raw_weights
+        )
+    ):
+        raise ValueError("artifact_schema_invalid")
+
+    class_weights = payload["class_weights_by_cell"]
+    loss_normalizers = payload["cell_loss_normalizers"]
+    if (
+        not isinstance(class_weights, dict)
+        or not class_weights
+        or not isinstance(loss_normalizers, dict)
+        or set(class_weights) != set(loss_normalizers)
+    ):
+        raise ValueError("artifact_schema_invalid")
+    for cell, raw_class_weights in class_weights.items():
+        if (
+            not isinstance(cell, str)
+            or not _valid_cell_key(cell, set(normalizers))
+            or not isinstance(raw_class_weights, dict)
+            or set(raw_class_weights) != {"up", "flat", "down"}
+            or any(
+                not _is_finite_number(value) or not 0.5 <= value <= 2.0
+                for value in raw_class_weights.values()
+            )
+            or not _is_finite_number(loss_normalizers[cell])
+            or loss_normalizers[cell] <= 0
+        ):
+            raise ValueError("artifact_schema_invalid")
+
+    calibrator_ids = payload.get("calibrator_ids")
+    calibrators = payload.get("calibrators")
+    if (calibrator_ids is None) != (calibrators is None):
+        raise ValueError("artifact_schema_invalid")
+    if calibrator_ids is not None:
+        if (
+            not isinstance(calibrator_ids, list)
+            or not isinstance(calibrators, list)
+            or not all(isinstance(item, str) for item in calibrator_ids)
+            or len(calibrator_ids) != len(calibrators)
+        ):
+            raise ValueError("artifact_schema_invalid")
+        parsed_ids: list[str] = []
+        for calibrator in calibrators:
+            if (
+                not isinstance(calibrator, dict)
+                or not isinstance(calibrator.get("calibrator_id"), str)
+                or calibrator.get("market") not in {"XTAI", "XNAS"}
+                or calibrator.get("horizon_sessions") not in {1, 5, 20}
+                or calibrator.get("fit_method") != "temperature_scaling"
+                or not _is_finite_number(calibrator.get("temperature"))
+                or cast(float, calibrator["temperature"]) <= 0
+            ):
+                raise ValueError("artifact_schema_invalid")
+            parsed_ids.append(cast(str, calibrator["calibrator_id"]))
+        if calibrator_ids != parsed_ids or len(set(parsed_ids)) != len(parsed_ids):
+            raise ValueError("artifact_schema_invalid")
+    if "evaluation_report_id" in payload and not isinstance(payload["evaluation_report_id"], str):
+        raise ValueError("artifact_schema_invalid")
+    return payload
+
+
+def _is_finite_number(value: object) -> TypeGuard[int | float]:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and isfinite(value)
+
+
+def _valid_cell_key(cell: str, markets: set[object]) -> bool:
+    try:
+        market, raw_horizon = cell.split(":", maxsplit=1)
+        horizon = int(raw_horizon)
+    except ValueError:
+        return False
+    return market in markets and horizon in {1, 5, 20} and raw_horizon == str(horizon)
 
 
 def _serialize_payload(payload: object) -> bytes:

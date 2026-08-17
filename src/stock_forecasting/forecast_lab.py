@@ -159,16 +159,22 @@ class ForecastLab:
     def develop(self, intent: TrainingIntentRef) -> ForecastLabOutcome:
         if not self._has_class_support(intent.feature_batch.rows):
             return self._blocked("insufficient_class_support")
-        formal_qualification = self._has_formal_source_basis(intent)
-        if intent.execution_purpose == "formal_candidate" and not formal_qualification:
-            return self._blocked("unverified_source_basis")
         fold_manifest = self._build_fold_manifest(intent.feature_batch.rows)
         if fold_manifest is None:
             return self._blocked("insufficient_fold_history")
+        final_lineages = tuple(
+            replace(lineage, fold_manifest_id=fold_manifest.fold_manifest_id)
+            for lineage in intent.feature_batch.historical_lineage
+        )
         feature_batch = replace(
             intent.feature_batch,
             fold_manifest_id=fold_manifest.fold_manifest_id,
-        )
+            historical_lineage=final_lineages,
+        ).with_content_id()
+        final_intent = replace(intent, feature_batch=feature_batch)
+        formal_qualification = self._has_formal_source_basis(final_intent)
+        if intent.execution_purpose == "formal_candidate" and not formal_qualification:
+            return self._blocked("unverified_source_basis")
         try:
             evaluation = self._evaluate(
                 feature_batch,

@@ -9,7 +9,12 @@ from stock_forecasting.forecast_lab import (
     Market,
     TrainingIntentRef,
 )
-from stock_forecasting.forecasting import FeatureBatch, FeatureRow
+from stock_forecasting.forecasting import (
+    FeatureBatch,
+    FeatureRow,
+    PredictionRequest,
+    RegularizedMultinomialLogisticTrendForecaster,
+)
 from tests.modeling_support import engineering_model_history
 
 
@@ -167,12 +172,19 @@ def test_latest_test_quarter_cannot_influence_fitted_artifact_or_calibrators() -
 
     assert original is not None
     assert changed is not None
-    assert tuple(
-        artifact.training_selection_id for artifact in original.logistic_artifacts
-    ) == tuple(artifact.training_selection_id for artifact in changed.logistic_artifacts)
-    assert tuple(artifact.model_parameters_id for artifact in original.logistic_artifacts) == tuple(
-        artifact.model_parameters_id for artifact in changed.logistic_artifacts
-    )
+    comparison_rows = original_batch.rows[:6]
+    for original_artifact, changed_artifact in zip(
+        original.logistic_artifacts,
+        changed.logistic_artifacts,
+        strict=True,
+    ):
+        original_predictions = RegularizedMultinomialLogisticTrendForecaster.load(
+            original_artifact.serialized
+        ).predict(PredictionRequest(original_artifact, comparison_rows))
+        changed_predictions = RegularizedMultinomialLogisticTrendForecaster.load(
+            changed_artifact.serialized
+        ).predict(PredictionRequest(changed_artifact, comparison_rows))
+        assert original_predictions.predictions == changed_predictions.predictions
     assert original.calibrators == changed.calibrators
     assert (
         original.evaluation_report.evaluation_report_id
@@ -297,7 +309,24 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
     assert outcome.status == "developed"
     assert outcome.candidate_bundle is not None
     assert outcome.candidate_bundle.formal_qualification is True
-    assert verified_lineages == list(lineages)
+    final_fold_id = outcome.candidate_bundle.fold_manifest.fold_manifest_id
+    final_lineages = tuple(replace(item, fold_manifest_id=final_fold_id) for item in lineages)
+    expected_batch = replace(
+        qualified_batch,
+        fold_manifest_id=final_fold_id,
+        historical_lineage=final_lineages,
+    ).with_content_id()
+    assert verified_lineages == list(final_lineages)
+    for artifact in (
+        outcome.candidate_bundle.logistic_artifacts + outcome.candidate_bundle.class_prior_artifacts
+    ):
+        assert artifact.manifest_ids == (
+            expected_batch.feature_batch_id,
+            expected_batch.source_policy_manifest_id,
+            expected_batch.label_manifest_id,
+            expected_batch.fold_manifest_id,
+            expected_batch.cost_manifest_id,
+        )
 
     tampered_rows = (
         replace(qualified_batch.rows[0], values=(999.0, -999.0)),

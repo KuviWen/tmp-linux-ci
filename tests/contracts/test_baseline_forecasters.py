@@ -11,7 +11,44 @@ from stock_forecasting.forecasting import (
     PredictionRequest,
     RegularizedMultinomialLogisticTrendForecaster,
     TrainingRequest,
+    TrendLabel,
 )
+
+
+def _literal_logistic_payload() -> dict[str, object]:
+    return {
+        "artifact_format": "safe-json-v1",
+        "model_family": "regularized_multinomial_logistic",
+        "seed": 17,
+        "manifest_ids": ["feature", "source", "label", "fold", "cost"],
+        "training_selection_id": "sha256:selection",
+        "normalizers": {
+            "XTAI": {
+                "iqrs": [1.0],
+                "lower_bounds": [-10.0],
+                "lower_quantile": 0.01,
+                "medians": [0.0],
+                "method": "median_iqr_winsorized",
+                "upper_bounds": [10.0],
+                "upper_quantile": 0.99,
+            }
+        },
+        "class_weights_by_cell": {"XTAI:1": {"up": 1.0, "flat": 1.0, "down": 1.0}},
+        "cell_loss_normalizers": {"XTAI:1": 3.0},
+        "loss_weighting": "equal_market_horizon_cells",
+        "regularization": 0.05,
+        "weights": [[2.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+        "calibrator_ids": ["sha256:literal-temperature"],
+        "calibrators": [
+            {
+                "calibrator_id": "sha256:literal-temperature",
+                "market": "XTAI",
+                "horizon_sessions": 1,
+                "temperature": 2.0,
+                "fit_method": "temperature_scaling",
+            }
+        ],
+    }
 
 
 def test_class_prior_artifact_loads_offline_and_predicts_training_priors() -> None:
@@ -165,9 +202,22 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
         ),
         FeatureRow("us-down-only", "XNAS", 1, (99.0, 99.0), "down"),
     )
+    balanced_labels: tuple[TrendLabel, ...] = ("up", "flat", "down")
+    balanced_rows = tuple(
+        FeatureRow(
+            f"us-balanced-{label}-{index}",
+            "XNAS",
+            5,
+            (100.0 + index, 101.0),
+            label,
+        )
+        for label in balanced_labels
+        for index in range(3)
+    )
     rows = (
         taiwan_rows
         + us_rows
+        + balanced_rows
         + (FeatureRow("validation-flat", "XTAI", 1, (1000.0, 1000.0), "flat"),)
     )
     batch = FeatureBatch(
@@ -181,7 +231,7 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
     artifact = RegularizedMultinomialLogisticTrendForecaster().train(
         TrainingRequest(
             feature_batch=batch,
-            training_row_ids=tuple(row.row_id for row in taiwan_rows + us_rows),
+            training_row_ids=tuple(row.row_id for row in taiwan_rows + us_rows + balanced_rows),
             validation_row_ids=(),
             seed=17,
         )
@@ -191,7 +241,13 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
 
     assert payload["class_weights_by_cell"] == {
         "XNAS:1": {"up": 2.0, "flat": 0.5, "down": 2.0},
+        "XNAS:5": {"up": 1.0, "flat": 1.0, "down": 1.0},
         "XTAI:1": {"up": 0.5, "flat": 2.0, "down": 2.0},
+    }
+    assert payload["cell_loss_normalizers"] == {
+        "XNAS:1": 8.0,
+        "XNAS:5": 9.0,
+        "XTAI:1": 8.0,
     }
     taiwan_normalizer = payload["normalizers"]["XTAI"]
     assert taiwan_normalizer["method"] == "median_iqr_winsorized"
@@ -205,35 +261,7 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
 
 
 def test_logistic_offline_artifact_applies_bound_market_horizon_temperature() -> None:
-    payload = {
-        "model_family": "regularized_multinomial_logistic",
-        "seed": 17,
-        "manifest_ids": ["feature", "source", "label", "fold", "cost"],
-        "training_selection_id": "sha256:selection",
-        "normalizers": {
-            "XTAI": {
-                "iqrs": [1.0],
-                "lower_bounds": [-10.0],
-                "lower_quantile": 0.01,
-                "medians": [0.0],
-                "method": "median_iqr_winsorized",
-                "upper_bounds": [10.0],
-                "upper_quantile": 0.99,
-            }
-        },
-        "class_weights_by_cell": {"XTAI:1": {"up": 1.0, "flat": 1.0, "down": 1.0}},
-        "regularization": 0.05,
-        "weights": [[2.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
-        "calibrators": [
-            {
-                "calibrator_id": "sha256:literal-temperature",
-                "market": "XTAI",
-                "horizon_sessions": 1,
-                "temperature": 2.0,
-                "fit_method": "temperature_scaling",
-            }
-        ],
-    }
+    payload = _literal_logistic_payload()
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     artifact = ModelArtifact(
         artifact_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
@@ -256,3 +284,35 @@ def test_logistic_offline_artifact_applies_bound_market_horizon_temperature() ->
     assert forecast.predictions[0].probabilities == pytest.approx(
         {"up": 0.5761168848, "flat": 0.2119415576, "down": 0.2119415576}
     )
+
+
+@pytest.mark.parametrize(
+    "normalizer_override",
+    [
+        {"method": "unknown"},
+        {"iqrs": [0.0]},
+        {"lower_bounds": [2.0], "upper_bounds": [1.0]},
+    ],
+)
+def test_logistic_offline_loader_rejects_invalid_normalizer_schema(
+    normalizer_override: dict[str, object],
+) -> None:
+    payload = _literal_logistic_payload()
+    normalizers = payload["normalizers"]
+    assert isinstance(normalizers, dict)
+    normalizer = normalizers["XTAI"]
+    assert isinstance(normalizer, dict)
+    normalizer.update(normalizer_override)
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+    with pytest.raises(ValueError, match="artifact_schema_invalid"):
+        RegularizedMultinomialLogisticTrendForecaster.load(serialized)
+
+
+def test_logistic_offline_loader_rejects_unknown_artifact_fields() -> None:
+    payload = _literal_logistic_payload()
+    payload["unknown_field"] = "must-not-be-ignored"
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+    with pytest.raises(ValueError, match="artifact_schema_invalid"):
+        RegularizedMultinomialLogisticTrendForecaster.load(serialized)

@@ -1,12 +1,14 @@
 import hashlib
 import json
 from datetime import UTC, date, datetime
+from io import BytesIO
 
 import pytest
 from sqlalchemy import create_engine, func, select
 
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
+    BootstrapGatePolicyVersion,
     DecideApproval,
     EvaluateBootstrapCandidate,
     GateMeasurement,
@@ -15,6 +17,7 @@ from stock_forecasting.model_governance import (
     InMemoryLifecycleStore,
     LifecycleConflict,
     ModelLifecycle,
+    ObjectGatePolicyRepository,
     RecordCandidate,
     RecordShadowEod,
     ShadowRunEvidence,
@@ -111,6 +114,95 @@ def test_bootstrap_policy_is_an_immutable_content_addressed_artifact() -> None:
         f"sha256:{hashlib.sha256(BOOTSTRAP_GATE_POLICY_V1.serialized).hexdigest()}"
     )
     assert BOOTSTRAP_GATE_POLICY_V1.thresholds
+
+
+@pytest.mark.parametrize(
+    "threshold",
+    [
+        {"name": "metric", "category": "unknown", "comparison": "at_most", "limit": 0.0},
+        {"name": "metric", "category": "security", "comparison": "unknown", "limit": 0.0},
+        {"name": "metric", "category": "security", "comparison": "at_most"},
+    ],
+)
+def test_bootstrap_policy_parser_rejects_unknown_or_incomplete_thresholds(
+    threshold: dict[str, object],
+) -> None:
+    serialized = json.dumps(
+        {"policy_name": "invalid-policy", "thresholds": [threshold]},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    policy_id = f"sha256:{hashlib.sha256(serialized).hexdigest()}"
+
+    with pytest.raises(ValueError, match="gate_policy_schema_invalid"):
+        BootstrapGatePolicyVersion.from_serialized(policy_id, serialized)
+
+
+def test_lifecycle_fails_closed_when_policy_uses_an_unknown_gate_category() -> None:
+    serialized = json.dumps(
+        {
+            "policy_name": "unknown-category-policy",
+            "thresholds": [
+                {
+                    "name": "unknown.metric",
+                    "category": "not-a-gate",
+                    "comparison": "at_most",
+                    "limit": 0.0,
+                }
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    policy_id = f"sha256:{hashlib.sha256(serialized).hexdigest()}"
+
+    class PolicyObjects:
+        def open_by_id(self, object_id: str) -> BytesIO:
+            assert object_id == policy_id
+            return BytesIO(serialized)
+
+    store = InMemoryLifecycleStore()
+    lifecycle = ModelLifecycle(
+        store,
+        policy_repository=ObjectGatePolicyRepository(PolicyObjects()),
+        evidence_repository=_VerifiedEvidenceRepository(),
+    )
+    candidate_id = "candidate-invalid-policy"
+    model_family_id = "family-invalid-policy"
+    _record_candidate(
+        lifecycle,
+        candidate_id=candidate_id,
+        model_family_id=model_family_id,
+        improvement=12.0,
+    )
+    report = HardGateReportArtifact.create(
+        policy_version_id=policy_id,
+        evaluation_report_id=f"sha256:evaluation-{candidate_id}",
+        measurements=(GateMeasurement("unknown.metric", 1.0),),
+    )
+    evidence = HardGateEvidence.create(
+        evidence_kind="formal_evidence",
+        policy_version_id=policy_id,
+        evaluation_report_id=report.evaluation_report_id,
+        evidence_refs=(report.artifact_id,),
+        measurements=report.measurements,
+    )
+
+    result = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-invalid-policy",
+            model_family_id=model_family_id,
+            candidate_id=candidate_id,
+            policy_version_id=policy_id,
+            hard_gates=evidence,
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "gate_failed"
+    assert result.gate_decision is not None
+    assert result.gate_decision.failed_gates == ("hard_gate_evidence",)
 
 
 def test_bootstrap_gate_rejects_unresolved_artifact_references() -> None:

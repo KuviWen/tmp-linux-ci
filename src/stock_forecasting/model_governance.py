@@ -159,9 +159,35 @@ class HardGateEvidence:
         return rebuilt == self
 
 
+GateCategory = Literal[
+    "qualification",
+    "point_in_time",
+    "leakage",
+    "calibration",
+    "economics",
+    "stability",
+    "coverage",
+    "operational",
+    "security",
+    "reproducibility",
+]
+_GATE_NAMES: tuple[GateCategory, ...] = (
+    "qualification",
+    "point_in_time",
+    "leakage",
+    "calibration",
+    "economics",
+    "stability",
+    "coverage",
+    "operational",
+    "security",
+    "reproducibility",
+)
+
+
 @dataclass(frozen=True)
 class GateThreshold:
-    category: str
+    category: GateCategory
     comparison: Literal["at_least", "at_most"]
     limit: float
 
@@ -186,6 +212,20 @@ class BootstrapGatePolicyVersion:
         thresholds: Mapping[str, GateThreshold],
     ) -> BootstrapGatePolicyVersion:
         ordered = tuple(sorted(thresholds.items()))
+        if (
+            not policy_name
+            or not ordered
+            or len({name for name, _ in ordered}) != len(ordered)
+            or {threshold.category for _, threshold in ordered} != set(_GATE_NAMES)
+            or any(
+                not name.startswith(f"{threshold.category}.")
+                or threshold.comparison not in {"at_least", "at_most"}
+                or isinstance(threshold.limit, bool)
+                or not isfinite(threshold.limit)
+                for name, threshold in ordered
+            )
+        ):
+            raise ValueError("gate_policy_schema_invalid")
         payload = {
             "policy_name": policy_name,
             "thresholds": [
@@ -210,18 +250,36 @@ class BootstrapGatePolicyVersion:
     def from_serialized(
         cls, policy_version_id: str, serialized: bytes
     ) -> BootstrapGatePolicyVersion:
-        payload = cast(dict[str, object], json.loads(serialized))
-        raw_thresholds = cast(list[dict[str, object]], payload["thresholds"])
+        payload = json.loads(serialized)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"policy_name", "thresholds"}
+            or not isinstance(payload["policy_name"], str)
+            or not isinstance(payload["thresholds"], list)
+        ):
+            raise ValueError("gate_policy_schema_invalid")
+        thresholds: dict[str, GateThreshold] = {}
+        for item in payload["thresholds"]:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"name", "category", "comparison", "limit"}
+                or not isinstance(item["name"], str)
+                or item["category"] not in _GATE_NAMES
+                or item["comparison"] not in {"at_least", "at_most"}
+                or isinstance(item["limit"], bool)
+                or not isinstance(item["limit"], (int, float))
+                or not isfinite(item["limit"])
+                or item["name"] in thresholds
+            ):
+                raise ValueError("gate_policy_schema_invalid")
+            thresholds[item["name"]] = GateThreshold(
+                category=cast(GateCategory, item["category"]),
+                comparison=cast(Literal["at_least", "at_most"], item["comparison"]),
+                limit=float(item["limit"]),
+            )
         policy = cls.create(
-            policy_name=str(payload["policy_name"]),
-            thresholds={
-                str(item["name"]): GateThreshold(
-                    category=str(item["category"]),
-                    comparison=cast(Literal["at_least", "at_most"], item["comparison"]),
-                    limit=float(cast(float, item["limit"])),
-                )
-                for item in raw_thresholds
-            },
+            policy_name=payload["policy_name"],
+            thresholds=thresholds,
         )
         if policy.policy_version_id != policy_version_id or policy.serialized != serialized:
             raise ValueError("gate_policy_checksum_mismatch")
@@ -309,7 +367,7 @@ class ObjectGatePolicyRepository:
             objects = self._objects() if callable(self._objects) else self._objects
             serialized = objects.open_by_id(policy_version_id).read()
             return BootstrapGatePolicyVersion.from_serialized(policy_version_id, serialized)
-        except (FileNotFoundError, OSError, ValueError) as error:
+        except (FileNotFoundError, KeyError, OSError, TypeError, ValueError) as error:
             raise KeyError(policy_version_id) from error
 
 
@@ -799,18 +857,7 @@ class SqlAlchemyLifecycleStore:
 
 
 class ModelLifecycle:
-    _gate_names: tuple[str, ...] = (
-        "qualification",
-        "point_in_time",
-        "leakage",
-        "calibration",
-        "economics",
-        "stability",
-        "coverage",
-        "operational",
-        "security",
-        "reproducibility",
-    )
+    _gate_names = _GATE_NAMES
 
     def __init__(
         self,
