@@ -7,13 +7,13 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Literal, Protocol, cast
 
+from stock_forecasting.contracts import HistoricalTrainingLineage
 from stock_forecasting.forecasting import (
     CalibrationEvidence,
     ClassPriorTrendForecaster,
     FeatureBatch,
     FeatureRow,
     ForecastPrediction,
-    HistoricalTrainingLineage,
     ModelArtifact,
     PredictionRequest,
     RegularizedMultinomialLogisticTrendForecaster,
@@ -47,7 +47,11 @@ class FormalHistoricalClaimVerifier(Protocol):
         self,
         *,
         lineage: HistoricalTrainingLineage,
-        feature_batch: FeatureBatch,
+        feature_batch_id: str,
+        source_policy_manifest_id: str,
+        label_manifest_id: str,
+        fold_manifest_id: str,
+        feature_rows_digest: str,
     ) -> bool: ...
 
 
@@ -56,7 +60,11 @@ class _UnavailableHistoricalClaimVerifier:
         self,
         *,
         lineage: HistoricalTrainingLineage,
-        feature_batch: FeatureBatch,
+        feature_batch_id: str,
+        source_policy_manifest_id: str,
+        label_manifest_id: str,
+        fold_manifest_id: str,
+        feature_rows_digest: str,
     ) -> bool:
         return False
 
@@ -243,14 +251,25 @@ class ForecastLab:
             return False
         if {item.market for item in lineages} != set(self._markets):
             return False
+        if not intent.feature_batch.is_content_addressed():
+            return False
         lineage_by_market = {item.market: item for item in lineages}
         try:
             return all(
                 (lineage := lineage_by_market[item.market]).claim_id == item.claim_id
-                and lineage.is_bound_to(intent.feature_batch)
+                and lineage.source_policy_manifest_id
+                == intent.feature_batch.source_policy_manifest_id
+                and lineage.label_manifest_id == intent.feature_batch.label_manifest_id
+                and lineage.fold_manifest_id == intent.feature_batch.fold_manifest_id
+                and lineage.feature_rows_digest
+                == intent.feature_batch.market_rows_digest(item.market)
                 and self._historical_claim_verifier.verify_training_lineage(
                     lineage=lineage,
-                    feature_batch=intent.feature_batch,
+                    feature_batch_id=intent.feature_batch.feature_batch_id,
+                    source_policy_manifest_id=intent.feature_batch.source_policy_manifest_id,
+                    label_manifest_id=intent.feature_batch.label_manifest_id,
+                    fold_manifest_id=intent.feature_batch.fold_manifest_id,
+                    feature_rows_digest=intent.feature_batch.market_rows_digest(item.market),
                 )
                 for item in intent.historical_claims
             )

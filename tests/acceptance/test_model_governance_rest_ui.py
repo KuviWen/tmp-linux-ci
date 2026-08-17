@@ -15,9 +15,8 @@ from stock_forecasting.model_governance import (
     RecordCandidate,
 )
 from tests.modeling_support import (
-    GATE_REPORT_CONTENT,
-    GATE_REPORT_REF,
     passing_hard_gate_evidence,
+    passing_hard_gate_report,
 )
 
 
@@ -34,9 +33,10 @@ def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
         observed_at=now,
         local_identity=identity,
     )
+    report = passing_hard_gate_report("sha256:research-evaluation")
     application.governance_object_repository.put_verified(
-        BytesIO(GATE_REPORT_CONTENT),
-        expected_checksum=GATE_REPORT_REF.removeprefix("sha256:"),
+        BytesIO(report.serialized),
+        expected_checksum=report.artifact_id.removeprefix("sha256:"),
         metadata={"content_type": "application/json", "object_kind": "gate_report"},
     )
     application.model_lifecycle.execute(
@@ -118,7 +118,9 @@ def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> Non
             "hard_gate_evidence_id": passing_hard_gate_evidence(
                 "sha256:research-evaluation"
             ).evidence_id,
-            "hard_gate_evidence_refs": [GATE_REPORT_REF],
+            "hard_gate_evidence_refs": [
+                passing_hard_gate_report("sha256:research-evaluation").artifact_id
+            ],
         },
         "approval": {"status": "awaiting_approval"},
         "shadow": {"eligible_cycle_count": 0, "required": 5},

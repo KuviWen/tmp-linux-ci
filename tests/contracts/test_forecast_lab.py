@@ -2,13 +2,14 @@ import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
+from stock_forecasting.contracts import HistoricalTrainingLineage
 from stock_forecasting.forecast_lab import (
     ForecastLab,
     HistoricalClaimRef,
     Market,
     TrainingIntentRef,
 )
-from stock_forecasting.forecasting import FeatureBatch, FeatureRow, HistoricalTrainingLineage
+from stock_forecasting.forecasting import FeatureBatch, FeatureRow
 from tests.modeling_support import engineering_model_history
 
 
@@ -238,14 +239,19 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
             self,
             *,
             lineage: HistoricalTrainingLineage,
-            feature_batch: FeatureBatch,
+            feature_batch_id: str,
+            source_policy_manifest_id: str,
+            label_manifest_id: str,
+            fold_manifest_id: str,
+            feature_rows_digest: str,
         ) -> bool:
             verified_lineages.append(lineage)
             return (
-                lineage.feature_batch_id == feature_batch.feature_batch_id
-                and lineage.source_policy_manifest_id == feature_batch.source_policy_manifest_id
-                and lineage.label_manifest_id == feature_batch.label_manifest_id
-                and lineage.fold_manifest_id == feature_batch.fold_manifest_id
+                feature_batch_id.startswith("sha256:")
+                and lineage.source_policy_manifest_id == source_policy_manifest_id
+                and lineage.label_manifest_id == label_manifest_id
+                and lineage.fold_manifest_id == fold_manifest_id
+                and lineage.feature_rows_digest == feature_rows_digest
             )
 
     batch = engineering_model_history()
@@ -260,13 +266,14 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
             feature_snapshot_id=f"sha256:snapshot-{market.lower()}",
             qualification_fold_manifest_id=f"sha256:qualification-fold-{market.lower()}",
             source_policy_id=f"sha256:source-policy-{market.lower()}",
-            feature_batch_id=batch.feature_batch_id,
             source_policy_manifest_id=batch.source_policy_manifest_id,
             label_manifest_id=batch.label_manifest_id,
             fold_manifest_id=batch.fold_manifest_id,
+            feature_rows_digest=batch.market_rows_digest(market),
         )
 
     lineages = (lineage("XTAI"), lineage("XNAS"))
+    qualified_batch = replace(batch, historical_lineage=lineages).with_content_id()
 
     def claim_ref(item: HistoricalTrainingLineage) -> HistoricalClaimRef:
         return HistoricalClaimRef(
@@ -280,7 +287,7 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
         initiated_by="model-operator-a",
         executed_by="model-operator-b",
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
-        feature_batch=replace(batch, historical_lineage=lineages),
+        feature_batch=qualified_batch,
         preregistered_seeds=(17, 29, 43),
         historical_claims=tuple(claim_ref(item) for item in lineages),
     )
@@ -292,6 +299,16 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
     assert outcome.candidate_bundle.formal_qualification is True
     assert verified_lineages == list(lineages)
 
+    tampered_rows = (
+        replace(qualified_batch.rows[0], values=(999.0, -999.0)),
+        *qualified_batch.rows[1:],
+    )
+    tampered = ForecastLab(historical_claim_verifier=VerifiedClaimBoundary()).develop(
+        replace(intent, feature_batch=replace(qualified_batch, rows=tampered_rows))
+    )
+    assert tampered.status == "blocked"
+    assert tampered.blocked_reasons == ("unverified_source_basis",)
+
 
 def test_verified_claim_ids_cannot_qualify_an_unrelated_feature_batch() -> None:
     class PermissiveClaimBoundary:
@@ -299,7 +316,11 @@ def test_verified_claim_ids_cannot_qualify_an_unrelated_feature_batch() -> None:
             self,
             *,
             lineage: HistoricalTrainingLineage,
-            feature_batch: FeatureBatch,
+            feature_batch_id: str,
+            source_policy_manifest_id: str,
+            label_manifest_id: str,
+            fold_manifest_id: str,
+            feature_rows_digest: str,
         ) -> bool:
             return True
 

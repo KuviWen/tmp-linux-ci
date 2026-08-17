@@ -1,4 +1,3 @@
-import hashlib
 from datetime import date, timedelta
 
 from stock_forecasting.forecasting import FeatureBatch, FeatureRow, TrendLabel
@@ -6,17 +5,15 @@ from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     GateMeasurement,
     HardGateEvidence,
+    HardGateReportArtifact,
 )
 
-GATE_REPORT_CONTENT = b"ticket-09-worked-example-gate-report-v1"
-GATE_REPORT_REF = f"sha256:{hashlib.sha256(GATE_REPORT_CONTENT).hexdigest()}"
 
-
-def passing_hard_gate_evidence(
+def passing_hard_gate_report(
     evaluation_report_id: str,
     *,
     overrides: dict[str, float] | None = None,
-) -> HardGateEvidence:
+) -> HardGateReportArtifact:
     measurements = {
         "qualification.manifest_fraction": 1.0,
         "point_in_time.contract_fraction": 1.0,
@@ -51,12 +48,25 @@ def passing_hard_gate_evidence(
         "reproducibility.cpu_probability_max_delta": 0.000001,
     }
     measurements.update(overrides or {})
+    return HardGateReportArtifact.create(
+        policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+        evaluation_report_id=evaluation_report_id,
+        measurements=tuple(GateMeasurement(name, value) for name, value in measurements.items()),
+    )
+
+
+def passing_hard_gate_evidence(
+    evaluation_report_id: str,
+    *,
+    overrides: dict[str, float] | None = None,
+) -> HardGateEvidence:
+    report = passing_hard_gate_report(evaluation_report_id, overrides=overrides)
     return HardGateEvidence.create(
         evidence_kind="formal_evidence",
         policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
         evaluation_report_id=evaluation_report_id,
-        evidence_refs=(GATE_REPORT_REF,),
-        measurements=tuple(GateMeasurement(name, value) for name, value in measurements.items()),
+        evidence_refs=(report.artifact_id,),
+        measurements=report.measurements,
     )
 
 

@@ -17,6 +17,7 @@ from stock_forecasting.authorization import (
     SourcePolicyVersion,
     authorization_audit_payload,
 )
+from stock_forecasting.contracts import HistoricalTrainingLineage
 from stock_forecasting.data_supply import (
     PRICE_RESEARCH_REQUIRED_USES,
     HistoricalAvailabilityClaim,
@@ -1406,15 +1407,21 @@ class QualifiedHistoricalAvailabilityClaimVerifier:
         self,
         *,
         lineage: object,
-        feature_batch: object,
+        feature_batch_id: str,
+        source_policy_manifest_id: str,
+        label_manifest_id: str,
+        fold_manifest_id: str,
+        feature_rows_digest: str,
     ) -> bool:
-        from stock_forecasting.forecasting import FeatureBatch, HistoricalTrainingLineage
-
-        if not isinstance(lineage, HistoricalTrainingLineage) or not isinstance(
-            feature_batch, FeatureBatch
-        ):
+        if not isinstance(lineage, HistoricalTrainingLineage):
             return False
-        if not lineage.is_bound_to(feature_batch):
+        if (
+            not feature_batch_id.startswith("sha256:")
+            or lineage.source_policy_manifest_id != source_policy_manifest_id
+            or lineage.label_manifest_id != label_manifest_id
+            or lineage.fold_manifest_id != fold_manifest_id
+            or lineage.feature_rows_digest != feature_rows_digest
+        ):
             return False
         try:
             claim_payload = self._state_store.get_verified_governance_artifact(
@@ -1434,7 +1441,7 @@ class QualifiedHistoricalAvailabilityClaimVerifier:
         if len(reports) != 1:
             return False
         report = reports[0]
-        return (
+        lineage_matches = (
             report.get("market") == lineage.market
             and report.get("dataset_version_ids") == [lineage.dataset_version_id]
             and report.get("adjustment_version_id") == lineage.adjustment_version_id
@@ -1443,6 +1450,16 @@ class QualifiedHistoricalAvailabilityClaimVerifier:
             and report.get("fold_manifest_id") == lineage.qualification_fold_manifest_id
             and report.get("source_policy_id") == lineage.source_policy_id
         )
+        if not lineage_matches:
+            return False
+        try:
+            feature_snapshot = self._state_store.get_verified_governance_artifact(
+                artifact_id=lineage.feature_snapshot_id,
+                artifact_kind="historical_feature_snapshot",
+            )
+        except (KeyError, ValueError):
+            return False
+        return feature_snapshot.get("feature_rows_digest") == feature_rows_digest
 
 
 def historical_qualification_projections(

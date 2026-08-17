@@ -19,6 +19,24 @@ class PublicationDisposition:
     audit_reason_code: str = "fixture_policy_active"
 
 
+@dataclass(frozen=True)
+class HistoricalTrainingLineage:
+    """Immutable cross-context claim binding used by formal model training."""
+
+    market: Literal["XTAI", "XNAS"]
+    claim_id: str
+    dataset_version_id: str
+    adjustment_version_id: str
+    mature_labels_id: str
+    feature_snapshot_id: str
+    qualification_fold_manifest_id: str
+    source_policy_id: str
+    source_policy_manifest_id: str
+    label_manifest_id: str
+    fold_manifest_id: str
+    feature_rows_digest: str
+
+
 class ProbabilityVector(TypedDict):
     up: float
     flat: float

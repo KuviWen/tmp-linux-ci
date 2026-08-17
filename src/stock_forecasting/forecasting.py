@@ -4,12 +4,17 @@ import hashlib
 import json
 import random
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
-from math import exp, log, sqrt
+from math import exp, log
 from typing import Literal, Protocol, cast
 
-from stock_forecasting.contracts import PredictionPayload, ProbabilityVector, UnavailableCode
+from stock_forecasting.contracts import (
+    HistoricalTrainingLineage,
+    PredictionPayload,
+    ProbabilityVector,
+    UnavailableCode,
+)
 
 
 @dataclass(frozen=True)
@@ -47,30 +52,6 @@ class FeatureRow:
 
 
 @dataclass(frozen=True)
-class HistoricalTrainingLineage:
-    market: Literal["XTAI", "XNAS"]
-    claim_id: str
-    dataset_version_id: str
-    adjustment_version_id: str
-    mature_labels_id: str
-    feature_snapshot_id: str
-    qualification_fold_manifest_id: str
-    source_policy_id: str
-    feature_batch_id: str
-    source_policy_manifest_id: str
-    label_manifest_id: str
-    fold_manifest_id: str
-
-    def is_bound_to(self, feature_batch: FeatureBatch) -> bool:
-        return (
-            self.feature_batch_id == feature_batch.feature_batch_id
-            and self.source_policy_manifest_id == feature_batch.source_policy_manifest_id
-            and self.label_manifest_id == feature_batch.label_manifest_id
-            and self.fold_manifest_id == feature_batch.fold_manifest_id
-        )
-
-
-@dataclass(frozen=True)
 class FeatureBatch:
     feature_batch_id: str
     source_policy_manifest_id: str
@@ -79,6 +60,41 @@ class FeatureBatch:
     cost_manifest_id: str
     rows: tuple[FeatureRow, ...]
     historical_lineage: tuple[HistoricalTrainingLineage, ...] = ()
+
+    def market_rows_digest(self, market: Literal["XTAI", "XNAS"]) -> str:
+        return _content_id(
+            "feature_rows",
+            [
+                _feature_row_payload(row)
+                for row in sorted(self.rows, key=lambda item: item.row_id)
+                if row.market == market
+            ],
+        )
+
+    def content_id(self) -> str:
+        return _content_id(
+            "feature_batch",
+            {
+                "source_policy_manifest_id": self.source_policy_manifest_id,
+                "label_manifest_id": self.label_manifest_id,
+                "fold_manifest_id": self.fold_manifest_id,
+                "cost_manifest_id": self.cost_manifest_id,
+                "rows": [
+                    _feature_row_payload(row)
+                    for row in sorted(self.rows, key=lambda item: item.row_id)
+                ],
+                "historical_lineage": [
+                    asdict(lineage)
+                    for lineage in sorted(self.historical_lineage, key=lambda item: item.market)
+                ],
+            },
+        )
+
+    def with_content_id(self) -> FeatureBatch:
+        return replace(self, feature_batch_id=self.content_id())
+
+    def is_content_addressed(self) -> bool:
+        return self.feature_batch_id == self.content_id()
 
 
 @dataclass(frozen=True)
@@ -164,14 +180,19 @@ class ClassPriorTrendForecaster:
 
     def train(self, request: TrainingRequest) -> ModelArtifact:
         rows_by_id = {row.row_id: row for row in request.feature_batch.rows}
-        labels = [rows_by_id[row_id].label for row_id in request.training_row_ids]
-        if not labels or any(label is None for label in labels):
+        rows = [rows_by_id[row_id] for row_id in request.training_row_ids]
+        if not rows or any(row.label is None for row in rows):
             raise ValueError("training_labels_required")
-        typed_labels = cast(list[TrendLabel], labels)
         class_labels: tuple[TrendLabel, ...] = ("up", "flat", "down")
-        counts = {label: typed_labels.count(label) for label in class_labels}
-        total = len(labels)
-        probabilities = {label: counts[label] / total for label in counts}
+        cell_rows: dict[str, list[FeatureRow]] = {}
+        for row in rows:
+            cell_rows.setdefault(_cell_key(row), []).append(row)
+        probabilities_by_cell: dict[str, dict[TrendLabel, float]] = {}
+        for cell, members in cell_rows.items():
+            counts = {label: sum(row.label == label for row in members) for label in class_labels}
+            probabilities_by_cell[cell] = {
+                label: counts[label] / len(members) for label in class_labels
+            }
         batch = request.feature_batch
         manifest_ids = (
             batch.feature_batch_id,
@@ -186,16 +207,12 @@ class ClassPriorTrendForecaster:
             "seed": request.seed,
             "manifest_ids": manifest_ids,
             "training_selection_id": training_selection_id,
-            "probabilities": probabilities,
+            "probabilities_by_cell": probabilities_by_cell,
         }
         model_parameters_id = _artifact_id(_serialize_payload(payload))
         calibrators = _fit_temperature_calibrators(
             request,
-            lambda row: {
-                "up": probabilities["up"],
-                "flat": probabilities["flat"],
-                "down": probabilities["down"],
-            },
+            lambda row: cast(ProbabilityVector, probabilities_by_cell[_cell_key(row)]),
         )
         payload = _bind_calibrators(payload, calibrators)
         serialized = _serialize_payload(payload)
@@ -226,18 +243,25 @@ class ClassPriorTrendForecaster:
         expected_id = f"sha256:{hashlib.sha256(request.artifact.serialized).hexdigest()}"
         if request.artifact.artifact_id != expected_id:
             raise ValueError("artifact_checksum_mismatch")
-        raw_probabilities = cast(dict[str, float], self._payload["probabilities"])
-        base_probabilities = (
-            raw_probabilities["up"],
-            raw_probabilities["flat"],
-            raw_probabilities["down"],
+        probabilities_by_cell = cast(
+            dict[str, dict[str, float]], self._payload["probabilities_by_cell"]
         )
+        for row in request.rows:
+            if _cell_key(row) not in probabilities_by_cell:
+                raise ValueError("class_prior_cell_missing")
         return ForecastBatch(
             artifact_id=request.artifact.artifact_id,
             predictions=tuple(
                 ForecastPrediction(
                     row_id=row.row_id,
-                    probabilities=self._calibrated_prior(row, base_probabilities),
+                    probabilities=self._calibrated_prior(
+                        row,
+                        (
+                            probabilities_by_cell[_cell_key(row)]["up"],
+                            probabilities_by_cell[_cell_key(row)]["flat"],
+                            probabilities_by_cell[_cell_key(row)]["down"],
+                        ),
+                    ),
                 )
                 for row in request.rows
             ),
@@ -272,32 +296,35 @@ class RegularizedMultinomialLogisticTrendForecaster:
         feature_count = len(rows[0].values)
         if feature_count == 0 or any(len(row.values) != feature_count for row in rows):
             raise ValueError("consistent_features_required")
-        means = [
-            sum(row.values[index] for row in rows) / len(rows) for index in range(feature_count)
-        ]
-        scales = [
-            sqrt(sum((row.values[index] - means[index]) ** 2 for row in rows) / len(rows))
-            for index in range(feature_count)
-        ]
-        scales = [scale if scale > 1e-12 else 1.0 for scale in scales]
+        rows_by_market: dict[str, list[FeatureRow]] = {}
+        for row in rows:
+            rows_by_market.setdefault(row.market, []).append(row)
+        normalizers: dict[str, dict[str, object]] = {}
+        for market, market_rows in rows_by_market.items():
+            normalizers[market] = _fit_robust_normalizer(market_rows, feature_count)
         normalized = [
-            [(row.values[index] - means[index]) / scales[index] for index in range(feature_count)]
-            + [1.0]
-            for row in rows
+            _apply_robust_normalizer(normalizers[row.market], row.values) + [1.0] for row in rows
         ]
-        label_counts = {label: sum(row.label == label for row in rows) for label in self._labels}
-        if any(count == 0 for count in label_counts.values()):
-            raise ValueError("all_training_classes_required")
-        class_weights = {
-            label: min(
-                2.0,
-                max(
-                    0.5,
-                    len(rows) / (len(self._labels) * label_counts[label]),
-                ),
-            )
-            for label in self._labels
-        }
+        rows_by_cell: dict[str, list[FeatureRow]] = {}
+        for row in rows:
+            rows_by_cell.setdefault(_cell_key(row), []).append(row)
+        class_weights_by_cell: dict[str, dict[TrendLabel, float]] = {}
+        for cell, cell_rows in rows_by_cell.items():
+            label_counts = {
+                label: sum(row.label == label for row in cell_rows) for label in self._labels
+            }
+            if any(count == 0 for count in label_counts.values()):
+                raise ValueError("all_training_classes_required")
+            class_weights_by_cell[cell] = {
+                label: min(
+                    2.0,
+                    max(
+                        0.5,
+                        len(cell_rows) / (len(self._labels) * label_counts[label]),
+                    ),
+                )
+                for label in self._labels
+            }
         generator = random.Random(request.seed)
         weights = [
             [generator.uniform(-0.01, 0.01) for _ in range(feature_count + 1)] for _ in self._labels
@@ -317,7 +344,10 @@ class RegularizedMultinomialLogisticTrendForecaster:
                     ]
                 )
                 assert row.label is not None
-                sample_weight = class_weights[row.label]
+                cell = _cell_key(row)
+                sample_weight = class_weights_by_cell[cell][row.label] / (
+                    len(rows_by_cell[cell]) * len(rows_by_cell)
+                )
                 for label_index, label in enumerate(self._labels):
                     error = (
                         probabilities[label_index] - (1.0 if row.label == label else 0.0)
@@ -332,7 +362,7 @@ class RegularizedMultinomialLogisticTrendForecaster:
                         else 0.0
                     )
                     label_weights[feature_index] -= learning_rate * (
-                        gradients[label_index][feature_index] / len(rows) + penalty
+                        gradients[label_index][feature_index] + penalty
                     )
         batch = request.feature_batch
         manifest_ids = (
@@ -348,17 +378,20 @@ class RegularizedMultinomialLogisticTrendForecaster:
             "seed": request.seed,
             "manifest_ids": manifest_ids,
             "training_selection_id": training_selection_id,
-            "normalizer": {"means": means, "scales": scales},
-            "class_weights": class_weights,
+            "normalizers": normalizers,
+            "class_weights_by_cell": class_weights_by_cell,
+            "loss_weighting": "equal_market_horizon_cells",
             "regularization": regularization,
             "weights": weights,
         }
         model_parameters_id = _artifact_id(_serialize_payload(payload))
 
         def raw_probabilities(row: FeatureRow) -> ProbabilityVector:
-            vector = [
-                (value - means[index]) / scales[index] for index, value in enumerate(row.values)
-            ] + [1.0]
+            try:
+                normalizer = normalizers[row.market]
+            except KeyError as error:
+                raise ValueError("market_normalizer_missing") from error
+            vector = _apply_robust_normalizer(normalizer, row.values) + [1.0]
             values = self._softmax(
                 [
                     sum(weight * value for weight, value in zip(label_weights, vector, strict=True))
@@ -397,17 +430,18 @@ class RegularizedMultinomialLogisticTrendForecaster:
         expected_id = f"sha256:{hashlib.sha256(request.artifact.serialized).hexdigest()}"
         if request.artifact.artifact_id != expected_id:
             raise ValueError("artifact_checksum_mismatch")
-        normalizer = cast(dict[str, list[float]], self._payload["normalizer"])
-        means = normalizer["means"]
-        scales = normalizer["scales"]
+        normalizers = cast(dict[str, dict[str, object]], self._payload["normalizers"])
         weights = cast(list[list[float]], self._payload["weights"])
         predictions: list[ForecastPrediction] = []
         for row in request.rows:
-            if len(row.values) != len(means):
+            try:
+                normalizer = normalizers[row.market]
+            except KeyError as error:
+                raise ValueError("market_normalizer_missing") from error
+            medians = cast(list[float], normalizer["medians"])
+            if len(row.values) != len(medians):
                 raise ValueError("feature_count_mismatch")
-            vector = [
-                (value - means[index]) / scales[index] for index, value in enumerate(row.values)
-            ] + [1.0]
+            vector = _apply_robust_normalizer(normalizer, row.values) + [1.0]
             raw_probabilities = self._softmax(
                 [
                     sum(weight * value for weight, value in zip(label_weights, vector, strict=True))
@@ -586,6 +620,72 @@ def _artifact_id(serialized: bytes) -> str:
 
 def _content_id(kind: str, payload: object) -> str:
     return _artifact_id(kind.encode() + _serialize_payload(payload))
+
+
+def _feature_row_payload(row: FeatureRow) -> dict[str, object]:
+    return {
+        "row_id": row.row_id,
+        "market": row.market,
+        "horizon_sessions": row.horizon_sessions,
+        "values": row.values,
+        "label": row.label,
+        "session_date": row.session_date.isoformat() if row.session_date is not None else None,
+    }
+
+
+def _cell_key(row: FeatureRow) -> str:
+    return f"{row.market}:{row.horizon_sessions}"
+
+
+def _fit_robust_normalizer(
+    rows: list[FeatureRow],
+    feature_count: int,
+) -> dict[str, object]:
+    medians: list[float] = []
+    iqrs: list[float] = []
+    lower_bounds: list[float] = []
+    upper_bounds: list[float] = []
+    for index in range(feature_count):
+        values = sorted(row.values[index] for row in rows)
+        median = _quantile(values, 0.5)
+        iqr = _quantile(values, 0.75) - _quantile(values, 0.25)
+        medians.append(median)
+        iqrs.append(iqr if iqr > 1e-12 else 1.0)
+        lower_bounds.append(_quantile(values, 0.01))
+        upper_bounds.append(_quantile(values, 0.99))
+    return {
+        "method": "median_iqr_winsorized",
+        "lower_quantile": 0.01,
+        "upper_quantile": 0.99,
+        "medians": medians,
+        "iqrs": iqrs,
+        "lower_bounds": lower_bounds,
+        "upper_bounds": upper_bounds,
+    }
+
+
+def _apply_robust_normalizer(
+    normalizer: dict[str, object],
+    values: tuple[float, ...],
+) -> list[float]:
+    medians = cast(list[float], normalizer["medians"])
+    iqrs = cast(list[float], normalizer["iqrs"])
+    lower_bounds = cast(list[float], normalizer["lower_bounds"])
+    upper_bounds = cast(list[float], normalizer["upper_bounds"])
+    if not (len(values) == len(medians) == len(iqrs) == len(lower_bounds) == len(upper_bounds)):
+        raise ValueError("feature_count_mismatch")
+    return [
+        (min(max(value, lower_bounds[index]), upper_bounds[index]) - medians[index]) / iqrs[index]
+        for index, value in enumerate(values)
+    ]
+
+
+def _quantile(values: list[float], probability: float) -> float:
+    position = (len(values) - 1) * probability
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(values) - 1)
+    fraction = position - lower_index
+    return values[lower_index] + (values[upper_index] - values[lower_index]) * fraction
 
 
 def _training_selection_id(request: TrainingRequest) -> str:

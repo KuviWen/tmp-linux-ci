@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from math import isfinite
 from types import MappingProxyType
 from typing import BinaryIO, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
@@ -25,6 +26,87 @@ class LifecycleConflict(RuntimeError):
 class GateMeasurement:
     name: str
     value: float
+
+
+@dataclass(frozen=True)
+class HardGateReportArtifact:
+    artifact_id: str
+    policy_version_id: str
+    evaluation_report_id: str
+    measurements: tuple[GateMeasurement, ...]
+    serialized: bytes
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        policy_version_id: str,
+        evaluation_report_id: str,
+        measurements: tuple[GateMeasurement, ...],
+    ) -> HardGateReportArtifact:
+        ordered = tuple(sorted(measurements, key=lambda item: item.name))
+        if len({item.name for item in ordered}) != len(ordered):
+            raise ValueError("hard_gate_report_duplicate_measurement")
+        if any(not item.name or not isfinite(item.value) for item in ordered):
+            raise ValueError("hard_gate_report_invalid_measurement")
+        payload = {
+            "artifact_kind": "bootstrap_hard_gate_report",
+            "schema_version": "bootstrap-hard-gate-report/v1",
+            "policy_version_id": policy_version_id,
+            "evaluation_report_id": evaluation_report_id,
+            "measurements": [{"name": item.name, "value": item.value} for item in ordered],
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return cls(
+            artifact_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
+            policy_version_id=policy_version_id,
+            evaluation_report_id=evaluation_report_id,
+            measurements=ordered,
+            serialized=serialized,
+        )
+
+    @classmethod
+    def from_serialized(
+        cls,
+        artifact_id: str,
+        serialized: bytes,
+    ) -> HardGateReportArtifact:
+        payload = json.loads(serialized)
+        if not isinstance(payload, dict) or set(payload) != {
+            "artifact_kind",
+            "schema_version",
+            "policy_version_id",
+            "evaluation_report_id",
+            "measurements",
+        }:
+            raise ValueError("hard_gate_report_schema_invalid")
+        if (
+            payload["artifact_kind"] != "bootstrap_hard_gate_report"
+            or payload["schema_version"] != "bootstrap-hard-gate-report/v1"
+            or not isinstance(payload["policy_version_id"], str)
+            or not isinstance(payload["evaluation_report_id"], str)
+            or not isinstance(payload["measurements"], list)
+        ):
+            raise ValueError("hard_gate_report_schema_invalid")
+        measurements: list[GateMeasurement] = []
+        for item in payload["measurements"]:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"name", "value"}
+                or not isinstance(item["name"], str)
+                or isinstance(item["value"], bool)
+                or not isinstance(item["value"], (int, float))
+            ):
+                raise ValueError("hard_gate_report_schema_invalid")
+            measurements.append(GateMeasurement(item["name"], float(item["value"])))
+        report = cls.create(
+            policy_version_id=payload["policy_version_id"],
+            evaluation_report_id=payload["evaluation_report_id"],
+            measurements=tuple(measurements),
+        )
+        if report.artifact_id != artifact_id or report.serialized != serialized:
+            raise ValueError("hard_gate_report_checksum_mismatch")
+        return report
 
 
 @dataclass(frozen=True)
@@ -197,7 +279,7 @@ class GatePolicyRepository(Protocol):
 
 
 class GateEvidenceRepository(Protocol):
-    def is_verified(self, artifact_id: str) -> bool: ...
+    def resolve(self, evidence: HardGateEvidence) -> HardGateReportArtifact | None: ...
 
 
 class ContentAddressedObjectRepository(Protocol):
@@ -238,18 +320,21 @@ class ObjectGateEvidenceRepository:
     ) -> None:
         self._objects = objects
 
-    def is_verified(self, artifact_id: str) -> bool:
+    def resolve(self, evidence: HardGateEvidence) -> HardGateReportArtifact | None:
+        if len(evidence.evidence_refs) != 1:
+            return None
+        artifact_id = evidence.evidence_refs[0]
         try:
             objects = self._objects() if callable(self._objects) else self._objects
-            objects.open_by_id(artifact_id).read()
-        except (FileNotFoundError, OSError, ValueError):
-            return False
-        return True
+            serialized = objects.open_by_id(artifact_id).read()
+            return HardGateReportArtifact.from_serialized(artifact_id, serialized)
+        except (FileNotFoundError, KeyError, OSError, TypeError, ValueError):
+            return None
 
 
 class UnavailableGateEvidenceRepository:
-    def is_verified(self, artifact_id: str) -> bool:
-        return False
+    def resolve(self, evidence: HardGateEvidence) -> HardGateReportArtifact | None:
+        return None
 
 
 @dataclass(frozen=True)
@@ -797,26 +882,27 @@ class ModelLifecycle:
             policy = self._policy_repository.get(command.policy_version_id)
         except KeyError:
             policy = None
+        report = self._evidence_repository.resolve(evidence)
         thresholds = dict(policy.thresholds) if policy is not None else {}
         evidence_is_valid = (
             policy is not None
+            and report is not None
             and evidence.evidence_kind == "formal_evidence"
             and evidence.policy_version_id == command.policy_version_id
             and evidence.evaluation_report_id == candidate["evaluation_report_id"]
             and evidence.is_content_addressed()
-            and bool(evidence.evidence_refs)
-            and all(
-                self._evidence_repository.is_verified(reference)
-                for reference in evidence.evidence_refs
-            )
-            and {item.name for item in evidence.measurements} == set(thresholds)
+            and report.policy_version_id == command.policy_version_id
+            and report.evaluation_report_id == candidate["evaluation_report_id"]
+            and report.measurements == evidence.measurements
+            and {item.name for item in report.measurements} == set(thresholds)
         )
         if not evidence_is_valid:
             failed_gates.append("hard_gate_evidence")
         else:
+            assert report is not None
             failed_categories = {
                 threshold.category
-                for measurement in evidence.measurements
+                for measurement in report.measurements
                 if not (threshold := thresholds[measurement.name]).passes(measurement.value)
             }
             failed_gates.extend(
@@ -831,6 +917,14 @@ class ModelLifecycle:
             "failed_gates": failed_gates,
             "hard_gate_evidence_id": evidence.evidence_id,
             "hard_gate_evidence_refs": evidence.evidence_refs,
+            "hard_gate_report_id": report.artifact_id if report is not None else None,
+            "submitted_hard_gate_measurements": [
+                {"name": item.name, "value": item.value} for item in evidence.measurements
+            ],
+            "verified_hard_gate_measurements": [
+                {"name": item.name, "value": item.value}
+                for item in (report.measurements if evidence_is_valid and report else ())
+            ],
             "serving_status": "blocked",
         }
         decision = GateDecision(

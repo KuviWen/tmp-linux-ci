@@ -1,4 +1,5 @@
 import hashlib
+import json
 from datetime import UTC, date, datetime
 
 import pytest
@@ -10,6 +11,7 @@ from stock_forecasting.model_governance import (
     EvaluateBootstrapCandidate,
     GateMeasurement,
     HardGateEvidence,
+    HardGateReportArtifact,
     InMemoryLifecycleStore,
     LifecycleConflict,
     ModelLifecycle,
@@ -20,12 +22,17 @@ from stock_forecasting.model_governance import (
 )
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import metadata
-from tests.modeling_support import GATE_REPORT_REF, passing_hard_gate_evidence
+from tests.modeling_support import passing_hard_gate_evidence
 
 
 class _VerifiedEvidenceRepository:
-    def is_verified(self, artifact_id: str) -> bool:
-        return artifact_id == GATE_REPORT_REF
+    def resolve(self, evidence: HardGateEvidence) -> HardGateReportArtifact | None:
+        report = HardGateReportArtifact.create(
+            policy_version_id=evidence.policy_version_id,
+            evaluation_report_id=evidence.evaluation_report_id,
+            measurements=evidence.measurements,
+        )
+        return report if evidence.evidence_refs == (report.artifact_id,) else None
 
 
 def _verified_lifecycle(
@@ -132,6 +139,47 @@ def test_bootstrap_gate_rejects_unresolved_artifact_references() -> None:
     assert result.gate_decision.failed_gates == ("hard_gate_evidence",)
 
 
+def test_bootstrap_gate_rejects_measurements_that_do_not_match_the_resolved_report() -> None:
+    lifecycle = _verified_lifecycle(InMemoryLifecycleStore())
+    candidate_id = "candidate-report-mismatch"
+    model_family_id = "family-report-mismatch"
+    _record_candidate(
+        lifecycle,
+        candidate_id=candidate_id,
+        model_family_id=model_family_id,
+        improvement=12.0,
+    )
+    valid = _hard_gates(candidate_id)
+    tampered = HardGateEvidence.create(
+        evidence_kind=valid.evidence_kind,
+        policy_version_id=valid.policy_version_id,
+        evaluation_report_id=valid.evaluation_report_id,
+        evidence_refs=valid.evidence_refs,
+        measurements=tuple(
+            GateMeasurement(item.name, 1.0)
+            if item.name == "security.critical_finding_count"
+            else item
+            for item in valid.measurements
+        ),
+    )
+
+    result = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-report-mismatch",
+            model_family_id=model_family_id,
+            candidate_id=candidate_id,
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=tampered,
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "gate_failed"
+    assert result.gate_decision is not None
+    assert result.gate_decision.failed_gates == ("hard_gate_evidence",)
+
+
 def test_in_memory_store_matches_sql_command_replay_and_conflict_contract() -> None:
     store = InMemoryLifecycleStore()
     lifecycle = ModelLifecycle(store)
@@ -214,6 +262,12 @@ def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> Non
     assert passed.gate_decision is not None
     assert passed.gate_decision.failed_gates == ()
     assert passed.gate_decision.serving_status == "blocked"
+    recorded_gate = json.loads(store.events("family-pass")[-1].payload_json)
+    assert recorded_gate["hard_gate_report_id"] == _hard_gates("candidate-pass").evidence_refs[0]
+    assert (
+        recorded_gate["verified_hard_gate_measurements"]
+        == recorded_gate["submitted_hard_gate_measurements"]
+    )
 
     _record_candidate(
         lifecycle,

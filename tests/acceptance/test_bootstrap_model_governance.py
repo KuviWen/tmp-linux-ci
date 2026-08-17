@@ -14,10 +14,9 @@ from stock_forecasting.bootstrap_workflow import (
 from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
 from stock_forecasting.model_governance import BOOTSTRAP_GATE_POLICY_V1
 from tests.modeling_support import (
-    GATE_REPORT_CONTENT,
-    GATE_REPORT_REF,
     engineering_model_history,
     passing_hard_gate_evidence,
+    passing_hard_gate_report,
 )
 
 
@@ -31,11 +30,6 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
         expires_at=now + timedelta(hours=2),
     )
     application = build_test_application(observed_at=now, local_identity=approver)
-    application.governance_object_repository.put_verified(
-        BytesIO(GATE_REPORT_CONTENT),
-        expected_checksum=GATE_REPORT_REF.removeprefix("sha256:"),
-        metadata={"content_type": "application/json", "object_kind": "gate_report"},
-    )
     intent = TrainingIntentRef(
         training_intent_id="intent-ticket-09-engineering",
         model_family_id="dual-market-price-baseline-v1",
@@ -49,6 +43,12 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
     workflow = BootstrapGovernanceWorkflow(ForecastLab(), application.model_lifecycle)
     preview = ForecastLab().develop(intent).candidate_bundle
     assert preview is not None
+    report = passing_hard_gate_report(preview.evaluation_report.evaluation_report_id)
+    application.governance_object_repository.put_verified(
+        BytesIO(report.serialized),
+        expected_checksum=report.artifact_id.removeprefix("sha256:"),
+        metadata={"content_type": "application/json", "object_kind": "gate_report"},
+    )
 
     candidate = workflow.execute(
         BootstrapGovernanceCommand(

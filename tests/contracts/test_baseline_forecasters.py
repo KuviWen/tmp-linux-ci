@@ -59,6 +59,44 @@ def test_class_prior_artifact_loads_offline_and_predicts_training_priors() -> No
     }
 
 
+def test_class_prior_fits_separate_empirical_priors_per_market_horizon_cell() -> None:
+    rows = (
+        FeatureRow("tw-up-1", "XTAI", 1, (0.0,), "up"),
+        FeatureRow("tw-up-2", "XTAI", 1, (0.0,), "up"),
+        FeatureRow("tw-flat", "XTAI", 1, (0.0,), "flat"),
+        FeatureRow("tw-down", "XTAI", 1, (0.0,), "down"),
+        FeatureRow("us-up", "XNAS", 20, (0.0,), "up"),
+        FeatureRow("us-flat", "XNAS", 20, (0.0,), "flat"),
+        FeatureRow("us-down-1", "XNAS", 20, (0.0,), "down"),
+        FeatureRow("us-down-2", "XNAS", 20, (0.0,), "down"),
+    )
+    batch = FeatureBatch("feature", "source", "label", "fold", "cost", rows)
+    artifact = ClassPriorTrendForecaster().train(
+        TrainingRequest(batch, tuple(row.row_id for row in rows), (), 17)
+    )
+
+    predictions = ClassPriorTrendForecaster.load(artifact.serialized).predict(
+        PredictionRequest(
+            artifact,
+            (
+                FeatureRow("tw-unseen", "XTAI", 1, (9.0,), None),
+                FeatureRow("us-unseen", "XNAS", 20, (9.0,), None),
+            ),
+        )
+    )
+
+    assert predictions.predictions[0].probabilities == {
+        "up": 0.5,
+        "flat": 0.25,
+        "down": 0.25,
+    }
+    assert predictions.predictions[1].probabilities == {
+        "up": 0.25,
+        "flat": 0.25,
+        "down": 0.5,
+    }
+
+
 def test_logistic_artifact_loads_offline_and_prediction_is_order_invariant() -> None:
     rows = (
         FeatureRow("up-1", "XTAI", 1, (2.0, 1.0), "up"),
@@ -113,12 +151,24 @@ def test_logistic_artifact_loads_offline_and_prediction_is_order_invariant() -> 
 
 
 def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
-    rows = tuple(
+    taiwan_rows = tuple(
         FeatureRow(f"up-{index}", "XTAI", 1, (float(index), 1.0), "up") for index in range(8)
     ) + (
         FeatureRow("flat-only", "XTAI", 1, (0.0, 2.0), "flat"),
         FeatureRow("down-only", "XTAI", 1, (-1.0, -1.0), "down"),
-        FeatureRow("validation-flat", "XTAI", 1, (100.0, 100.0), "flat"),
+    )
+    us_rows = (
+        FeatureRow("us-up-only", "XNAS", 1, (100.0, 100.0), "up"),
+        *(
+            FeatureRow(f"us-flat-{index}", "XNAS", 1, (100.0 + index, 102.0), "flat")
+            for index in range(8)
+        ),
+        FeatureRow("us-down-only", "XNAS", 1, (99.0, 99.0), "down"),
+    )
+    rows = (
+        taiwan_rows
+        + us_rows
+        + (FeatureRow("validation-flat", "XTAI", 1, (1000.0, 1000.0), "flat"),)
     )
     batch = FeatureBatch(
         feature_batch_id="feature-batch-imbalanced",
@@ -131,7 +181,7 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
     artifact = RegularizedMultinomialLogisticTrendForecaster().train(
         TrainingRequest(
             feature_batch=batch,
-            training_row_ids=tuple(row.row_id for row in rows[:-1]),
+            training_row_ids=tuple(row.row_id for row in taiwan_rows + us_rows),
             validation_row_ids=(),
             seed=17,
         )
@@ -139,8 +189,19 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
 
     payload = json.loads(artifact.serialized)
 
-    assert payload["class_weights"] == {"up": 0.5, "flat": 2.0, "down": 2.0}
-    assert payload["normalizer"]["means"] != [100.0, 100.0]
+    assert payload["class_weights_by_cell"] == {
+        "XNAS:1": {"up": 2.0, "flat": 0.5, "down": 2.0},
+        "XTAI:1": {"up": 0.5, "flat": 2.0, "down": 2.0},
+    }
+    taiwan_normalizer = payload["normalizers"]["XTAI"]
+    assert taiwan_normalizer["method"] == "median_iqr_winsorized"
+    assert taiwan_normalizer["lower_quantile"] == 0.01
+    assert taiwan_normalizer["upper_quantile"] == 0.99
+    assert taiwan_normalizer["medians"] == [2.5, 1.0]
+    assert taiwan_normalizer["iqrs"] == [4.5, 1.0]
+    assert taiwan_normalizer["lower_bounds"] == pytest.approx([-0.91, -0.82])
+    assert taiwan_normalizer["upper_bounds"] == pytest.approx([6.91, 1.91])
+    assert payload["normalizers"]["XTAI"]["medians"] != payload["normalizers"]["XNAS"]["medians"]
 
 
 def test_logistic_offline_artifact_applies_bound_market_horizon_temperature() -> None:
@@ -149,8 +210,18 @@ def test_logistic_offline_artifact_applies_bound_market_horizon_temperature() ->
         "seed": 17,
         "manifest_ids": ["feature", "source", "label", "fold", "cost"],
         "training_selection_id": "sha256:selection",
-        "normalizer": {"means": [0.0], "scales": [1.0]},
-        "class_weights": {"up": 1.0, "flat": 1.0, "down": 1.0},
+        "normalizers": {
+            "XTAI": {
+                "iqrs": [1.0],
+                "lower_bounds": [-10.0],
+                "lower_quantile": 0.01,
+                "medians": [0.0],
+                "method": "median_iqr_winsorized",
+                "upper_bounds": [10.0],
+                "upper_quantile": 0.99,
+            }
+        },
+        "class_weights_by_cell": {"XTAI:1": {"up": 1.0, "flat": 1.0, "down": 1.0}},
         "regularization": 0.05,
         "weights": [[2.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
         "calibrators": [
