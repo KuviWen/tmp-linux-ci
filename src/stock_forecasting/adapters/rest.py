@@ -448,6 +448,10 @@ def create_web_app(application: Application) -> FastAPI:
                 "artifact_id": decision.artifact_id,
                 "evaluation_report_id": decision.evaluation_report_id,
                 "policy_version_id": decision.policy_version_id,
+                "approval_policy_version_id": decision.approval_policy_version_id,
+                "approval_mode": decision.approval_mode,
+                "approval_policy_owner_principal_id": (decision.approval_policy_owner_principal_id),
+                "independent_review": decision.independent_review,
                 "approver_id": decision.approver_id,
                 "decision": decision.decision,
                 "reason": decision.reason,
@@ -489,6 +493,12 @@ def create_web_app(application: Application) -> FastAPI:
         shadow = cast(dict[str, object], report["shadow"])
         serving = cast(dict[str, object], report["serving"])
         formal_qualification = escape(str(candidate["formal_qualification"]))
+        approval_disclosure = (
+            "Owner self-approved; no independent review（擁有者自行核准；無獨立審查）"
+            if approval.get("status") == "approved"
+            and approval.get("approval_mode") == "owner_operated"
+            else escape(str(approval["status"]))
+        )
         body = (
             "<main><header><h1>模型治理回測</h1>"
             f"<p>{escape(model_family_id)}</p></header>"
@@ -507,7 +517,7 @@ def create_web_app(application: Application) -> FastAPI:
             "</dl></section>"
             '<section class="panel"><h2>Governance</h2><dl>'
             f"<dt>Gate</dt><dd>Gate {escape(str(gate['status']))}</dd>"
-            f"<dt>Approval</dt><dd>{escape(str(approval['status']))}</dd>"
+            f"<dt>Approval</dt><dd>{approval_disclosure}</dd>"
             f"<dt>Shadow</dt><dd>{shadow['eligible_cycle_count']} / {shadow['required']}</dd>"
             f"<dt>Serving</dt><dd>Serving {escape(str(serving['status']))}</dd>"
             "</dl></section></main>"

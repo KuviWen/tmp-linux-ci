@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -10,9 +11,17 @@ from stock_forecasting.authorization_repository import (
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
 )
+from stock_forecasting.model_governance import (
+    BOOTSTRAP_GATE_POLICY_V1,
+    DecideApproval,
+    EvaluateBootstrapCandidate,
+    ModelApprovalPolicyVersion,
+    RecordCandidate,
+)
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.runtime import RuntimeSettings
 from stock_forecasting.source_credentials import SecretUseContext
+from tests.modeling_support import passing_hard_gate_evidence, passing_hard_gate_report
 
 
 def _install_fixture_policy_catalog(
@@ -182,6 +191,100 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
     persisted = b"".join(path.read_bytes() for path in source_secret_root.iterdir())
     assert b"PK-RUNTIME-PERSISTENCE" not in persisted
     assert b"runtime-persistence-secret" not in persisted
+
+
+def test_local_runtime_designates_its_single_owner_for_model_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
+    key_file = tmp_path / "run" / "owner-api-key.json"
+    identity = LocalApiKeyIdentity.issue(
+        owner="single-owner",
+        environment="development",
+        scopes={"model_governance.read", "model_governance.approve"},
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(hours=24),
+    )
+    identity.save(key_file)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'owner-runtime.db'}"
+    _install_fixture_policy_catalog(database_url, identity)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("OBJECT_ROOT", str(tmp_path / "objects"))
+    monkeypatch.setenv("SOURCE_SECRET_ROOT", str(tmp_path / "source-secrets"))
+    monkeypatch.setenv("FIXTURE_INFORMATION_CUTOFF", "2026-08-17T02:00:00Z")
+    monkeypatch.setenv("FIXTURE_COLLECTION_OBSERVED_AT", "2026-08-17T02:00:00Z")
+    monkeypatch.setenv("RUNTIME_ENVIRONMENT", "development")
+    monkeypatch.setenv("PUBLIC_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("LOCAL_API_KEY_MODE", "enabled")
+    monkeypatch.setenv("LOCAL_API_KEY_FILE", str(key_file))
+    monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", FIXTURE_ACTIVE_POLICY_SET)
+    application = RuntimeSettings.from_environment().build_application()
+    owner_id = identity.context.principal_id
+    evaluation_id = "sha256:owner-runtime-evaluation"
+    report = passing_hard_gate_report(evaluation_id)
+    application.governance_object_repository.put_verified(
+        BytesIO(report.serialized),
+        expected_checksum=report.artifact_id.removeprefix("sha256:"),
+        metadata={"content_type": "application/json", "object_kind": "gate_report"},
+    )
+    application.model_lifecycle.execute(
+        RecordCandidate(
+            command_id="record-owner-runtime-candidate",
+            model_family_id="owner-runtime-family",
+            candidate_id="owner-runtime-candidate",
+            model_family="regularized_multinomial_logistic",
+            artifact_id="sha256:owner-runtime-artifact",
+            evaluation_report_id=evaluation_id,
+            training_intent_id="owner-runtime-intent",
+            intent_initiator=owner_id,
+            training_executor=owner_id,
+            improvement_percentage_points=12.0,
+            calibrator_statuses=("sufficient_data",) * 6,
+            expected_version=0,
+            occurred_at=now,
+            formal_qualification=True,
+        )
+    )
+    application.model_lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-owner-runtime-candidate",
+            model_family_id="owner-runtime-family",
+            candidate_id="owner-runtime-candidate",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=passing_hard_gate_evidence(evaluation_id),
+            expected_version=1,
+            occurred_at=now,
+        )
+    )
+
+    result = application.model_lifecycle.execute(
+        DecideApproval(
+            command_id="approve-owner-runtime-candidate",
+            model_family_id="owner-runtime-family",
+            candidate_id="owner-runtime-candidate",
+            artifact_id="sha256:owner-runtime-artifact",
+            evaluation_report_id=evaluation_id,
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            approver_id=owner_id,
+            decision="approved",
+            reason="Owner accepts exact evidence without independent review.",
+            expected_assignment="unassigned",
+            expected_version=2,
+            occurred_at=now,
+        )
+    )
+
+    expected_policy = ModelApprovalPolicyVersion.create(
+        policy_name="owner-operated-model-approval-v1",
+        approval_mode="owner_operated",
+        owner_principal_id=owner_id,
+    )
+    assert result.status == "approved"
+    assert result.approval_decision is not None
+    assert result.approval_decision.approval_policy_version_id == (
+        expected_policy.policy_version_id
+    )
 
 
 def test_runtime_without_a_source_adapter_key_keeps_the_adapter_path_disabled(

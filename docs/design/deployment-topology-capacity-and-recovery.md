@@ -15,14 +15,14 @@
 - 區域內已提交狀態目標 `RPO≈0`；區域災難時 application PostgreSQL `RPO≤15 分鐘`、物件／artifact `RPO≤24 小時`、整體 `RTO≤4 小時`。
 - 部署更新以簽章、內容定址的部署成品運作；正式批次 pin 單一程式／設定版本，migration 採 expand／contract。
 - 容量不是未驗證的 CPU／RAM 建議，而是綁定代表性負載、硬體、成品與量測的不可變容量報告。
-- 正式上線前須完成授權回填、五次台美 EOD shadow、容量／復原／安全 gate 及多人核准。
+- 正式上線前須完成授權回填、五個不同日期的台美 EOD shadow、容量／復原／安全 gate 及版本化內部核准；單一擁有者輪廓須明示沒有獨立模型審查。
 
 ## 部署輪廓
 
 | 輪廓 | 用途 | 容量承諾 | 可用性 | 正式資料 |
 | --- | --- | --- | --- | --- |
 | `compose-dev` | Windows／macOS Docker Desktop 或 Linux 的開發、CI、契約與 E2E | 無 | 單機；可隨時重建 | 預設合成／fixture；不得帶入未核准正式資料 |
-| `compose-pilot` | Linux 單機、小型內部試營運與營運演練 | `small` | 接受主機故障及文件化維護停機 | 可使用獲准資料，仍須正式身分、secret、備份、audit 與來源政策 |
+| `compose-pilot` | Linux 單機、小型內部試營運與營運演練 | `small` | 每次只要求一個最長 24 小時的排定運作窗；接受窗間每日維護停機及主機故障 | 可使用獲准資料，仍須正式身分、secret、備份、audit 與來源政策 |
 | `k8s-production` | 正式研究介面、日終資料與模型工作 | `baseline` | 單區 HA、異地 DR | 獨立信任域、來源資格、加密根與備份 |
 
 正式、staging、test 與 dev 不共用 cluster／Compose project、database、bucket、KMS、OIDC client、來源憑證、工作負載身分或備份。另一組織需要另一個隔離部署；本拓撲不是多租戶設計。
@@ -384,7 +384,7 @@ Stretch不承諾T+120，但baseline日終資源隔離仍須守住；其他backlo
 
 ## 正式上線與切換
 
-全量回填先通過coverage、integrity、point-in-time及policy驗證。其後以正式容量連續完成至少五個合格台美EOD shadow cycles，每次均通過T+105、REST SLO、三期間完整性、notification、audit及no-leakage。另要求近期restore、SEV2 drill、有效CapacityReport、security assessment及platform＋data＋model approver共同核准。
+全量回填先通過coverage、integrity、point-in-time及policy驗證。其後以正式容量在至少五個不同且遞增的合格日期完成台美EOD shadow cycles，每次均通過T+105、REST SLO、三期間完整性、notification、audit及no-leakage。日期間可以每日排定停機；不要求主機連續五日在線，停機日也不算 cycle。另要求近期restore、SEV2 drill、有效CapacityReport、security assessment，以及platform、data與model責任的分別記錄；在 owner-operated 輪廓這些責任可由同一自然人承擔，但模型決定須揭露沒有獨立審查。
 
 Pilot到production只提升同一已簽部署成品及來源政策允許、內容定址且核准的artifact；不得複製整個volume、測試identity／secret或未審查data。正式database、bucket、entitlement及encryption root重新建立；ModelArtifact在正式核准runtime重驗權利、checksum、schema、reproduction及serving eligibility。
 
@@ -392,7 +392,7 @@ Pilot到production只提升同一已簽部署成品及來源政策允許、內�
 
 ## 營運責任與交接
 
-正式上線前至少指定platform、data、model、source、security owner，並完成下列runbooks：deployment／rollback、database／object restore、source outage、policy deletion、capacity、OIDC／secret、model rollback及regional DR。小團隊可兼任角色，但既定雙人核准與職責分離不因此取消。
+正式上線前至少指定platform、data、model、source、security責任，並完成下列runbooks：deployment／rollback、database／object restore、source outage、policy deletion、capacity、OIDC／secret、model rollback及regional DR。單一擁有者可兼任這些責任，模型核准依版本化 `owner_operated` 政策揭露非獨立審查；來源權利、安全、grant與刪除的既定雙人控制不因而自動取消。
 
 交接包包含topology／data flow、deployment inventory、support matrix、容量報告、復原集合、backup／DR evidence、source／secret expiry、dashboards／alerts／runbooks、owner／escalation、known limits及unresolved risks。接手人完成一次deployment、rollback、source incident及PredictionRecord evidence trace演練。
 

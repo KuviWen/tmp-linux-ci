@@ -332,6 +332,81 @@ BOOTSTRAP_GATE_POLICY_V1 = BootstrapGatePolicyVersion.create(
 )
 
 
+ApprovalMode = Literal["separated_duties", "owner_operated"]
+
+
+@dataclass(frozen=True)
+class ModelApprovalPolicyVersion:
+    policy_version_id: str
+    policy_name: str
+    approval_mode: ApprovalMode
+    owner_principal_id: str | None
+    serialized: bytes
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        policy_name: str,
+        approval_mode: ApprovalMode,
+        owner_principal_id: str | None,
+    ) -> ModelApprovalPolicyVersion:
+        if (
+            not policy_name
+            or approval_mode not in {"separated_duties", "owner_operated"}
+            or (approval_mode == "owner_operated" and not owner_principal_id)
+            or (approval_mode == "separated_duties" and owner_principal_id is not None)
+        ):
+            raise ValueError("model_approval_policy_schema_invalid")
+        payload = {
+            "policy_name": policy_name,
+            "approval_mode": approval_mode,
+            "owner_principal_id": owner_principal_id,
+        }
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return cls(
+            policy_version_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
+            policy_name=policy_name,
+            approval_mode=approval_mode,
+            owner_principal_id=owner_principal_id,
+            serialized=serialized,
+        )
+
+    @classmethod
+    def from_serialized(
+        cls,
+        policy_version_id: str,
+        serialized: bytes,
+    ) -> ModelApprovalPolicyVersion:
+        payload = json.loads(serialized)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"policy_name", "approval_mode", "owner_principal_id"}
+            or not isinstance(payload["policy_name"], str)
+            or payload["approval_mode"] not in {"separated_duties", "owner_operated"}
+            or not (
+                payload["owner_principal_id"] is None
+                or isinstance(payload["owner_principal_id"], str)
+            )
+        ):
+            raise ValueError("model_approval_policy_schema_invalid")
+        policy = cls.create(
+            policy_name=payload["policy_name"],
+            approval_mode=cast(ApprovalMode, payload["approval_mode"]),
+            owner_principal_id=payload["owner_principal_id"],
+        )
+        if policy.policy_version_id != policy_version_id or policy.serialized != serialized:
+            raise ValueError("model_approval_policy_checksum_mismatch")
+        return policy
+
+
+SEPARATED_DUTIES_APPROVAL_POLICY_V1 = ModelApprovalPolicyVersion.create(
+    policy_name="separated-duties-model-approval-v1",
+    approval_mode="separated_duties",
+    owner_principal_id=None,
+)
+
+
 class GatePolicyRepository(Protocol):
     def get(self, policy_version_id: str) -> BootstrapGatePolicyVersion: ...
 
@@ -566,6 +641,10 @@ class ApprovalDecision:
     artifact_id: str
     evaluation_report_id: str
     policy_version_id: str
+    approval_policy_version_id: str
+    approval_mode: ApprovalMode
+    approval_policy_owner_principal_id: str | None
+    independent_review: bool
     approver_id: str
     decision: Literal["approved", "rejected"]
     reason: str
@@ -865,12 +944,14 @@ class ModelLifecycle:
         *,
         policy_repository: GatePolicyRepository | None = None,
         evidence_repository: GateEvidenceRepository | None = None,
+        approval_policy: ModelApprovalPolicyVersion | None = None,
     ) -> None:
         self._store = store
         self._policy_repository = policy_repository or InMemoryGatePolicyRepository(
             (BOOTSTRAP_GATE_POLICY_V1,)
         )
         self._evidence_repository = evidence_repository or UnavailableGateEvidenceRepository()
+        self._approval_policy = approval_policy or SEPARATED_DUTIES_APPROVAL_POLICY_V1
 
     def execute(self, command: LifecycleCommand) -> LifecycleResult:
         if isinstance(command, RecordCandidate):
@@ -1013,10 +1094,19 @@ class ModelLifecycle:
         _, gate = self._passed_gate(command.model_family_id, command.candidate_id)
         expires_at = command.occurred_at + timedelta(days=7)
         invalidated_reason: str | None = None
-        if command.approver_id in {
+        independent_review = command.approver_id not in {
             candidate["intent_initiator"],
             candidate["training_executor"],
-        }:
+        }
+        recorded_independent_review = (
+            self._approval_policy.approval_mode == "separated_duties" and independent_review
+        )
+        if (
+            self._approval_policy.approval_mode == "owner_operated"
+            and command.approver_id != self._approval_policy.owner_principal_id
+        ):
+            invalidated_reason = "owner_principal_mismatch"
+        elif self._approval_policy.approval_mode == "separated_duties" and not independent_review:
             invalidated_reason = "duty_separation_violation"
         elif (
             command.artifact_id != gate["artifact_id"]
@@ -1040,6 +1130,10 @@ class ModelLifecycle:
             "artifact_id": command.artifact_id,
             "evaluation_report_id": command.evaluation_report_id,
             "policy_version_id": command.policy_version_id,
+            "approval_policy_version_id": self._approval_policy.policy_version_id,
+            "approval_mode": self._approval_policy.approval_mode,
+            "approval_policy_owner_principal_id": self._approval_policy.owner_principal_id,
+            "independent_review": recorded_independent_review,
             "approver_id": command.approver_id,
             "requested_decision": command.decision,
             "decision": effective_decision,
@@ -1054,6 +1148,10 @@ class ModelLifecycle:
             artifact_id=command.artifact_id,
             evaluation_report_id=command.evaluation_report_id,
             policy_version_id=command.policy_version_id,
+            approval_policy_version_id=self._approval_policy.policy_version_id,
+            approval_mode=self._approval_policy.approval_mode,
+            approval_policy_owner_principal_id=self._approval_policy.owner_principal_id,
+            independent_review=recorded_independent_review,
             approver_id=command.approver_id,
             decision=effective_decision,
             reason=command.reason,
@@ -1306,7 +1404,22 @@ class ModelGovernanceQuery:
                 else {"status": "not_evaluated"}
             ),
             "approval": (
-                {"status": ("approved" if approval["decision"] == "approved" else "rejected")}
+                {
+                    "status": ("approved" if approval["decision"] == "approved" else "rejected"),
+                    "approval_policy_version_id": approval.get("approval_policy_version_id"),
+                    "approval_mode": approval.get("approval_mode", "separated_duties"),
+                    "approval_policy_owner_principal_id": approval.get(
+                        "approval_policy_owner_principal_id"
+                    ),
+                    "independent_review": approval.get(
+                        "independent_review",
+                        approval.get("approver_id")
+                        not in {
+                            candidate["intent_initiator"],
+                            candidate["training_executor"],
+                        },
+                    ),
+                }
                 if approval is not None
                 else {
                     "status": (

@@ -997,6 +997,10 @@ components:
           required: [status]
           properties:
             status: {type: string, enum: [blocked_by_gate, awaiting_approval, approved, rejected]}
+            approval_policy_version_id: {type: [string, 'null']}
+            approval_mode: {type: string, enum: [separated_duties, owner_operated]}
+            approval_policy_owner_principal_id: {type: [string, 'null']}
+            independent_review: {type: boolean}
         shadow:
           type: object
           additionalProperties: false
@@ -1048,6 +1052,10 @@ components:
             - artifact_id
             - evaluation_report_id
             - policy_version_id
+            - approval_policy_version_id
+            - approval_mode
+            - approval_policy_owner_principal_id
+            - independent_review
             - approver_id
             - decision
             - reason
@@ -1060,6 +1068,10 @@ components:
             artifact_id: {type: string}
             evaluation_report_id: {type: string}
             policy_version_id: {type: string}
+            approval_policy_version_id: {type: string}
+            approval_mode: {type: string, enum: [separated_duties, owner_operated]}
+            approval_policy_owner_principal_id: {type: [string, 'null']}
+            independent_review: {type: boolean}
             approver_id: {type: string}
             decision: {type: string, enum: [approved, rejected]}
             reason: {type: string}

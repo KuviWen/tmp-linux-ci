@@ -143,11 +143,11 @@ Gate 的數值與細節只存在於權威領域契約；後續規格引用 trace
 - `P2-TRACE-US-01`：契約美股adapter以相同 Collector／Decoder、checkpoint、policy與reference graph contracts建立正式歷史資料集。
 - `P2-TRACE-PIT-01`：backfill qualification逐項證明session、身分生命週期、端點、修訂、公司行動、政策及歷史證據等級；current-final資料不能混入。
 - `P2-TRACE-MODEL-01`：class-prior與regularized multinomial logistic用七年窗、八季walk-forward、三seeds、六calibrators及成本情境形成候選；首個logistic只走 `BootstrapGatePolicy`。
-- `P2-TRACE-EOD-01`：市場收盤後 T+90解析一次資料選擇與服務指派，T+120前交易發布每掛牌三期間結果或機器原因；late資料只進下一次或重播。
+- `P2-TRACE-EOD-01`：市場收盤後 T+90解析一次資料選擇與服務指派，T+120前交易發布每掛牌三期間結果或機器原因；單機可在每日運作窗間排定停機，重新上線後從 committed checkpoint 補抓，late資料只進下一次或重播且不回填 observation time。
 
 ### Exit
 
-- `P2-EXIT-01`：兩市場各五次合格EOD shadow、10＋10歷史資格、bootstrap gate、人工核准、重現、回退、來源政策、故障恢復、Compose small smoke與K8s smoke全數通過，才可建立首個production服務指派。
+- `P2-EXIT-01`：兩市場在五個不同合格日期完成EOD shadow、10＋10歷史資格、bootstrap gate、版本化人工核准與獨立審查揭露、重現、回退、來源政策、故障恢復、Compose small smoke與K8s smoke全數通過，才可建立首個production服務指派；日期間每日排定停機不違反 exit，但不算 shadow cycle。
 - 首個logistic未勝class-prior至少 1 percentage point，或任一絕對gate失敗，則正式 serving 維持blocked。
 
 ## P3：多模態研究 pilot
@@ -209,7 +209,7 @@ Gate 的數值與細節只存在於權威領域契約；後續規格引用 trace
 
 ### Exit
 
-- `P5-EXIT-01`：platform、data、model、source及security owner共同簽署最終acceptance bundle；model approver、source steward與安全雙人控制不被多數票取代，任一hard-gate owner可veto。
+- `P5-EXIT-01`：platform、data、model、source及security責任決定共同進入最終acceptance bundle；單一擁有者可承擔多項責任，模型核准可依 `owner_operated` 政策明示沒有獨立審查，但source steward與安全雙人控制不被多數票或模型核准例外取代，任一hard-gate責任仍可veto。
 - 最終bundle綁定來源／契約、2,000掛牌資格、全譜系、現行／回退模型、shadow、容量、安全、restore／DR、SLO／事故、UI／REST無障礙及核准；錯誤發布、繞權、遺失、OOM或Critical／High未處置皆否決。
 
 ## 外部 dependency register

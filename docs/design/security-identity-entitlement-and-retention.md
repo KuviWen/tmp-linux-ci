@@ -130,20 +130,22 @@ Validate 是明確的 provider adapter 操作：缺少 secret 時不產生網路
 | `prediction_reader` | 查看來源政策允許的預測與解釋 | 原文、匯出、訓練、治理 |
 | `research_analyst` | 研究查詢、實驗、回測及獲准衍生資料 | 正式升版、來源政策、原始受限內容匯出 |
 | `data_operator` | 擷取、重試、隔離及資料品質處置 | 改來源權利、直接放行隔離、刪證據 |
-| `model_operator` | 建立訓練意圖、執行訓練／評估、產生候選 | 核准自己建立的候選、改正式指派 |
-| `model_approver` | 核准／拒絕候選及既有回退目標 | 建立／執行同一升版、繞過 hard gates |
+| `model_operator` | 建立訓練意圖、執行訓練／評估、產生候選 | 在 `separated_duties` 輪廓核准自己建立的候選、改正式指派 |
+| `model_approver` | 核准／拒絕候選及既有回退目標 | 在 `separated_duties` 輪廓建立／執行同一升版、繞過 hard gates |
 | `source_steward` | 維護來源政策、契約證據、來源使用資格與刪除要求 | 安全身分管理、執行實體刪除 |
 | `security_admin` | 身分映射、grant、step-up、secret 與安全政策 | 因管理角色自動取得來源內容或 audit 全文 |
 | `platform_admin` | 部署、備份、容量及基礎設施 | 因基礎設施權限取得研究內容、來源權利或模型核准 |
 | `auditor` | 受控唯讀查詢核准、授權、使用及刪除證據 | 修改、刪除或不受限匯出稽核資料 |
 
-正式環境下列操作採雙人控制，發起者不能核准自己的變更：
+正式環境下列操作預設採雙人控制，發起者不能核准自己的變更：
 
 - 候選由 `model_operator` 建立，另一位 `model_approver` 核准，自動化工作負載執行升版；
 - 來源政策由 steward 提交契約證據，另一位 steward 核實權利，security admin 核實技術限制；
 - 管理 grant 不得自我授予，至少另一位 security admin 核准；
 - 政策性刪除由 source steward 核准範圍、platform admin 執行；
 - 保存例外、audit 匯出及停用安全控制需要第二人、理由、票券及到期日。
+
+模型核准有一個明確、狹窄的 `owner_operated` 例外：部署確實只有一名自然人擁有者時，內容定址的模型核准政策可指定該 owner principal 同時訓練與核准。這不是雙人控制，也不得用兩個帳號宣稱職責分離；Decision、REST、UI 及 acceptance bundle 必須記錄 `independent_review=false`。該例外不能授予 action grant、不能放行失敗的 hard gate，也不延伸到來源權利核實、管理 grant、安全控制停用或政策性刪除。
 
 ## 授權決策 module
 

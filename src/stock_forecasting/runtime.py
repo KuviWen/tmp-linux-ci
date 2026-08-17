@@ -19,6 +19,7 @@ from stock_forecasting.authorization import (
 )
 from stock_forecasting.finmind_market_data import FinMindLiveContractValidator
 from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_ID
+from stock_forecasting.model_governance import ModelApprovalPolicyVersion
 from stock_forecasting.outbox import RelayFault
 from stock_forecasting.provider_http import (
     UrllibProviderHttpTransport as ProviderUrllibHttpTransport,
@@ -141,6 +142,11 @@ class RuntimeSettings:
             local_identity=local_identity,
             authorization_policy_set_id=self.authorization_policy_set_id,
             source_adapter_security_context=source_adapter_security_context,
+            model_approval_policy=ModelApprovalPolicyVersion.create(
+                policy_name="owner-operated-model-approval-v1",
+                approval_mode="owner_operated",
+                owner_principal_id=local_identity.context.principal_id,
+            ),
             secret_provider=EncryptedFilesystemSecretProvider(self.source_secret_root),
             source_credential_validators={
                 ALPACA_PROVIDER_ID: AlpacaLiveContractValidator(UrllibProviderHttpTransport()),

@@ -11,7 +11,9 @@ from stock_forecasting.authorization import (
 )
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
+    SEPARATED_DUTIES_APPROVAL_POLICY_V1,
     EvaluateBootstrapCandidate,
+    ModelApprovalPolicyVersion,
     RecordCandidate,
 )
 from tests.modeling_support import (
@@ -20,7 +22,9 @@ from tests.modeling_support import (
 )
 
 
-def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
+def _governance_application(
+    *, owner_operated: bool = False
+) -> tuple[Application, LocalApiKeyIdentity]:
     now = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
     identity = LocalApiKeyIdentity.issue(
         owner="model-governance-reader",
@@ -29,9 +33,19 @@ def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
         issued_at=now - timedelta(minutes=1),
         expires_at=now + timedelta(hours=2),
     )
+    approval_policy = (
+        ModelApprovalPolicyVersion.create(
+            policy_name="owner-operated-model-approval-v1",
+            approval_mode="owner_operated",
+            owner_principal_id=identity.context.principal_id,
+        )
+        if owner_operated
+        else None
+    )
     application = build_test_application(
         observed_at=now,
         local_identity=identity,
+        model_approval_policy=approval_policy,
     )
     report = passing_hard_gate_report("sha256:research-evaluation")
     application.governance_object_repository.put_verified(
@@ -48,8 +62,12 @@ def _governance_application() -> tuple[Application, LocalApiKeyIdentity]:
             artifact_id="sha256:research-artifact",
             evaluation_report_id="sha256:research-evaluation",
             training_intent_id="intent-research",
-            intent_initiator="model-operator-a",
-            training_executor="model-operator-b",
+            intent_initiator=(
+                identity.context.principal_id if owner_operated else "model-operator-a"
+            ),
+            training_executor=(
+                identity.context.principal_id if owner_operated else "model-operator-b"
+            ),
             improvement_percentage_points=47.9,
             calibrator_statuses=("sufficient_data",) * 6,
             expected_version=0,
@@ -184,10 +202,89 @@ def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> Non
     assert first.json()["decision"]["approver_id"] == identity.context.principal_id
     assert first.json()["decision"]["artifact_id"] == "sha256:research-artifact"
     assert first.json()["decision"]["expected_assignment"] == ("unassigned")
-    assert read_model.json()["approval"] == {"status": "approved"}
+    assert first.json()["decision"]["approval_policy_version_id"] == (
+        SEPARATED_DUTIES_APPROVAL_POLICY_V1.policy_version_id
+    )
+    assert first.json()["decision"]["independent_review"] is True
+    assert read_model.json()["approval"] == {
+        "status": "approved",
+        "approval_policy_version_id": (SEPARATED_DUTIES_APPROVAL_POLICY_V1.policy_version_id),
+        "approval_mode": "separated_duties",
+        "approval_policy_owner_principal_id": None,
+        "independent_review": True,
+    }
     approval_audits = application.security_audit.list_events(trace_id="trace-governance-approve")
     assert len(approval_audits) == 2
     assert {event["action"] for event in approval_audits} == {"model_governance.approve"}
+
+
+def test_designated_owner_self_approval_is_disclosed_through_rest_and_ui() -> None:
+    application, identity = _governance_application(owner_operated=True)
+    approval_policy = ModelApprovalPolicyVersion.create(
+        policy_name="owner-operated-model-approval-v1",
+        approval_mode="owner_operated",
+        owner_principal_id=identity.context.principal_id,
+    )
+    assert (
+        application.governance_object_repository.open_by_id(
+            approval_policy.policy_version_id
+        ).read()
+        == approval_policy.serialized
+    )
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    authorization = identity.credential.authorization_header()
+
+    response = client.post(
+        "/api/v1/governance/approval-decisions",
+        headers={
+            "Authorization": authorization,
+            "Idempotency-Key": "owner-approve-research-candidate",
+            "If-Match": '"2"',
+        },
+        json={
+            "model_family_id": "dual-market-price-baseline-v1",
+            "candidate_id": "candidate-research",
+            "artifact_id": "sha256:research-artifact",
+            "evaluation_report_id": "sha256:research-evaluation",
+            "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            "decision": "approved",
+            "reason": "Owner accepts the exact evidence and lack of independent review.",
+            "expected_assignment": "unassigned",
+        },
+    )
+    read_model = client.get(
+        "/api/v1/research/model-families/dual-market-price-baseline-v1/backtests",
+        headers={"Authorization": authorization},
+    )
+    page = client.get(
+        "/research/model-families/dual-market-price-baseline-v1/backtests",
+        headers={"Authorization": authorization},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "approved"
+    decision = response.json()["decision"]
+    assert {
+        "approval_policy_version_id": decision["approval_policy_version_id"],
+        "approval_mode": decision["approval_mode"],
+        "approval_policy_owner_principal_id": decision["approval_policy_owner_principal_id"],
+        "independent_review": decision["independent_review"],
+    } == {
+        "approval_policy_version_id": approval_policy.policy_version_id,
+        "approval_mode": "owner_operated",
+        "approval_policy_owner_principal_id": identity.context.principal_id,
+        "independent_review": False,
+    }
+    assert read_model.json()["approval"] == {
+        "status": "approved",
+        "approval_policy_version_id": approval_policy.policy_version_id,
+        "approval_mode": "owner_operated",
+        "approval_policy_owner_principal_id": identity.context.principal_id,
+        "independent_review": False,
+    }
+    assert page.status_code == 200
+    assert "Owner self-approved; no independent review" in page.text
+    assert "擁有者自行核准；無獨立審查" in page.text
 
 
 def test_governance_scope_cannot_bypass_a_missing_action_grant() -> None:

@@ -39,6 +39,22 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert approval["responses"]["201"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ApprovalDecisionResponse"
     }
+    approval_read = contract["components"]["schemas"]["ModelGovernanceBacktest"]["properties"][
+        "approval"
+    ]
+    assert approval_read["properties"]["approval_mode"]["enum"] == [
+        "separated_duties",
+        "owner_operated",
+    ]
+    approval_response = contract["components"]["schemas"]["ApprovalDecisionResponse"]["properties"][
+        "decision"
+    ]
+    assert {
+        "approval_policy_version_id",
+        "approval_mode",
+        "approval_policy_owner_principal_id",
+        "independent_review",
+    }.issubset(approval_response["required"])
     assert contract["paths"]["/api/v1/research/listings/{listing_id}/price-eligibility"]["get"][
         "responses"
     ]["200"]["description"] == (

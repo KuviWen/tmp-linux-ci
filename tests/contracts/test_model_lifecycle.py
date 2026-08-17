@@ -2,6 +2,7 @@ import hashlib
 import json
 from datetime import UTC, date, datetime
 from io import BytesIO
+from typing import Literal
 
 import pytest
 from sqlalchemy import create_engine, func, select
@@ -16,6 +17,8 @@ from stock_forecasting.model_governance import (
     HardGateReportArtifact,
     InMemoryLifecycleStore,
     LifecycleConflict,
+    ModelApprovalPolicyVersion,
+    ModelGovernanceQuery,
     ModelLifecycle,
     ObjectGatePolicyRepository,
     RecordCandidate,
@@ -306,6 +309,8 @@ def _record_candidate(
     model_family_id: str,
     improvement: float,
     formal_qualification: bool = True,
+    intent_initiator: str = "model-operator-a",
+    training_executor: str = "model-operator-b",
 ) -> None:
     result = lifecycle.execute(
         RecordCandidate(
@@ -316,8 +321,8 @@ def _record_candidate(
             artifact_id=f"sha256:artifact-{candidate_id}",
             evaluation_report_id=f"sha256:evaluation-{candidate_id}",
             training_intent_id=f"intent-{candidate_id}",
-            intent_initiator="model-operator-a",
-            training_executor="model-operator-b",
+            intent_initiator=intent_initiator,
+            training_executor=training_executor,
             improvement_percentage_points=improvement,
             calibrator_statuses=("sufficient_data",) * 6,
             formal_qualification=formal_qualification,
@@ -500,6 +505,174 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
     assert stale_assignment.status == "approval_rejected"
     assert stale_assignment.approval_decision is not None
     assert stale_assignment.approval_decision.invalidated_reason == ("expected_assignment_changed")
+
+
+def test_owner_operated_approval_binds_the_designated_owner_policy() -> None:
+    owner_id = "model-owner-a"
+    approval_policy = ModelApprovalPolicyVersion.create(
+        policy_name="owner-operated-model-approval-v1",
+        approval_mode="owner_operated",
+        owner_principal_id=owner_id,
+    )
+    assert approval_policy.policy_version_id == (
+        f"sha256:{hashlib.sha256(approval_policy.serialized).hexdigest()}"
+    )
+    assert (
+        ModelApprovalPolicyVersion.from_serialized(
+            approval_policy.policy_version_id,
+            approval_policy.serialized,
+        )
+        == approval_policy
+    )
+    lifecycle = ModelLifecycle(
+        InMemoryLifecycleStore(),
+        evidence_repository=_VerifiedEvidenceRepository(),
+        approval_policy=approval_policy,
+    )
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-owner-operated",
+        model_family_id="family-owner-operated",
+        improvement=12.0,
+        intent_initiator=owner_id,
+        training_executor=owner_id,
+    )
+    lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-owner-operated",
+            model_family_id="family-owner-operated",
+            candidate_id="candidate-owner-operated",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates("candidate-owner-operated"),
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    approved = lifecycle.execute(
+        DecideApproval(
+            command_id="approval-owner-operated",
+            model_family_id="family-owner-operated",
+            candidate_id="candidate-owner-operated",
+            artifact_id="sha256:artifact-candidate-owner-operated",
+            evaluation_report_id="sha256:evaluation-candidate-owner-operated",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            approver_id=owner_id,
+            decision="approved",
+            reason="Owner accepts the exact evidence and lack of independent review.",
+            expected_assignment="unassigned",
+            expected_version=2,
+            occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert approved.status == "approved"
+    assert approved.approval_decision is not None
+    assert approved.approval_decision.approval_policy_version_id == (
+        approval_policy.policy_version_id
+    )
+    assert approved.approval_decision.approval_mode == "owner_operated"
+    assert approved.approval_decision.approval_policy_owner_principal_id == owner_id
+    assert approved.approval_decision.independent_review is False
+
+    outsider = lifecycle.execute(
+        DecideApproval(
+            command_id="approval-owner-operated-outsider",
+            model_family_id="family-owner-operated",
+            candidate_id="candidate-owner-operated",
+            artifact_id="sha256:artifact-candidate-owner-operated",
+            evaluation_report_id="sha256:evaluation-candidate-owner-operated",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            approver_id="different-principal",
+            decision="approved",
+            reason="Attempted approval by a principal not named in the policy.",
+            expected_assignment="unassigned",
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert outsider.status == "approval_rejected"
+    assert outsider.approval_decision is not None
+    assert outsider.approval_decision.invalidated_reason == "owner_principal_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("approval_mode", "owner_principal_id"),
+    (("owner_operated", None), ("separated_duties", "unexpected-owner")),
+)
+def test_model_approval_policy_rejects_ambiguous_owner_configuration(
+    approval_mode: Literal["owner_operated", "separated_duties"],
+    owner_principal_id: str | None,
+) -> None:
+    with pytest.raises(ValueError, match="model_approval_policy_schema_invalid"):
+        ModelApprovalPolicyVersion.create(
+            policy_name="invalid-model-approval-policy",
+            approval_mode=approval_mode,
+            owner_principal_id=owner_principal_id,
+        )
+
+
+def test_model_approval_policy_loader_rejects_unknown_shape_and_stale_id() -> None:
+    policy = ModelApprovalPolicyVersion.create(
+        policy_name="owner-operated-model-approval-v1",
+        approval_mode="owner_operated",
+        owner_principal_id="model-owner-a",
+    )
+    unknown_shape = json.dumps(
+        {
+            **json.loads(policy.serialized),
+            "allow_self_approval": True,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+    with pytest.raises(ValueError, match="model_approval_policy_schema_invalid"):
+        ModelApprovalPolicyVersion.from_serialized(policy.policy_version_id, unknown_shape)
+    with pytest.raises(ValueError, match="model_approval_policy_checksum_mismatch"):
+        ModelApprovalPolicyVersion.from_serialized("sha256:stale", policy.serialized)
+
+
+def test_governance_query_preserves_honest_disclosure_for_legacy_approvals() -> None:
+    store = InMemoryLifecycleStore()
+    lifecycle = _verified_lifecycle(store)
+    _record_candidate(
+        lifecycle,
+        candidate_id="legacy-approved-candidate",
+        model_family_id="legacy-approved-family",
+        improvement=12.0,
+    )
+    store.append(
+        command_id="legacy-approval",
+        model_family_id="legacy-approved-family",
+        expected_version=1,
+        event_kind="ApprovalDecisionRecorded",
+        payload={
+            "candidate_id": "legacy-approved-candidate",
+            "artifact_id": "sha256:artifact-legacy-approved-candidate",
+            "evaluation_report_id": "sha256:evaluation-legacy-approved-candidate",
+            "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            "approver_id": "model-approver-c",
+            "requested_decision": "approved",
+            "decision": "approved",
+            "reason": "Legacy separated review.",
+            "expected_assignment": "unassigned",
+            "expires_at": "2026-08-25T02:00:00+00:00",
+            "invalidated_reason": None,
+        },
+        occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+    )
+
+    approval = ModelGovernanceQuery(store).get_backtest("legacy-approved-family")["approval"]
+
+    assert approval == {
+        "status": "approved",
+        "approval_policy_version_id": None,
+        "approval_mode": "separated_duties",
+        "approval_policy_owner_principal_id": None,
+        "independent_review": True,
+    }
 
 
 def test_rejection_of_exact_evidence_cannot_be_reversed_by_a_later_approval() -> None:

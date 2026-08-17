@@ -46,6 +46,8 @@ from stock_forecasting.finmind_provider_contract import (
 )
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
+    SEPARATED_DUTIES_APPROVAL_POLICY_V1,
+    ModelApprovalPolicyVersion,
     ModelGovernanceQuery,
     ModelLifecycle,
     ObjectGateEvidenceRepository,
@@ -100,6 +102,7 @@ class Application:
         authorization_policy_bootstrap: AuthorizationPolicy | None,
         fixed_security_time: datetime | None,
         source_adapter_security_context: SecurityContext | None,
+        model_approval_policy: ModelApprovalPolicyVersion | None = None,
         secret_provider: SecretProvider | None = None,
         source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
     ) -> None:
@@ -107,6 +110,7 @@ class Application:
         self.object_repository = FilesystemObjectRepository(object_root)
         self._governance_object_root = object_root / "mg"
         self._governance_object_repository: FilesystemObjectRepository | None = None
+        self._model_approval_policy = model_approval_policy or SEPARATED_DUTIES_APPROVAL_POLICY_V1
         self.model_lifecycle_store = SqlAlchemyLifecycleStore(self.state_store.engine)
         self.model_lifecycle = ModelLifecycle(
             self.model_lifecycle_store,
@@ -114,6 +118,7 @@ class Application:
             evidence_repository=ObjectGateEvidenceRepository(
                 lambda: self.governance_object_repository
             ),
+            approval_policy=self._model_approval_policy,
         )
         self.model_governance_query = ModelGovernanceQuery(self.model_lifecycle_store)
         self.local_identity = local_identity
@@ -240,6 +245,16 @@ class Application:
                 metadata={
                     "content_type": "application/json",
                     "object_kind": "bootstrap_gate_policy_version",
+                },
+            )
+            repository.put_verified(
+                BytesIO(self._model_approval_policy.serialized),
+                expected_checksum=self._model_approval_policy.policy_version_id.removeprefix(
+                    "sha256:"
+                ),
+                metadata={
+                    "content_type": "application/json",
+                    "object_kind": "model_approval_policy_version",
                 },
             )
             self._governance_object_repository = repository
@@ -417,6 +432,7 @@ def build_test_application(
     authorization_policy_set_id: str | None = None,
     authorization_policy_override: AuthorizationPolicy | None = None,
     source_adapter_security_context: SecurityContext | None = None,
+    model_approval_policy: ModelApprovalPolicyVersion | None = None,
     secret_provider: SecretProvider | None = None,
     source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
 ) -> Application:
@@ -454,6 +470,7 @@ def build_test_application(
         authorization_policy_bootstrap=authorization_policy_bootstrap,
         fixed_security_time=authorization_time or observed_at,
         source_adapter_security_context=source_adapter_security_context,
+        model_approval_policy=model_approval_policy,
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
     )
@@ -471,6 +488,7 @@ def build_application(
     local_identity: LocalApiKeyIdentity,
     authorization_policy_set_id: str,
     source_adapter_security_context: SecurityContext | None = None,
+    model_approval_policy: ModelApprovalPolicyVersion | None = None,
     secret_provider: SecretProvider | None = None,
     source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
 ) -> Application:
@@ -488,6 +506,7 @@ def build_application(
         authorization_policy_bootstrap=None,
         fixed_security_time=None,
         source_adapter_security_context=source_adapter_security_context,
+        model_approval_policy=model_approval_policy,
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
     )

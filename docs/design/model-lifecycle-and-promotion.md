@@ -72,7 +72,7 @@ stateDiagram-v2
     evaluated --> gate_passed: all hard gates + material improvement
     gate_passed --> awaiting_approval: approval requested
     awaiting_approval --> rejected: approver rejects / approval expires
-    awaiting_approval --> approved: separated approver approves
+    awaiting_approval --> approved: policy-eligible human approves
     approved --> shadowing: shadow assignment
     shadowing --> promoted: five EOD checks + atomic assignment
     promoted --> retired: later assignment supersedes
@@ -216,17 +216,21 @@ GateDecision 前必須在隔離、無網路、由 container image digest 與套�
 
 ## 人工核准
 
-- 核准者必須具 `model_approver` 角色，且不能是該 TrainingIntent 的建立者或 TrainingRun 執行者；
+- 每次核准綁定一個內容定址且不可變的 `ModelApprovalPolicyVersion`；caller 不能傳入臨時 self-approval 開關；
+- `separated_duties` 要求核准者具 `model_approver` 權限，且不能是該 TrainingIntent 的建立者或 TrainingRun 執行者；
+- `owner_operated` 只允許政策指定的穩定 owner principal 核准，即使該 principal 同時建立／執行訓練；Decision 與 UI 必須明記沒有獨立審查；
 - Decision 綁定 artifact checksum、EvaluationReport、GatePolicyVersion、ModelFamily 及 expected current assignment；
 - 核准／拒絕必填理由；拒絕不可翻轉；
 - 核准 7 個曆日內未升版即失效；
 - Artifact、report、來源政策資格、critical security 狀態或 expected assignment 改變時立即失效。
 
+兩種輪廓都只能在人類具備 `model_governance.approve` 行動權限且全部 hard gates 已通過後作成決定。切換到多人治理要建立新的政策版本；既有 owner-operated Decision 保留原始 `independent_review=false`，不能事後改寫成職責分離。
+
 同一 artifact 失效或遭拒後若要再考慮，必須用新 report／gate 及新 approval request；不能編輯舊 Decision。
 
 ## Shadow 與 promotion
 
-通過 hard gates 後建立 shadow assignment，連續完成 5 個台美共同 EOD runs：
+通過 hard gates 後建立 shadow assignment，在 5 個不同且遞增的合格日期完成台美共同 EOD runs；日期間可有文件化的每日停機，停機本身不算 run，也不要求主機連續多日在線：
 
 - Artifact cold-load 與 checksum；
 - FeatureBatch／FeatureSchema compatibility；
