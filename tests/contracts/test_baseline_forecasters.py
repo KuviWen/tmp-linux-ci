@@ -46,6 +46,37 @@ def _literal_logistic_payload() -> dict[str, object]:
                 "horizon_sessions": 1,
                 "temperature": 2.0,
                 "fit_method": "temperature_scaling",
+                "sample_count": 9,
+                "class_counts": [3, 3, 3],
+                "pre_nll": 1.0,
+                "post_nll": 1.0,
+                "status": "sufficient_data",
+            }
+        ],
+    }
+
+
+def _literal_class_prior_payload() -> dict[str, object]:
+    return {
+        "artifact_format": "safe-json-v1",
+        "model_family": "class_prior",
+        "seed": 17,
+        "manifest_ids": ["feature", "source", "label", "fold", "cost"],
+        "training_selection_id": "sha256:selection",
+        "probabilities_by_cell": {"XTAI:1": {"up": 0.5, "flat": 0.25, "down": 0.25}},
+        "calibrator_ids": ["sha256:literal-prior-temperature"],
+        "calibrators": [
+            {
+                "calibrator_id": "sha256:literal-prior-temperature",
+                "market": "XTAI",
+                "horizon_sessions": 1,
+                "temperature": 1.0,
+                "fit_method": "temperature_scaling",
+                "sample_count": 9,
+                "class_counts": [3, 3, 3],
+                "pre_nll": 1.0,
+                "post_nll": 1.0,
+                "status": "sufficient_data",
             }
         ],
     }
@@ -132,6 +163,37 @@ def test_class_prior_fits_separate_empirical_priors_per_market_horizon_cell() ->
         "flat": 0.25,
         "down": 0.5,
     }
+
+
+@pytest.mark.parametrize(
+    "probabilities",
+    [
+        {"up": -0.1, "flat": 0.5, "down": 0.6},
+        {"up": 0.5, "flat": 0.25, "down": 0.20},
+        {"up": float("nan"), "flat": 0.5, "down": 0.5},
+    ],
+)
+def test_class_prior_offline_loader_rejects_invalid_probability_vectors(
+    probabilities: dict[str, float],
+) -> None:
+    payload = _literal_class_prior_payload()
+    payload["probabilities_by_cell"] = {"XTAI:1": probabilities}
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+    with pytest.raises(ValueError, match="artifact_schema_invalid"):
+        ClassPriorTrendForecaster.load(serialized)
+
+
+def test_class_prior_offline_loader_rejects_unknown_fields_and_calibrator_drift() -> None:
+    unknown = _literal_class_prior_payload()
+    unknown["unknown_field"] = "must-not-be-ignored"
+    mismatched = _literal_class_prior_payload()
+    mismatched["calibrator_ids"] = ["sha256:unrelated-calibrator"]
+
+    for payload in (unknown, mismatched):
+        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        with pytest.raises(ValueError, match="artifact_schema_invalid"):
+            ClassPriorTrendForecaster.load(serialized)
 
 
 def test_logistic_artifact_loads_offline_and_prediction_is_order_invariant() -> None:

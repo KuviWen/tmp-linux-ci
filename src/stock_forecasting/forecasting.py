@@ -231,10 +231,7 @@ class ClassPriorTrendForecaster:
 
     @classmethod
     def load(cls, serialized: bytes) -> ClassPriorTrendForecaster:
-        payload = cast(dict[str, object], json.loads(serialized))
-        if payload.get("model_family") != "class_prior":
-            raise ValueError("wrong_model_family")
-        return cls(payload)
+        return cls(_load_class_prior_artifact(serialized))
 
     def predict(self, request: PredictionRequest) -> ForecastBatch:
         if self._payload is None:
@@ -745,6 +742,71 @@ def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
         ):
             raise ValueError("artifact_schema_invalid")
 
+    _validate_artifact_calibrators(payload)
+    if "evaluation_report_id" in payload and not isinstance(payload["evaluation_report_id"], str):
+        raise ValueError("artifact_schema_invalid")
+    return payload
+
+
+def _load_class_prior_artifact(serialized: bytes) -> dict[str, object]:
+    try:
+        raw_payload = json.loads(serialized)
+    except (TypeError, ValueError) as error:
+        raise ValueError("artifact_schema_invalid") from error
+    if not isinstance(raw_payload, dict):
+        raise ValueError("artifact_schema_invalid")
+    payload = cast(dict[str, object], raw_payload)
+    required = {
+        "artifact_format",
+        "model_family",
+        "seed",
+        "manifest_ids",
+        "training_selection_id",
+        "probabilities_by_cell",
+    }
+    optional = {"calibrator_ids", "calibrators", "evaluation_report_id"}
+    if (
+        not required.issubset(payload)
+        or not set(payload).issubset(required | optional)
+        or payload["artifact_format"] != "safe-json-v1"
+        or payload["model_family"] != "class_prior"
+        or isinstance(payload["seed"], bool)
+        or not isinstance(payload["seed"], int)
+        or not isinstance(payload["training_selection_id"], str)
+    ):
+        raise ValueError("artifact_schema_invalid")
+    manifest_ids = payload["manifest_ids"]
+    if (
+        not isinstance(manifest_ids, list)
+        or len(manifest_ids) != 5
+        or not all(isinstance(item, str) for item in manifest_ids)
+    ):
+        raise ValueError("artifact_schema_invalid")
+    probabilities_by_cell = payload["probabilities_by_cell"]
+    if not isinstance(probabilities_by_cell, dict) or not probabilities_by_cell:
+        raise ValueError("artifact_schema_invalid")
+    for cell, probabilities in probabilities_by_cell.items():
+        if (
+            not isinstance(cell, str)
+            or not _valid_cell_key(cell, {"XTAI", "XNAS"})
+            or not isinstance(probabilities, dict)
+            or set(probabilities) != {"up", "flat", "down"}
+            or any(
+                not _is_finite_number(value) or not 0.0 <= value <= 1.0
+                for value in probabilities.values()
+            )
+        ):
+            raise ValueError("artifact_schema_invalid")
+        probability_sum = sum(cast(float, value) for value in probabilities.values())
+        if abs(probability_sum - 1.0) > 1e-12:
+            raise ValueError("artifact_schema_invalid")
+    _validate_artifact_calibrators(payload)
+    if "evaluation_report_id" in payload and not isinstance(payload["evaluation_report_id"], str):
+        raise ValueError("artifact_schema_invalid")
+    return payload
+
+
+def _validate_artifact_calibrators(payload: dict[str, object]) -> None:
     calibrator_ids = payload.get("calibrator_ids")
     calibrators = payload.get("calibrators")
     if (calibrator_ids is None) != (calibrators is None):
@@ -758,23 +820,53 @@ def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
         ):
             raise ValueError("artifact_schema_invalid")
         parsed_ids: list[str] = []
+        parsed_bindings: set[tuple[object, object]] = set()
         for calibrator in calibrators:
             if (
                 not isinstance(calibrator, dict)
+                or set(calibrator)
+                != {
+                    "calibrator_id",
+                    "market",
+                    "horizon_sessions",
+                    "temperature",
+                    "fit_method",
+                    "sample_count",
+                    "class_counts",
+                    "pre_nll",
+                    "post_nll",
+                    "status",
+                }
                 or not isinstance(calibrator.get("calibrator_id"), str)
                 or calibrator.get("market") not in {"XTAI", "XNAS"}
                 or calibrator.get("horizon_sessions") not in {1, 5, 20}
                 or calibrator.get("fit_method") != "temperature_scaling"
+                or calibrator.get("status") != "sufficient_data"
                 or not _is_finite_number(calibrator.get("temperature"))
                 or cast(float, calibrator["temperature"]) <= 0
+                or isinstance(calibrator.get("sample_count"), bool)
+                or not isinstance(calibrator.get("sample_count"), int)
+                or cast(int, calibrator["sample_count"]) <= 0
+                or not isinstance(calibrator.get("class_counts"), list)
+                or len(cast(list[object], calibrator["class_counts"])) != 3
+                or any(
+                    isinstance(count, bool) or not isinstance(count, int) or count < 0
+                    for count in cast(list[object], calibrator["class_counts"])
+                )
+                or sum(cast(list[int], calibrator["class_counts"])) != calibrator["sample_count"]
+                or not _is_finite_number(calibrator.get("pre_nll"))
+                or not _is_finite_number(calibrator.get("post_nll"))
+                or cast(float, calibrator["post_nll"]) > cast(float, calibrator["pre_nll"])
             ):
                 raise ValueError("artifact_schema_invalid")
             parsed_ids.append(cast(str, calibrator["calibrator_id"]))
-        if calibrator_ids != parsed_ids or len(set(parsed_ids)) != len(parsed_ids):
+            parsed_bindings.add((calibrator["market"], calibrator["horizon_sessions"]))
+        if (
+            calibrator_ids != parsed_ids
+            or len(set(parsed_ids)) != len(parsed_ids)
+            or len(parsed_bindings) != len(parsed_ids)
+        ):
             raise ValueError("artifact_schema_invalid")
-    if "evaluation_report_id" in payload and not isinstance(payload["evaluation_report_id"], str):
-        raise ValueError("artifact_schema_invalid")
-    return payload
 
 
 def _is_finite_number(value: object) -> TypeGuard[int | float]:
