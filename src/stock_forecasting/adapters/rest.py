@@ -493,11 +493,26 @@ def create_web_app(application: Application) -> FastAPI:
         shadow = cast(dict[str, object], report["shadow"])
         serving = cast(dict[str, object], report["serving"])
         formal_qualification = escape(str(candidate["formal_qualification"]))
-        approval_disclosure = (
-            "Owner self-approved; no independent review（擁有者自行核准；無獨立審查）"
-            if approval.get("status") == "approved"
-            and approval.get("approval_mode") == "owner_operated"
-            else escape(str(approval["status"]))
+        if approval.get("approval_mode") == "owner_operated":
+            approval_disclosure = (
+                "Owner self-approved; no independent review（擁有者自行核准；無獨立審查）"
+                if approval.get("status") == "approved"
+                else "Owner rejected; no independent review（擁有者拒絕；無獨立審查）"
+            )
+        else:
+            approval_disclosure = escape(str(approval["status"]))
+        approval_policy_version = escape(
+            str(approval.get("approval_policy_version_id") or "not recorded")
+        )
+        approval_mode = escape(str(approval.get("approval_mode") or "not recorded"))
+        approval_owner = escape(
+            str(approval.get("approval_policy_owner_principal_id") or "not applicable")
+        )
+        independent_review = approval.get("independent_review")
+        independent_review_disclosure = (
+            str(independent_review).lower()
+            if isinstance(independent_review, bool)
+            else "not recorded"
         )
         body = (
             "<main><header><h1>模型治理回測</h1>"
@@ -518,6 +533,10 @@ def create_web_app(application: Application) -> FastAPI:
             '<section class="panel"><h2>Governance</h2><dl>'
             f"<dt>Gate</dt><dd>Gate {escape(str(gate['status']))}</dd>"
             f"<dt>Approval</dt><dd>{approval_disclosure}</dd>"
+            f"<dt>Approval policy version</dt><dd>{approval_policy_version}</dd>"
+            f"<dt>Approval mode</dt><dd>{approval_mode}</dd>"
+            f"<dt>Approval policy owner</dt><dd>{approval_owner}</dd>"
+            f"<dt>Independent review</dt><dd>{independent_review_disclosure}</dd>"
             f"<dt>Shadow</dt><dd>{shadow['eligible_cycle_count']} / {shadow['required']}</dd>"
             f"<dt>Serving</dt><dd>Serving {escape(str(serving['status']))}</dd>"
             "</dl></section></main>"

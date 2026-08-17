@@ -285,6 +285,50 @@ def test_designated_owner_self_approval_is_disclosed_through_rest_and_ui() -> No
     assert page.status_code == 200
     assert "Owner self-approved; no independent review" in page.text
     assert "擁有者自行核准；無獨立審查" in page.text
+    assert (
+        f"<dt>Approval policy version</dt><dd>{approval_policy.policy_version_id}</dd>" in page.text
+    )
+    assert "<dt>Approval mode</dt><dd>owner_operated</dd>" in page.text
+    assert f"<dt>Approval policy owner</dt><dd>{identity.context.principal_id}</dd>" in page.text
+    assert "<dt>Independent review</dt><dd>false</dd>" in page.text
+
+
+def test_designated_owner_rejection_still_discloses_no_independent_review() -> None:
+    application, identity = _governance_application(owner_operated=True)
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    authorization = identity.credential.authorization_header()
+
+    response = client.post(
+        "/api/v1/governance/approval-decisions",
+        headers={
+            "Authorization": authorization,
+            "Idempotency-Key": "owner-reject-research-candidate",
+            "If-Match": '"2"',
+        },
+        json={
+            "model_family_id": "dual-market-price-baseline-v1",
+            "candidate_id": "candidate-research",
+            "artifact_id": "sha256:research-artifact",
+            "evaluation_report_id": "sha256:research-evaluation",
+            "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            "decision": "rejected",
+            "reason": "Owner rejects the exact evidence without independent review.",
+            "expected_assignment": "unassigned",
+        },
+    )
+    page = client.get(
+        "/research/model-families/dual-market-price-baseline-v1/backtests",
+        headers={"Authorization": authorization},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "approval_rejected"
+    assert response.json()["decision"]["independent_review"] is False
+    assert page.status_code == 200
+    assert "Owner rejected; no independent review" in page.text
+    assert "擁有者拒絕；無獨立審查" in page.text
+    assert "<dt>Approval mode</dt><dd>owner_operated</dd>" in page.text
+    assert "<dt>Independent review</dt><dd>false</dd>" in page.text
 
 
 def test_governance_scope_cannot_bypass_a_missing_action_grant() -> None:

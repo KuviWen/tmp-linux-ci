@@ -1106,6 +1106,8 @@ class ModelLifecycle:
             and command.approver_id != self._approval_policy.owner_principal_id
         ):
             invalidated_reason = "owner_principal_mismatch"
+        elif self._approval_policy.approval_mode == "owner_operated" and independent_review:
+            invalidated_reason = "owner_not_training_participant"
         elif self._approval_policy.approval_mode == "separated_duties" and not independent_review:
             invalidated_reason = "duty_separation_violation"
         elif (
@@ -1223,7 +1225,14 @@ class ModelLifecycle:
         prior_payloads = tuple(json.loads(event.payload_json) for event in prior_shadow_events)
         previous = prior_payloads[-1] if prior_payloads else None
         blocked_reason: str | None = None
-        if approval["decision"] != "approved" or approval["invalidated_reason"] is not None:
+        approval_policy_version_id = approval.get("approval_policy_version_id")
+        if (
+            not isinstance(approval_policy_version_id, str)
+            or not approval_policy_version_id.startswith("sha256:")
+            or len(approval_policy_version_id) != 71
+        ):
+            blocked_reason = "approval_policy_unbound"
+        elif approval["decision"] != "approved" or approval["invalidated_reason"] is not None:
             blocked_reason = "approval_not_valid"
         elif command.occurred_at >= expires_at:
             blocked_reason = "approval_expired"

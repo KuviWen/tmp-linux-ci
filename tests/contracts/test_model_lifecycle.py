@@ -597,6 +597,59 @@ def test_owner_operated_approval_binds_the_designated_owner_policy() -> None:
     assert outsider.approval_decision.invalidated_reason == "owner_principal_mismatch"
 
 
+def test_owner_operated_approval_requires_owner_training_participation() -> None:
+    owner_id = "model-owner-a"
+    lifecycle = ModelLifecycle(
+        InMemoryLifecycleStore(),
+        evidence_repository=_VerifiedEvidenceRepository(),
+        approval_policy=ModelApprovalPolicyVersion.create(
+            policy_name="owner-operated-model-approval-v1",
+            approval_mode="owner_operated",
+            owner_principal_id=owner_id,
+        ),
+    )
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-trained-by-others",
+        model_family_id="family-trained-by-others",
+        improvement=12.0,
+        intent_initiator="model-operator-a",
+        training_executor="model-operator-b",
+    )
+    lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-trained-by-others",
+            model_family_id="family-trained-by-others",
+            candidate_id="candidate-trained-by-others",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates("candidate-trained-by-others"),
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    result = lifecycle.execute(
+        DecideApproval(
+            command_id="approval-trained-by-others",
+            model_family_id="family-trained-by-others",
+            candidate_id="candidate-trained-by-others",
+            artifact_id="sha256:artifact-candidate-trained-by-others",
+            evaluation_report_id="sha256:evaluation-candidate-trained-by-others",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            approver_id=owner_id,
+            decision="approved",
+            reason="Owner cannot self-approve training performed entirely by others.",
+            expected_assignment="unassigned",
+            expected_version=2,
+            occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "approval_rejected"
+    assert result.approval_decision is not None
+    assert result.approval_decision.invalidated_reason == "owner_not_training_participant"
+
+
 @pytest.mark.parametrize(
     ("approval_mode", "owner_principal_id"),
     (("owner_operated", None), ("separated_duties", "unexpected-owner")),
@@ -673,6 +726,21 @@ def test_governance_query_preserves_honest_disclosure_for_legacy_approvals() -> 
         "approval_policy_owner_principal_id": None,
         "independent_review": True,
     }
+
+    shadow = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-after-legacy-approval",
+            model_family_id="legacy-approved-family",
+            candidate_id="legacy-approved-candidate",
+            evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+            expected_version=2,
+            occurred_at=datetime(2026, 8, 19, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert shadow.status == "shadow_blocked"
+    assert shadow.shadow_evidence is not None
+    assert shadow.shadow_evidence.blocked_reason == "approval_policy_unbound"
 
 
 def test_rejection_of_exact_evidence_cannot_be_reversed_by_a_later_approval() -> None:

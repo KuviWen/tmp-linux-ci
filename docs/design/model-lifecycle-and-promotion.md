@@ -348,7 +348,7 @@ Break-glass 永遠不能把未通過候選升版。只有雙人核准可以 `sto
 - 首個正式logistic只能在無既有production指派時使用BootstrapGatePolicy，且未勝class-prior至少1 point時維持blocked。
 - 首個production指派建立後，任何BootstrapGateDecision都被永久拒絕；後續logistic與neural一律走一般GatePolicy。
 - MLflow 停機時 canonical lifecycle 可前進，恢復後 projection 與 checksum 可重建。
-- 建立者／執行者不能核准自己的候選；過期或內容改變的核准不能 promotion。
+- `separated_duties` 下建立者／執行者不能核准自己的候選；`owner_operated` 下只能由政策 owner 核准其本人建立或執行訓練的候選，且必須揭露沒有獨立審查；過期、未綁定不可變核准政策或內容改變的核准不能 promotion。
 - 五次 shadow 未完成、rollback target 不合格或 expected assignment 改變時 compare-and-swap 失敗。
 - EOD batch 在 promotion 前後各自 pin 單一 assignment，不出現半批混用。
 - 自動回退只建立新 assignment；既有 PredictionRecords 不變。
