@@ -497,7 +497,10 @@ def create_web_app(application: Application) -> FastAPI:
             approval_disclosure = (
                 "Owner self-approved; no independent review（擁有者自行核准；無獨立審查）"
                 if approval.get("status") == "approved"
-                else "Owner rejected; no independent review（擁有者拒絕；無獨立審查）"
+                else (
+                    "Rejected under owner-operated policy; no independent review"
+                    "（依擁有者操作政策拒絕；無獨立審查）"
+                )
             )
         else:
             approval_disclosure = escape(str(approval["status"]))

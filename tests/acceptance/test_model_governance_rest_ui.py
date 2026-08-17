@@ -325,10 +325,47 @@ def test_designated_owner_rejection_still_discloses_no_independent_review() -> N
     assert response.json()["status"] == "approval_rejected"
     assert response.json()["decision"]["independent_review"] is False
     assert page.status_code == 200
-    assert "Owner rejected; no independent review" in page.text
-    assert "擁有者拒絕；無獨立審查" in page.text
+    assert "Rejected under owner-operated policy; no independent review" in page.text
+    assert "依擁有者操作政策拒絕；無獨立審查" in page.text
     assert "<dt>Approval mode</dt><dd>owner_operated</dd>" in page.text
     assert "<dt>Independent review</dt><dd>false</dd>" in page.text
+
+
+def test_invalidated_owner_operated_attempt_is_not_attributed_to_an_owner_rejection() -> None:
+    application, identity = _governance_application(owner_operated=True)
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    authorization = identity.credential.authorization_header()
+
+    response = client.post(
+        "/api/v1/governance/approval-decisions",
+        headers={
+            "Authorization": authorization,
+            "Idempotency-Key": "invalidate-owner-approval-attempt",
+            "If-Match": '"2"',
+        },
+        json={
+            "model_family_id": "dual-market-price-baseline-v1",
+            "candidate_id": "candidate-research",
+            "artifact_id": "sha256:not-the-gated-artifact",
+            "evaluation_report_id": "sha256:research-evaluation",
+            "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            "decision": "approved",
+            "reason": "Attempted approval does not match the gated artifact.",
+            "expected_assignment": "unassigned",
+        },
+    )
+    page = client.get(
+        "/research/model-families/dual-market-price-baseline-v1/backtests",
+        headers={"Authorization": authorization},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "approval_rejected"
+    assert response.json()["decision"]["invalidated_reason"] == "evidence_reference_mismatch"
+    assert page.status_code == 200
+    assert "Rejected under owner-operated policy; no independent review" in page.text
+    assert "依擁有者操作政策拒絕；無獨立審查" in page.text
+    assert "Owner rejected" not in page.text
 
 
 def test_governance_scope_cannot_bypass_a_missing_action_grant() -> None:
