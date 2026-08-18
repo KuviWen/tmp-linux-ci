@@ -289,6 +289,9 @@ class BootstrapGatePolicyVersion:
         return policy
 
 
+BOOTSTRAP_MINIMUM_NONINFERIOR_QUARTERS = 6
+
+
 _BOOTSTRAP_THRESHOLDS_V1: Mapping[str, GateThreshold] = MappingProxyType(
     {
         "qualification.manifest_fraction": GateThreshold("qualification", "at_least", 1.0),
@@ -307,7 +310,9 @@ _BOOTSTRAP_THRESHOLDS_V1: Mapping[str, GateThreshold] = MappingProxyType(
         "economics.nonnegative_market_excess_count": GateThreshold("economics", "at_least", 2.0),
         "economics.nonnegative_cell_excess_count": GateThreshold("economics", "at_least", 4.0),
         "economics.drawdown_worsening_points": GateThreshold("economics", "at_most", 2.0),
-        "stability.noninferior_quarter_count": GateThreshold("stability", "at_least", 6.0),
+        "stability.noninferior_quarter_count": GateThreshold(
+            "stability", "at_least", float(BOOTSTRAP_MINIMUM_NONINFERIOR_QUARTERS)
+        ),
         "stability.max_consecutive_lagging_quarters": GateThreshold("stability", "at_most", 2.0),
         "stability.seed_macro_f1_std_points": GateThreshold("stability", "at_most", 1.0),
         "stability.worst_seed_delta_points": GateThreshold("stability", "at_least", 0.0),

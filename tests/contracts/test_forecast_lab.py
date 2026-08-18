@@ -2,6 +2,8 @@ import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
+import pytest
+
 from stock_forecasting.contracts import HistoricalTrainingLineage
 from stock_forecasting.forecast_lab import (
     ForecastLab,
@@ -61,15 +63,25 @@ def test_forecast_lab_blocks_candidate_when_class_support_is_incomplete() -> Non
     assert outcome.candidate_bundle is None
 
 
-def test_formal_candidate_requires_six_joint_statistical_test_quarters() -> None:
+@pytest.mark.parametrize(
+    ("history_end", "expected_reason"),
+    (
+        (date(2025, 4, 1), "insufficient_statistical_support"),
+        (date(2025, 7, 1), "unverified_source_basis"),
+    ),
+)
+def test_formal_candidate_requires_six_joint_statistical_test_quarters(
+    history_end: date,
+    expected_reason: str,
+) -> None:
     batch = engineering_model_history()
-    five_quarters = replace(
+    bounded_history = replace(
         batch,
-        feature_batch_id="feature-batch-five-quarters",
+        feature_batch_id=f"feature-batch-before-{history_end.isoformat()}",
         rows=tuple(
             row
             for row in batch.rows
-            if row.session_date is not None and row.session_date < date(2024, 4, 1)
+            if row.session_date is not None and row.session_date < history_end
         ),
     )
     intent = TrainingIntentRef(
@@ -78,7 +90,7 @@ def test_formal_candidate_requires_six_joint_statistical_test_quarters() -> None
         initiated_by="model-operator-a",
         executed_by="model-operator-b",
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
-        feature_batch=five_quarters,
+        feature_batch=bounded_history,
         preregistered_seeds=(17, 29, 43),
         execution_purpose="formal_candidate",
     )
@@ -86,7 +98,7 @@ def test_formal_candidate_requires_six_joint_statistical_test_quarters() -> None
     outcome = ForecastLab().develop(intent)
 
     assert outcome.status == "blocked"
-    assert outcome.blocked_reasons == ("insufficient_statistical_support",)
+    assert outcome.blocked_reasons == (expected_reason,)
     assert outcome.candidate_bundle is None
 
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from copy import deepcopy
 from typing import Any, cast
 
@@ -13,7 +12,11 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection
 from sqlalchemy.pool import StaticPool
 
-from stock_forecasting.content_address import canonical_json, content_id
+from stock_forecasting.content_address import (
+    canonical_json_bytes,
+    content_id,
+    sha256_hex,
+)
 from stock_forecasting.contracts import PublicationDisposition
 from stock_forecasting.outbox import (
     EventCompatibility,
@@ -50,8 +53,7 @@ class ImmutableStateConflict(RuntimeError):
 
 
 def _content_digest(payload: object) -> str:
-    canonical_payload = canonical_json(payload).encode("utf-8")
-    return hashlib.sha256(canonical_payload).hexdigest()
+    return sha256_hex(canonical_json_bytes(payload))
 
 
 def _canonical_artifact_id(artifact_kind: str, payload: object) -> str:

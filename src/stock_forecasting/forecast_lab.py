@@ -21,6 +21,7 @@ from stock_forecasting.forecasting import (
     TrendForecaster,
     TrendLabel,
 )
+from stock_forecasting.model_governance import BOOTSTRAP_MINIMUM_NONINFERIOR_QUARTERS
 
 Market = Literal["XTAI", "XNAS"]
 Horizon = Literal[1, 5, 20]
@@ -128,7 +129,6 @@ class ForecastLab:
     _markets: tuple[Market, ...] = ("XTAI", "XNAS")
     _horizons: tuple[Horizon, ...] = (1, 5, 20)
     _labels: tuple[TrendLabel, ...] = ("up", "flat", "down")
-    _minimum_joint_statistical_test_quarters = 6
 
     def __init__(
         self,
@@ -320,7 +320,7 @@ class ForecastLab:
             for market in self._markets
         }
         joint_quarters = set.intersection(*(quarters_by_market[market] for market in self._markets))
-        return len(joint_quarters) >= self._minimum_joint_statistical_test_quarters
+        return len(joint_quarters) >= BOOTSTRAP_MINIMUM_NONINFERIOR_QUARTERS
 
     def _build_fold_manifest(self, rows: tuple[FeatureRow, ...]) -> FoldManifest | None:
         all_dates = sorted({row.session_date for row in rows if row.session_date is not None})

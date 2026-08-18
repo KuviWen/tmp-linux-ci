@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import random
 from collections.abc import Callable
@@ -9,6 +8,7 @@ from datetime import date
 from math import exp, isfinite, log
 from typing import Literal, Protocol, TypeGuard, cast
 
+from stock_forecasting.content_address import canonical_json_bytes, sha256_id
 from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.contracts import (
     HistoricalTrainingLineage,
@@ -238,7 +238,7 @@ class ClassPriorTrendForecaster:
         if self._payload is None:
             loaded = self.load(request.artifact.serialized)
             return loaded.predict(request)
-        expected_id = f"sha256:{hashlib.sha256(request.artifact.serialized).hexdigest()}"
+        expected_id = sha256_id(request.artifact.serialized)
         if request.artifact.artifact_id != expected_id:
             raise ValueError("artifact_checksum_mismatch")
         probabilities_by_cell = cast(
@@ -430,7 +430,7 @@ class RegularizedMultinomialLogisticTrendForecaster:
         if self._payload is None:
             loaded = self.load(request.artifact.serialized)
             return loaded.predict(request)
-        expected_id = f"sha256:{hashlib.sha256(request.artifact.serialized).hexdigest()}"
+        expected_id = sha256_id(request.artifact.serialized)
         if request.artifact.artifact_id != expected_id:
             raise ValueError("artifact_checksum_mismatch")
         normalizers = cast(dict[str, dict[str, object]], self._payload["normalizers"])
@@ -951,16 +951,11 @@ def _valid_cell_key(cell: str, markets: set[object]) -> bool:
 
 
 def _serialize_payload(payload: object) -> bytes:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return canonical_json_bytes(payload)
 
 
 def _artifact_id(serialized: bytes) -> str:
-    return f"sha256:{hashlib.sha256(serialized).hexdigest()}"
+    return sha256_id(serialized)
 
 
 def _feature_row_payload(row: FeatureRow) -> dict[str, object]:
