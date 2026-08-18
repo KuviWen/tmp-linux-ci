@@ -270,7 +270,11 @@ class ClassPriorTrendForecaster:
             batch.fold_manifest_id,
             batch.cost_manifest_id,
         )
-        training_selection_id = _training_selection_id(request)
+        training_selection_id = training_selection_id_for(
+            request.feature_batch,
+            request.training_row_ids,
+            request.validation_row_ids,
+        )
         payload: dict[str, object] = {
             "model_family": "class_prior",
             "seed": request.seed,
@@ -447,7 +451,11 @@ class RegularizedMultinomialLogisticTrendForecaster:
             batch.fold_manifest_id,
             batch.cost_manifest_id,
         )
-        training_selection_id = _training_selection_id(request)
+        training_selection_id = training_selection_id_for(
+            request.feature_batch,
+            request.training_row_ids,
+            request.validation_row_ids,
+        )
         payload: dict[str, object] = {
             "model_family": "regularized_multinomial_logistic",
             "seed": request.seed,
@@ -1108,14 +1116,18 @@ def _quantile(values: list[float], probability: float) -> float:
     return values[lower_index] + (values[upper_index] - values[lower_index]) * fraction
 
 
-def _training_selection_id(request: TrainingRequest) -> str:
+def training_selection_id_for(
+    feature_batch: FeatureBatch,
+    training_row_ids: tuple[str, ...],
+    validation_row_ids: tuple[str, ...],
+) -> str:
     return _content_id(
         "training-selection",
         {
-            "feature_batch_id": request.feature_batch.feature_batch_id,
-            "fold_manifest_id": request.feature_batch.fold_manifest_id,
-            "training_row_ids": request.training_row_ids,
-            "validation_row_ids": request.validation_row_ids,
+            "feature_batch_id": feature_batch.feature_batch_id,
+            "fold_manifest_id": feature_batch.fold_manifest_id,
+            "training_row_ids": training_row_ids,
+            "validation_row_ids": validation_row_ids,
         },
     )
 

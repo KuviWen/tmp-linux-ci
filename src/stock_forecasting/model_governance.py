@@ -21,6 +21,7 @@ from stock_forecasting.forecasting import (
     ClassPriorTrendForecaster,
     ModelArtifact,
     RegularizedMultinomialLogisticTrendForecaster,
+    training_selection_id_for,
 )
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import model_lifecycle_events
@@ -805,6 +806,130 @@ class ShadowRunEvidence:
         return rebuilt == self
 
 
+@dataclass(frozen=True)
+class ShadowRunRecord:
+    evidence: ShadowRunEvidence
+    eligible_cycle_count: int
+    blocked_reason: str | None
+    production_history_written: Literal[False] = False
+
+    @classmethod
+    def create(
+        cls,
+        evidence: ShadowRunEvidence,
+        *,
+        eligible_cycle_count: int,
+        blocked_reason: str | None,
+    ) -> ShadowRunRecord:
+        if (
+            not evidence.is_content_addressed()
+            or isinstance(eligible_cycle_count, bool)
+            or not isinstance(eligible_cycle_count, int)
+            or eligible_cycle_count < 0
+            or (
+                blocked_reason is not None
+                and (not isinstance(blocked_reason, str) or not blocked_reason)
+            )
+        ):
+            raise ValueError("shadow_run_record_schema_invalid")
+        return cls(
+            evidence=evidence,
+            eligible_cycle_count=eligible_cycle_count,
+            blocked_reason=blocked_reason,
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        evidence = self.evidence
+        return {
+            "shadow_run_id": evidence.shadow_run_id,
+            "shadow_evidence_id": evidence.evidence_id,
+            "eligible_eod_date": evidence.eligible_eod_date.isoformat(),
+            "previous_shadow_run_id": evidence.previous_shadow_run_id,
+            "candidate_id": evidence.candidate_id,
+            "artifact_id": evidence.artifact_id,
+            "evaluation_report_id": evidence.evaluation_report_id,
+            "gate_decision_id": evidence.gate_decision_id,
+            "approval_decision_id": evidence.approval_decision_id,
+            "approval_policy_version_id": evidence.approval_policy_version_id,
+            "expected_assignment": evidence.expected_assignment,
+            "market_eligibility": list(evidence.markets),
+            "cold_load_checksum_verified": evidence.cold_load_checksum_verified,
+            "schema_compatible": evidence.schema_compatible,
+            "probability_invariants_verified": evidence.probability_invariants_verified,
+            "comparison_completed": evidence.comparison_completed,
+            "source_policy_verified": evidence.source_policy_verified,
+            "cpu_prediction_seconds": evidence.cpu_prediction_seconds,
+            "eligible_cycle_count": self.eligible_cycle_count,
+            "blocked_reason": self.blocked_reason,
+            "production_history_written": self.production_history_written,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> ShadowRunRecord:
+        expected = {
+            "shadow_run_id",
+            "shadow_evidence_id",
+            "eligible_eod_date",
+            "previous_shadow_run_id",
+            "candidate_id",
+            "artifact_id",
+            "evaluation_report_id",
+            "gate_decision_id",
+            "approval_decision_id",
+            "approval_policy_version_id",
+            "expected_assignment",
+            "market_eligibility",
+            "cold_load_checksum_verified",
+            "schema_compatible",
+            "probability_invariants_verified",
+            "comparison_completed",
+            "source_policy_verified",
+            "cpu_prediction_seconds",
+            "eligible_cycle_count",
+            "blocked_reason",
+            "production_history_written",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected
+            or not isinstance(payload["shadow_evidence_id"], str)
+            or not isinstance(payload["eligible_eod_date"], str)
+            or not isinstance(payload["market_eligibility"], list)
+            or payload["production_history_written"] is not False
+        ):
+            raise ValueError("shadow_run_record_schema_invalid")
+        try:
+            evidence = ShadowRunEvidence.create(
+                shadow_run_id=payload["shadow_run_id"],
+                candidate_id=payload["candidate_id"],
+                artifact_id=payload["artifact_id"],
+                evaluation_report_id=payload["evaluation_report_id"],
+                gate_decision_id=payload["gate_decision_id"],
+                approval_decision_id=payload["approval_decision_id"],
+                approval_policy_version_id=payload["approval_policy_version_id"],
+                expected_assignment=payload["expected_assignment"],
+                eligible_eod_date=date.fromisoformat(payload["eligible_eod_date"]),
+                previous_shadow_run_id=payload["previous_shadow_run_id"],
+                markets=tuple(payload["market_eligibility"]),
+                cold_load_checksum_verified=payload["cold_load_checksum_verified"],
+                schema_compatible=payload["schema_compatible"],
+                probability_invariants_verified=payload["probability_invariants_verified"],
+                comparison_completed=payload["comparison_completed"],
+                source_policy_verified=payload["source_policy_verified"],
+                cpu_prediction_seconds=payload["cpu_prediction_seconds"],
+            )
+            record = cls.create(
+                evidence,
+                eligible_cycle_count=payload["eligible_cycle_count"],
+                blocked_reason=payload["blocked_reason"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("shadow_run_record_schema_invalid") from error
+        if evidence.evidence_id != payload["shadow_evidence_id"]:
+            raise ValueError("shadow_run_record_checksum_mismatch")
+        return record
+
+
 class ShadowEligibilityVerifier(Protocol):
     def verify_eligible_eod(self, evidence: ShadowRunEvidence) -> bool: ...
 
@@ -927,6 +1052,29 @@ class GateDecision:
             )
         ):
             raise ValueError("gate_decision_schema_invalid")
+        if status == "passed":
+            verified_by_name = {
+                measurement.name: measurement.value
+                for measurement in verified_hard_gate_measurements
+            }
+            approved_thresholds = dict(_BOOTSTRAP_THRESHOLDS_V1)
+            if (
+                policy_version_id != BOOTSTRAP_GATE_POLICY_V1.policy_version_id
+                or hard_gate_evidence_id is None
+                or hard_gate_report_id is None
+                or hard_gate_evidence_refs != (hard_gate_report_id,)
+                or submitted_hard_gate_measurements != verified_hard_gate_measurements
+                or set(verified_by_name) != set(approved_thresholds)
+                or any(
+                    not threshold.passes(verified_by_name[name])
+                    for name, threshold in approved_thresholds.items()
+                )
+                or submitted_improvement_percentage_points is None
+                or verified_improvement_percentage_points is None
+                or submitted_improvement_percentage_points != verified_improvement_percentage_points
+                or verified_improvement_percentage_points < 1.0
+            ):
+                raise ValueError("gate_decision_schema_invalid")
         normalized_submitted_improvement = (
             float(submitted_improvement_percentage_points)
             if submitted_improvement_percentage_points is not None
@@ -1144,6 +1292,7 @@ class ApprovalDecision:
     decision: Literal["approved", "rejected"]
     reason: str
     expected_assignment: str
+    decided_at: datetime
     expires_at: datetime
     invalidated_reason: str | None
 
@@ -1165,6 +1314,7 @@ class ApprovalDecision:
         decision: Literal["approved", "rejected"],
         reason: str,
         expected_assignment: str,
+        decided_at: datetime,
         expires_at: datetime,
         invalidated_reason: str | None,
     ) -> ApprovalDecision:
@@ -1197,8 +1347,11 @@ class ApprovalDecision:
             or requested_decision not in {"approved", "rejected"}
             or decision not in {"approved", "rejected"}
             or not isinstance(reason, str)
+            or not isinstance(decided_at, datetime)
+            or decided_at.tzinfo is None
             or not isinstance(expires_at, datetime)
             or expires_at.tzinfo is None
+            or expires_at != decided_at + timedelta(days=7)
             or (invalidated_reason is not None and not isinstance(invalidated_reason, str))
             or (decision == "approved" and invalidated_reason is not None)
             or (decision == "rejected" and invalidated_reason is None)
@@ -1212,6 +1365,7 @@ class ApprovalDecision:
                 and approval_mode == "separated_duties"
                 and independent_review is not True
             )
+            or (decision == "approved" and (requested_decision != "approved" or not reason.strip()))
         ):
             raise ValueError("approval_decision_schema_invalid")
         payload = {
@@ -1229,6 +1383,7 @@ class ApprovalDecision:
             "decision": decision,
             "reason": reason,
             "expected_assignment": expected_assignment,
+            "decided_at": decided_at.isoformat(),
             "expires_at": expires_at.isoformat(),
             "invalidated_reason": invalidated_reason,
         }
@@ -1248,6 +1403,7 @@ class ApprovalDecision:
             decision=decision,
             reason=reason,
             expected_assignment=expected_assignment,
+            decided_at=decided_at,
             expires_at=expires_at,
             invalidated_reason=invalidated_reason,
         )
@@ -1269,6 +1425,7 @@ class ApprovalDecision:
             "decision": self.decision,
             "reason": self.reason,
             "expected_assignment": self.expected_assignment,
+            "decided_at": self.decided_at.isoformat(),
             "expires_at": self.expires_at.isoformat(),
             "invalidated_reason": self.invalidated_reason,
         }
@@ -1291,6 +1448,7 @@ class ApprovalDecision:
             "decision",
             "reason",
             "expected_assignment",
+            "decided_at",
             "expires_at",
             "invalidated_reason",
         }
@@ -1305,6 +1463,7 @@ class ApprovalDecision:
             "approver_id",
             "reason",
             "expected_assignment",
+            "decided_at",
             "expires_at",
         )
         if (
@@ -1340,6 +1499,7 @@ class ApprovalDecision:
             decision=cast(Literal["approved", "rejected"], payload["decision"]),
             reason=payload["reason"],
             expected_assignment=payload["expected_assignment"],
+            decided_at=datetime.fromisoformat(payload["decided_at"]),
             expires_at=datetime.fromisoformat(payload["expires_at"]),
             invalidated_reason=payload["invalidated_reason"],
         )
@@ -1373,6 +1533,64 @@ class LifecycleEvent:
     event_kind: str
     payload_json: str
     occurred_at: datetime
+
+
+def _verified_shadow_lineage(
+    events: tuple[LifecycleEvent, ...],
+    *,
+    candidate_id: str,
+    artifact_id: str,
+    evaluation_report_id: str,
+    gate_decision_id: str,
+    approval_decision_id: str,
+    approval_policy_version_id: str,
+    expected_assignment: str,
+    not_before: datetime | None = None,
+) -> tuple[ShadowRunRecord, ...]:
+    lineage: list[ShadowRunRecord] = []
+    for event in events:
+        if event.event_kind != "ShadowEodRecorded":
+            continue
+        record = ShadowRunRecord.from_payload(json.loads(event.payload_json))
+        evidence = record.evidence
+        if evidence.candidate_id != candidate_id:
+            continue
+        if (
+            evidence.artifact_id != artifact_id
+            or evidence.evaluation_report_id != evaluation_report_id
+            or evidence.gate_decision_id != gate_decision_id
+            or evidence.approval_decision_id != approval_decision_id
+            or evidence.approval_policy_version_id != approval_policy_version_id
+            or evidence.expected_assignment != expected_assignment
+        ):
+            continue
+        previous = lineage[-1].evidence if lineage else None
+        verification_flags = (
+            evidence.cold_load_checksum_verified,
+            evidence.schema_compatible,
+            evidence.probability_invariants_verified,
+            evidence.comparison_completed,
+            evidence.source_policy_verified,
+        )
+        if (
+            record.blocked_reason is not None
+            or record.eligible_cycle_count != len(lineage) + 1
+            or evidence.previous_shadow_run_id
+            != (previous.shadow_run_id if previous is not None else None)
+            or (previous is not None and evidence.eligible_eod_date <= previous.eligible_eod_date)
+            or not all(verification_flags)
+            or evidence.cpu_prediction_seconds > 600
+            or event.occurred_at.date() < evidence.eligible_eod_date
+            or (
+                not_before is not None
+                and (
+                    evidence.eligible_eod_date < not_before.date() or event.occurred_at < not_before
+                )
+            )
+        ):
+            raise ValueError("shadow_history_invalid")
+        lineage.append(record)
+    return tuple(lineage)
 
 
 @dataclass(frozen=True)
@@ -1738,6 +1956,12 @@ class ModelLifecycle:
             )
             logistic = bundle.logistic_artifacts
             class_prior = bundle.class_prior_artifacts
+            training_row_ids, validation_row_ids = bundle.fold_manifest.latest_joint_split()
+            expected_training_selection_id = training_selection_id_for(
+                batch,
+                training_row_ids,
+                validation_row_ids,
+            )
             expected_manifests = (
                 batch.feature_batch_id,
                 batch.source_policy_manifest_id,
@@ -1751,6 +1975,16 @@ class ModelLifecycle:
                 or not batch.is_content_addressed()
                 or len(logistic) != 3
                 or len(class_prior) != 3
+                or any(
+                    artifact.model_family != "regularized_multinomial_logistic"
+                    for artifact in logistic
+                )
+                or any(artifact.model_family != "class_prior" for artifact in class_prior)
+                or len({artifact.artifact_id for artifact in (*logistic, *class_prior)}) != 6
+                or any(
+                    artifact.training_selection_id != expected_training_selection_id
+                    for artifact in (*logistic, *class_prior)
+                )
                 or bundle.primary_artifact != logistic[0]
                 or tuple(artifact.seed for artifact in logistic) != intent.preregistered_seeds
                 or tuple(artifact.seed for artifact in class_prior) != intent.preregistered_seeds
@@ -2029,6 +2263,7 @@ class ModelLifecycle:
             decision=effective_decision,
             reason=command.reason,
             expected_assignment=command.expected_assignment,
+            decided_at=command.occurred_at,
             expires_at=expires_at,
             invalidated_reason=invalidated_reason,
         )
@@ -2135,9 +2370,16 @@ class ModelLifecycle:
 
     def _record_shadow(self, command: RecordShadowEod) -> LifecycleResult:
         candidate = self._candidate(command.model_family_id, command.candidate_id)
-        approval_payload = self._current_approval(command.model_family_id, command.candidate_id)
+        try:
+            approval_payload = self._current_approval(command.model_family_id, command.candidate_id)
+        except LifecycleConflict as error:
+            if str(error) != "approval_decision_evidence_invalid":
+                raise
+            approval_payload = {}
+            approval_evidence_invalid = True
+        else:
+            approval_evidence_invalid = False
         approval: ApprovalDecision | None = None
-        approval_evidence_invalid = False
         if "approval_decision_id" in approval_payload:
             try:
                 approval = ApprovalDecision.from_payload(approval_payload)
@@ -2150,21 +2392,28 @@ class ModelLifecycle:
             current_gate = None
             current_gate_passed = False
         evidence = command.evidence
-        prior_payloads = tuple(
-            payload
-            for event in self._store.events(command.model_family_id)
-            if event.event_kind == "ShadowEodRecorded"
-            and (payload := json.loads(event.payload_json))["candidate_id"] == command.candidate_id
-            and payload.get("artifact_id") == evidence.artifact_id
-            and payload.get("evaluation_report_id") == evidence.evaluation_report_id
-            and payload.get("gate_decision_id") == evidence.gate_decision_id
-            and payload.get("approval_decision_id") == evidence.approval_decision_id
-            and payload.get("approval_policy_version_id") == evidence.approval_policy_version_id
-            and payload.get("expected_assignment") == evidence.expected_assignment
-        )
-        previous = prior_payloads[-1] if prior_payloads else None
+        try:
+            prior_records = _verified_shadow_lineage(
+                self._store.events(command.model_family_id),
+                candidate_id=command.candidate_id,
+                artifact_id=evidence.artifact_id,
+                evaluation_report_id=evidence.evaluation_report_id,
+                gate_decision_id=evidence.gate_decision_id,
+                approval_decision_id=evidence.approval_decision_id,
+                approval_policy_version_id=evidence.approval_policy_version_id,
+                expected_assignment=evidence.expected_assignment,
+                not_before=approval.decided_at if approval is not None else None,
+            )
+        except (KeyError, TypeError, ValueError):
+            prior_records = ()
+            shadow_history_invalid = True
+        else:
+            shadow_history_invalid = False
+        previous = prior_records[-1].evidence if prior_records else None
         blocked_reason: str | None = None
-        if approval_evidence_invalid:
+        if shadow_history_invalid:
+            blocked_reason = "shadow_history_invalid"
+        elif approval_evidence_invalid:
             blocked_reason = "approval_evidence_invalid"
         elif approval is None:
             blocked_reason = "approval_policy_unbound"
@@ -2179,6 +2428,11 @@ class ModelLifecycle:
             blocked_reason = "approval_not_valid"
         elif command.occurred_at >= approval.expires_at:
             blocked_reason = "approval_expired"
+        elif (
+            evidence.eligible_eod_date < approval.decided_at.date()
+            or command.occurred_at < approval.decided_at
+        ):
+            blocked_reason = "shadow_before_approval"
         elif approval.expected_assignment != self._current_assignment(command.model_family_id):
             blocked_reason = "expected_assignment_changed"
         elif not evidence.is_content_addressed():
@@ -2213,20 +2467,18 @@ class ModelLifecycle:
         ):
             blocked_reason = "shadow_checks_failed"
         elif any(
-            payload["shadow_run_id"] == evidence.shadow_run_id
-            or payload["eligible_eod_date"] == evidence.eligible_eod_date.isoformat()
-            for payload in prior_payloads
+            record.evidence.shadow_run_id == evidence.shadow_run_id
+            or record.evidence.eligible_eod_date == evidence.eligible_eod_date
+            for record in prior_records
         ):
             blocked_reason = "duplicate_shadow_run"
         elif evidence.previous_shadow_run_id != (
-            str(previous["shadow_run_id"]) if previous is not None else None
+            previous.shadow_run_id if previous is not None else None
         ):
             blocked_reason = "shadow_sequence_broken"
-        elif previous is not None and evidence.eligible_eod_date <= date.fromisoformat(
-            str(previous["eligible_eod_date"])
-        ):
+        elif previous is not None and evidence.eligible_eod_date <= previous.eligible_eod_date:
             blocked_reason = "shadow_date_not_increasing"
-        completed_cycles = len(prior_payloads)
+        completed_cycles = len(prior_records)
         eligible_cycle_count = completed_cycles + (0 if blocked_reason else 1)
         outcome_evidence = ShadowEvidence(
             shadow_run_id=evidence.shadow_run_id,
@@ -2239,29 +2491,11 @@ class ModelLifecycle:
             model_family_id=command.model_family_id,
             expected_version=command.expected_version,
             event_kind=("ShadowEodBlocked" if blocked_reason else "ShadowEodRecorded"),
-            payload={
-                "shadow_run_id": evidence.shadow_run_id,
-                "shadow_evidence_id": evidence.evidence_id,
-                "eligible_eod_date": evidence.eligible_eod_date.isoformat(),
-                "previous_shadow_run_id": evidence.previous_shadow_run_id,
-                "candidate_id": command.candidate_id,
-                "artifact_id": evidence.artifact_id,
-                "evaluation_report_id": evidence.evaluation_report_id,
-                "gate_decision_id": evidence.gate_decision_id,
-                "approval_decision_id": evidence.approval_decision_id,
-                "approval_policy_version_id": evidence.approval_policy_version_id,
-                "expected_assignment": evidence.expected_assignment,
-                "market_eligibility": evidence.markets,
-                "cold_load_checksum_verified": evidence.cold_load_checksum_verified,
-                "schema_compatible": evidence.schema_compatible,
-                "probability_invariants_verified": (evidence.probability_invariants_verified),
-                "comparison_completed": evidence.comparison_completed,
-                "source_policy_verified": evidence.source_policy_verified,
-                "cpu_prediction_seconds": evidence.cpu_prediction_seconds,
-                "eligible_cycle_count": eligible_cycle_count,
-                "blocked_reason": blocked_reason,
-                "production_history_written": False,
-            },
+            payload=ShadowRunRecord.create(
+                evidence,
+                eligible_cycle_count=eligible_cycle_count,
+                blocked_reason=blocked_reason,
+            ).to_payload(),
             occurred_at=command.occurred_at,
         )
         return LifecycleResult(
@@ -2293,6 +2527,14 @@ class ModelLifecycle:
             if event.event_kind != "ApprovalDecisionRecorded":
                 continue
             payload = json.loads(event.payload_json)
+            if "approval_decision_id" in payload:
+                try:
+                    decision = ApprovalDecision.from_payload(payload)
+                except (KeyError, TypeError, ValueError) as error:
+                    raise LifecycleConflict("approval_decision_evidence_invalid") from error
+                if decision.candidate_id == candidate_id:
+                    return decision.to_payload()
+                continue
             if payload["candidate_id"] == candidate_id:
                 return dict(payload)
         raise LifecycleConflict("candidate_not_approved")
@@ -2385,7 +2627,12 @@ class ModelGovernanceQuery:
             },
             "support": {"fold_count": candidate["fold_count"]},
             "gate": gate_projection,
-            "approval": self._approval_projection(approval, candidate, gate_projection),
+            "approval": self._approval_projection(
+                approval,
+                candidate,
+                gate,
+                gate_projection,
+            ),
             "shadow": {"eligible_cycle_count": shadow_count, "required": 5},
             "serving": {
                 "status": "assigned" if assignments else "blocked",
@@ -2403,6 +2650,22 @@ class ModelGovernanceQuery:
             if event.event_kind != event_kind:
                 continue
             payload = cast(dict[str, object], json.loads(event.payload_json))
+            if event_kind == "GateDecisionRecorded" and "gate_decision_id" in payload:
+                try:
+                    decision = GateDecision.from_payload(payload)
+                except (KeyError, TypeError, ValueError):
+                    return payload
+                if decision.candidate_id == candidate_id:
+                    return decision.to_payload()
+                continue
+            if event_kind == "ApprovalDecisionRecorded" and "approval_decision_id" in payload:
+                try:
+                    approval = ApprovalDecision.from_payload(payload)
+                except (KeyError, TypeError, ValueError):
+                    return payload
+                if approval.candidate_id == candidate_id:
+                    return approval.to_payload()
+                continue
             if payload["candidate_id"] == candidate_id:
                 return payload
         return None
@@ -2411,13 +2674,14 @@ class ModelGovernanceQuery:
     def _approval_projection(
         approval: dict[str, object] | None,
         candidate: dict[str, object],
-        gate: dict[str, object] | None,
+        current_gate: GateDecision | None,
+        gate_projection: dict[str, object],
     ) -> dict[str, object]:
         if approval is None:
             return {
                 "status": (
                     "blocked_by_gate"
-                    if gate is not None and gate["status"] in {"failed", "gate_evidence_invalid"}
+                    if gate_projection["status"] in {"failed", "gate_evidence_invalid"}
                     else "awaiting_approval"
                 )
             }
@@ -2426,8 +2690,16 @@ class ModelGovernanceQuery:
                 decision = ApprovalDecision.from_payload(approval)
             except (TypeError, ValueError):
                 return {"status": "approval_evidence_invalid"}
+            if (
+                current_gate is None
+                or decision.gate_decision_id != current_gate.gate_decision_id
+                or decision.policy_version_id != current_gate.policy_version_id
+            ):
+                status = "gate_lineage_changed"
+            else:
+                status = "approved" if decision.decision == "approved" else "rejected"
             return {
-                "status": "approved" if decision.decision == "approved" else "rejected",
+                "status": status,
                 "approval_policy_version_id": decision.approval_policy_version_id,
                 "approval_mode": decision.approval_mode,
                 "approval_policy_owner_principal_id": (decision.approval_policy_owner_principal_id),
@@ -2461,16 +2733,18 @@ class ModelGovernanceQuery:
             return 0
         if approval.gate_decision_id != gate.gate_decision_id:
             return 0
-        count = 0
-        for event in events:
-            if event.event_kind != "ShadowEodRecorded":
-                continue
-            payload = json.loads(event.payload_json)
-            if (
-                payload.get("candidate_id") == candidate_id
-                and payload.get("gate_decision_id") == gate.gate_decision_id
-                and payload.get("approval_decision_id") == approval.approval_decision_id
-                and payload.get("approval_policy_version_id") == approval.approval_policy_version_id
-            ):
-                count += 1
-        return count
+        try:
+            records = _verified_shadow_lineage(
+                events,
+                candidate_id=candidate_id,
+                artifact_id=approval.artifact_id,
+                evaluation_report_id=approval.evaluation_report_id,
+                gate_decision_id=gate.gate_decision_id,
+                approval_decision_id=approval.approval_decision_id,
+                approval_policy_version_id=approval.approval_policy_version_id,
+                expected_assignment=approval.expected_assignment,
+                not_before=approval.decided_at,
+            )
+        except (KeyError, TypeError, ValueError):
+            return 0
+        return len(records)

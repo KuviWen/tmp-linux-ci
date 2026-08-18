@@ -226,6 +226,14 @@ class FoldManifest:
             and expected == self
         )
 
+    def latest_joint_split(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        latest_quarter = max(fold.test_quarter for fold in self.folds)
+        latest_folds = tuple(fold for fold in self.folds if fold.test_quarter == latest_quarter)
+        return (
+            tuple(row_id for fold in latest_folds for row_id in fold.training_row_ids),
+            tuple(row_id for fold in latest_folds for row_id in fold.validation_row_ids),
+        )
+
     @classmethod
     def from_serialized(cls, fold_manifest_id: str, serialized: bytes) -> FoldManifest:
         try:
@@ -751,7 +759,7 @@ class ForecastLab:
                 intent.preregistered_seeds,
                 provenance=intent.provenance,
             )
-            training_ids, validation_ids = self._latest_joint_split(fold_manifest)
+            training_ids, validation_ids = fold_manifest.latest_joint_split()
             logistic_artifacts = tuple(
                 self._logistic_forecaster.train(
                     TrainingRequest(
@@ -929,19 +937,6 @@ class ForecastLab:
             class_prior_equal_cell_macro_f1=prior_score,
             logistic_equal_cell_macro_f1=logistic_score,
             seed_macro_f1=cast(tuple[float, float, float], seed_scores),
-        )
-
-    @staticmethod
-    def _latest_joint_split(
-        fold_manifest: FoldManifest,
-    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        latest_quarter = max(fold.test_quarter for fold in fold_manifest.folds)
-        latest_folds = tuple(
-            fold for fold in fold_manifest.folds if fold.test_quarter == latest_quarter
-        )
-        return (
-            tuple(row_id for fold in latest_folds for row_id in fold.training_row_ids),
-            tuple(row_id for fold in latest_folds for row_id in fold.validation_row_ids),
         )
 
     def _cell_lists(self) -> dict[tuple[Market, Horizon], list[TrendLabel]]:

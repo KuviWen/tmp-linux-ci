@@ -3,11 +3,12 @@ import json
 from dataclasses import replace
 from datetime import UTC, date, datetime, time
 from io import BytesIO
-from typing import Literal
+from typing import Literal, cast
 
 import pytest
 from sqlalchemy import create_engine, func, select
 
+from stock_forecasting.content_address import canonical_json_bytes, sha256_id
 from stock_forecasting.evaluation_report import EvaluationReport
 from stock_forecasting.forecast_lab import (
     CandidateEvidenceBundle,
@@ -15,6 +16,7 @@ from stock_forecasting.forecast_lab import (
     FormalQualificationEvidence,
     TrainingIntentRef,
 )
+from stock_forecasting.forecasting import ModelArtifact
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     ApprovalDecision,
@@ -22,6 +24,7 @@ from stock_forecasting.model_governance import (
     DecideApproval,
     EvaluateBootstrapCandidate,
     GateCategory,
+    GateDecision,
     GateMeasurement,
     GateThreshold,
     HardGateEvidence,
@@ -97,6 +100,7 @@ class _CorruptingReadStore:
     def __init__(self) -> None:
         self._store = InMemoryLifecycleStore()
         self.corruption: tuple[str, str, object] | None = None
+        self.corruption_command_id: str | None = None
 
     def append(
         self,
@@ -124,7 +128,10 @@ class _CorruptingReadStore:
         event_kind, field, value = self.corruption
         corrupted = []
         for event in events:
-            if event.event_kind != event_kind:
+            if event.event_kind != event_kind or (
+                self.corruption_command_id is not None
+                and event.command_id != self.corruption_command_id
+            ):
                 corrupted.append(event)
                 continue
             payload = json.loads(event.payload_json)
@@ -174,6 +181,45 @@ def _candidate_id(candidate_id: str) -> str:
 
 def _artifact_id(candidate_id: str) -> str:
     return _RECORDED_CANDIDATES[candidate_id].primary_artifact.artifact_id
+
+
+def _report_for_artifacts(
+    bundle: CandidateEvidenceBundle,
+    logistic_artifacts: tuple[ModelArtifact, ...],
+    class_prior_artifacts: tuple[ModelArtifact, ...],
+) -> EvaluationReport:
+    return EvaluationReport.create(
+        class_prior_equal_cell_macro_f1=(bundle.evaluation_report.class_prior_equal_cell_macro_f1),
+        logistic_equal_cell_macro_f1=bundle.evaluation_report.logistic_equal_cell_macro_f1,
+        seed_results=tuple(
+            replace(
+                item,
+                logistic_artifact_id=logistic.artifact_id,
+                class_prior_artifact_id=prior.artifact_id,
+            )
+            for item, logistic, prior in zip(
+                bundle.evaluation_report.seed_results,
+                logistic_artifacts,
+                class_prior_artifacts,
+                strict=True,
+            )
+        ),
+        feature_batch_id=bundle.evaluation_report.feature_batch_id,
+        source_policy_manifest_id=bundle.evaluation_report.source_policy_manifest_id,
+        label_manifest_id=bundle.evaluation_report.label_manifest_id,
+        cost_manifest_id=bundle.evaluation_report.cost_manifest_id,
+        fold_manifest_id=bundle.evaluation_report.fold_manifest_id,
+    )
+
+
+def _with_training_selection(
+    artifact: ModelArtifact,
+    training_selection_id: str,
+) -> ModelArtifact:
+    payload = json.loads(artifact.serialized)
+    payload["training_selection_id"] = training_selection_id
+    serialized = canonical_json_bytes(payload)
+    return ModelArtifact.from_serialized(sha256_id(serialized), serialized)
 
 
 def _shadow_evidence(
@@ -616,6 +662,69 @@ def test_candidate_recording_compares_model_wrapper_to_its_serialized_bytes() ->
         )
 
 
+def test_candidate_recording_enforces_disjoint_model_family_buckets() -> None:
+    lifecycle = ModelLifecycle(InMemoryLifecycleStore())
+    bundle = engineering_lifecycle_candidate_bundle(
+        model_family_id="family-swapped-model-buckets",
+        logistic_macro_f1=0.52,
+    )
+    duplicated_logistic = bundle.logistic_artifacts
+    report = _report_for_artifacts(bundle, duplicated_logistic, duplicated_logistic)
+    tampered = replace(
+        bundle,
+        candidate_id="",
+        class_prior_artifacts=duplicated_logistic,
+        evaluation_report=report,
+    ).with_content_id()
+
+    with pytest.raises(LifecycleConflict, match="candidate_evidence_invalid"):
+        lifecycle.execute(
+            RecordCandidate(
+                command_id="record-swapped-model-buckets",
+                candidate_bundle=tampered,
+                expected_version=0,
+                occurred_at=datetime(2026, 8, 17, 1, 0, tzinfo=UTC),
+            )
+        )
+
+
+def test_candidate_recording_binds_training_selection_to_latest_joint_fold() -> None:
+    lifecycle = ModelLifecycle(InMemoryLifecycleStore())
+    bundle = engineering_lifecycle_candidate_bundle(
+        model_family_id="family-wrong-training-selection",
+        logistic_macro_f1=0.52,
+    )
+    wrong_selection_id = "sha256:" + "9" * 64
+    logistic_artifacts = tuple(
+        _with_training_selection(artifact, wrong_selection_id)
+        for artifact in bundle.logistic_artifacts
+    )
+    class_prior_artifacts = tuple(
+        _with_training_selection(artifact, wrong_selection_id)
+        for artifact in bundle.class_prior_artifacts
+    )
+    report = _report_for_artifacts(bundle, logistic_artifacts, class_prior_artifacts)
+    tampered = replace(
+        bundle,
+        candidate_id="",
+        primary_artifact=logistic_artifacts[0],
+        logistic_artifacts=logistic_artifacts,
+        class_prior_artifacts=class_prior_artifacts,
+        calibrators=logistic_artifacts[0].calibrators,
+        evaluation_report=report,
+    ).with_content_id()
+
+    with pytest.raises(LifecycleConflict, match="candidate_evidence_invalid"):
+        lifecycle.execute(
+            RecordCandidate(
+                command_id="record-wrong-training-selection",
+                candidate_bundle=tampered,
+                expected_version=0,
+                occurred_at=datetime(2026, 8, 17, 1, 0, tzinfo=UTC),
+            )
+        )
+
+
 def test_candidate_qualification_fails_closed_without_a_repository_backed_verifier() -> None:
     store = InMemoryLifecycleStore()
     lifecycle = ModelLifecycle(store)
@@ -732,6 +841,39 @@ def test_approval_rejects_a_gate_event_whose_status_was_changed_after_write() ->
                 expected_version=2,
                 occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
             )
+        )
+
+
+def test_passed_gate_decision_requires_complete_verified_evidence() -> None:
+    with pytest.raises(ValueError, match="gate_decision_schema_invalid"):
+        GateDecision.create(
+            candidate_id="sha256:candidate",
+            artifact_id="sha256:artifact",
+            evaluation_report_id="sha256:evaluation",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            status="passed",
+            failed_gates=(),
+        )
+
+
+def test_passed_gate_decision_requires_submitted_improvement_to_match_verified() -> None:
+    evidence = passing_hard_gate_evidence("sha256:evaluation")
+
+    with pytest.raises(ValueError, match="gate_decision_schema_invalid"):
+        GateDecision.create(
+            candidate_id="sha256:candidate",
+            artifact_id="sha256:artifact",
+            evaluation_report_id="sha256:evaluation",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            status="passed",
+            failed_gates=(),
+            hard_gate_evidence_id=evidence.evidence_id,
+            hard_gate_evidence_refs=evidence.evidence_refs,
+            hard_gate_report_id=evidence.evidence_refs[0],
+            submitted_hard_gate_measurements=evidence.measurements,
+            submitted_improvement_percentage_points=2.0,
+            verified_improvement_percentage_points=1.0,
+            verified_hard_gate_measurements=evidence.measurements,
         )
 
 
@@ -1406,6 +1548,30 @@ def test_approved_decision_rejects_impossible_approval_role_evidence(
             decision="approved",
             reason="impossible approved decision",
             expected_assignment="unassigned",
+            decided_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+            expires_at=datetime(2026, 8, 25, 2, 0, tzinfo=UTC),
+            invalidated_reason=None,
+        )
+
+
+def test_approved_decision_requires_an_approval_request_and_nonblank_reason() -> None:
+    with pytest.raises(ValueError, match="approval_decision_schema_invalid"):
+        ApprovalDecision.create(
+            candidate_id="sha256:candidate",
+            artifact_id="sha256:artifact",
+            evaluation_report_id="sha256:evaluation",
+            policy_version_id="sha256:gate-policy",
+            gate_decision_id="sha256:gate-decision",
+            approval_policy_version_id="sha256:approval-policy",
+            approval_mode="owner_operated",
+            approval_policy_owner_principal_id="owner-a",
+            independent_review=False,
+            approver_id="owner-a",
+            requested_decision="rejected",
+            decision="approved",
+            reason="   ",
+            expected_assignment="unassigned",
+            decided_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
             expires_at=datetime(2026, 8, 25, 2, 0, tzinfo=UTC),
             invalidated_reason=None,
         )
@@ -1413,10 +1579,11 @@ def test_approved_decision_rejects_impossible_approval_role_evidence(
 
 def _approved_lifecycle(
     *,
+    store: LifecycleStore | None = None,
     shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
     shadow_run_verifier: ShadowRunVerifier | None = None,
-) -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
-    store = InMemoryLifecycleStore()
+) -> tuple[ModelLifecycle, LifecycleStore]:
+    lifecycle_store = store or InMemoryLifecycleStore()
     verifier = shadow_eligibility_verifier or _JointMarketEodVerifier(
         frozenset(
             {
@@ -1429,7 +1596,7 @@ def _approved_lifecycle(
         )
     )
     lifecycle = _verified_lifecycle(
-        store,
+        lifecycle_store,
         shadow_eligibility_verifier=verifier,
         shadow_run_verifier=shadow_run_verifier or _VerifiedShadowRunVerifier(),
     )
@@ -1479,7 +1646,7 @@ def _approved_lifecycle(
             "expected_assignment": "unassigned",
         }
     )
-    return lifecycle, store
+    return lifecycle, lifecycle_store
 
 
 def test_closed_market_date_cannot_count_as_an_eligible_shadow_eod() -> None:
@@ -1683,6 +1850,53 @@ def test_five_joint_market_shadows_complete_without_production_assignment() -> N
     assert duplicate.shadow_evidence.blocked_reason == "duplicate_shadow_run"
 
 
+def test_corrupted_persisted_shadow_evidence_cannot_complete_five_cycles() -> None:
+    store = _CorruptingReadStore()
+    lifecycle, _ = _approved_lifecycle(store=store)
+    for cycle in range(1, 5):
+        outcome = lifecycle.execute(
+            RecordShadowEod(
+                command_id=f"shadow-before-history-corruption-{cycle}",
+                model_family_id="family-shadow",
+                candidate_id=_candidate_id("candidate-shadow"),
+                evidence=_shadow_evidence(
+                    cycle,
+                    previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                ),
+                expected_version=cycle + 2,
+                occurred_at=datetime.combine(
+                    _shadow_evidence(
+                        cycle,
+                        previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                    ).eligible_eod_date,
+                    time(3, 0),
+                    tzinfo=UTC,
+                ),
+            )
+        )
+        assert outcome.status == "shadow_recorded"
+    store.corruption = ("ShadowEodRecorded", "eligible_eod_date", "2026-08-18")
+
+    blocked = lifecycle.execute(
+        RecordShadowEod(
+            command_id="fifth-shadow-after-history-corruption",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            evidence=_shadow_evidence(5, previous_shadow_run_id="shadow-run-4"),
+            expected_version=7,
+            occurred_at=datetime(2026, 8, 24, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert blocked.status == "shadow_blocked"
+    assert blocked.shadow_evidence is not None
+    assert blocked.shadow_evidence.blocked_reason == "shadow_history_invalid"
+    assert ModelGovernanceQuery(store).get_backtest("family-shadow")["shadow"] == {
+        "eligible_cycle_count": 0,
+        "required": 5,
+    }
+
+
 def test_expired_approval_blocks_shadow_and_preserves_failure_evidence() -> None:
     lifecycle, store = _approved_lifecycle()
 
@@ -1705,6 +1919,32 @@ def test_expired_approval_blocks_shadow_and_preserves_failure_evidence() -> None
     assert blocked.shadow_evidence is not None
     assert blocked.shadow_evidence.blocked_reason == "approval_expired"
     assert store.events("family-shadow")[-1].event_kind == "ShadowEodBlocked"
+
+
+def test_shadow_eod_before_approval_cannot_count() -> None:
+    backdated_eod = date(2026, 8, 15)
+    lifecycle, _ = _approved_lifecycle(
+        shadow_eligibility_verifier=_JointMarketEodVerifier(frozenset({backdated_eod}))
+    )
+
+    blocked = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-before-approval",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            evidence=_bound_shadow_evidence(
+                shadow_run_id="shadow-run-before-approval",
+                eligible_eod_date=backdated_eod,
+                previous_shadow_run_id=None,
+            ),
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert blocked.status == "shadow_blocked"
+    assert blocked.shadow_evidence is not None
+    assert blocked.shadow_evidence.blocked_reason == "shadow_before_approval"
 
 
 def test_later_hard_gate_veto_invalidates_approval_before_shadow() -> None:
@@ -1744,7 +1984,7 @@ def test_later_hard_gate_veto_invalidates_approval_before_shadow() -> None:
 
 
 def test_later_passing_gate_with_different_evidence_invalidates_stale_approval() -> None:
-    lifecycle, _ = _approved_lifecycle()
+    lifecycle, store = _approved_lifecycle()
     reevaluated = lifecycle.execute(
         EvaluateBootstrapCandidate(
             command_id="gate-shadow-later-passing-evidence",
@@ -1775,6 +2015,50 @@ def test_later_passing_gate_with_different_evidence_invalidates_stale_approval()
     assert shadow.status == "shadow_blocked"
     assert shadow.shadow_evidence is not None
     assert shadow.shadow_evidence.blocked_reason == "gate_lineage_changed"
+    approval_projection = cast(
+        dict[str, object],
+        ModelGovernanceQuery(store).get_backtest("family-shadow")["approval"],
+    )
+    assert approval_projection["status"] == "gate_lineage_changed"
+
+
+def test_corrupted_latest_approval_cannot_resurrect_an_older_approval() -> None:
+    store = _CorruptingReadStore()
+    lifecycle, _ = _approved_lifecycle(store=store)
+    rejection = lifecycle.execute(
+        DecideApproval(
+            command_id="latest-rejection-before-corruption",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            artifact_id=_artifact_id("candidate-shadow"),
+            evaluation_report_id=_evaluation_report_id("candidate-shadow"),
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            approver_id="model-approver-d",
+            decision="rejected",
+            reason="latest decision rejects this evidence",
+            expected_assignment="unassigned",
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 2, 30, tzinfo=UTC),
+        )
+    )
+    assert rejection.status == "approval_rejected"
+    store.corruption = ("ApprovalDecisionRecorded", "candidate_id", "sha256:other-candidate")
+    store.corruption_command_id = "latest-rejection-before-corruption"
+
+    result = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-after-latest-approval-corruption",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+            expected_version=4,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "shadow_blocked"
+    assert result.shadow_evidence is not None
+    assert result.shadow_evidence.blocked_reason == "approval_evidence_invalid"
 
 
 def test_shadow_cycle_count_restarts_after_regating_and_reapproval() -> None:
