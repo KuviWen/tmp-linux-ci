@@ -7,7 +7,7 @@ from typing import Literal, Protocol, cast
 
 from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.contracts import HistoricalTrainingLineage
-from stock_forecasting.evaluation_report import EvaluationReport
+from stock_forecasting.evaluation_report import EvaluationReport, SeedArtifactEvaluation
 from stock_forecasting.forecasting import (
     ArtifactProvenance,
     CalibrationEvidence,
@@ -134,8 +134,7 @@ class FoldManifest:
 @dataclass(frozen=True)
 class CandidateEvidenceBundle:
     candidate_id: str
-    model_family_id: str
-    training_intent_id: str
+    training_intent: TrainingIntentRef
     primary_artifact: ModelArtifact
     logistic_artifacts: tuple[ModelArtifact, ...]
     class_prior_artifacts: tuple[ModelArtifact, ...]
@@ -143,6 +142,49 @@ class CandidateEvidenceBundle:
     calibrators: tuple[CalibrationEvidence, ...]
     evaluation_report: EvaluationReport
     formal_qualification: bool
+
+    @property
+    def model_family_id(self) -> str:
+        return self.training_intent.model_family_id
+
+    @property
+    def training_intent_id(self) -> str:
+        return self.training_intent.training_intent_id
+
+    def content_id(self) -> str:
+        return _content_id(
+            "candidate",
+            {
+                "model_family_id": self.model_family_id,
+                "training_intent_id": self.training_intent_id,
+                "primary_artifact_id": self.primary_artifact.artifact_id,
+                "logistic_artifact_ids": [
+                    artifact.artifact_id for artifact in self.logistic_artifacts
+                ],
+                "class_prior_artifact_ids": [
+                    artifact.artifact_id for artifact in self.class_prior_artifacts
+                ],
+                "fold_manifest_id": self.fold_manifest.fold_manifest_id,
+                "fold_count": self.fold_manifest.fold_count,
+                "calibrator_ids": [item.calibrator_id for item in self.calibrators],
+                "calibrator_statuses": [item.status for item in self.calibrators],
+                "evaluation_report_id": self.evaluation_report.evaluation_report_id,
+                "formal_qualification": self.formal_qualification,
+            },
+        )
+
+    def with_content_id(self) -> CandidateEvidenceBundle:
+        return replace(self, candidate_id=self.content_id())
+
+    def is_content_addressed(self) -> bool:
+        return self.candidate_id == self.content_id()
+
+
+@dataclass(frozen=True)
+class _EvaluationScores:
+    class_prior_equal_cell_macro_f1: float
+    logistic_equal_cell_macro_f1: float
+    seed_macro_f1: tuple[float, float, float]
 
 
 @dataclass(frozen=True)
@@ -225,7 +267,7 @@ class ForecastLab:
             return self._blocked("unverified_cost_scenario")
         formal_qualification = formal_source_basis and formal_cost_scenario
         try:
-            evaluation = self._evaluate(
+            evaluation_scores = self._evaluate(
                 feature_batch,
                 fold_manifest,
                 intent.preregistered_seeds,
@@ -263,38 +305,45 @@ class ForecastLab:
             return self._blocked("logistic_training_failed")
         except ArithmeticError:
             return self._blocked("logistic_training_failed")
-        logistic_artifacts = tuple(
-            artifact.bind_evaluation_report(evaluation.evaluation_report_id)
-            for artifact in logistic_artifacts
+        evaluation = EvaluationReport.create(
+            class_prior_equal_cell_macro_f1=(evaluation_scores.class_prior_equal_cell_macro_f1),
+            logistic_equal_cell_macro_f1=evaluation_scores.logistic_equal_cell_macro_f1,
+            seed_results=tuple(
+                SeedArtifactEvaluation(
+                    seed=seed,
+                    logistic_artifact_id=logistic.artifact_id,
+                    class_prior_artifact_id=prior.artifact_id,
+                    logistic_macro_f1=score,
+                )
+                for seed, logistic, prior, score in zip(
+                    intent.preregistered_seeds,
+                    logistic_artifacts,
+                    prior_artifacts,
+                    evaluation_scores.seed_macro_f1,
+                    strict=True,
+                )
+            ),
+            feature_batch_id=feature_batch.feature_batch_id,
+            source_policy_manifest_id=feature_batch.source_policy_manifest_id,
+            label_manifest_id=feature_batch.label_manifest_id,
+            cost_manifest_id=feature_batch.cost_manifest_id,
+            fold_manifest_id=fold_manifest.fold_manifest_id,
         )
-        prior_artifacts = tuple(
-            artifact.bind_evaluation_report(evaluation.evaluation_report_id)
-            for artifact in prior_artifacts
-        )
-        candidate_id = _content_id(
-            "candidate",
-            {
-                "training_intent_id": intent.training_intent_id,
-                "artifact_ids": [artifact.artifact_id for artifact in logistic_artifacts],
-                "calibrator_ids": [item.calibrator_id for item in calibrators],
-                "evaluation_report_id": evaluation.evaluation_report_id,
-            },
-        )
+        candidate_bundle = CandidateEvidenceBundle(
+            candidate_id="",
+            training_intent=intent,
+            primary_artifact=logistic_artifacts[0],
+            logistic_artifacts=logistic_artifacts,
+            class_prior_artifacts=prior_artifacts,
+            fold_manifest=fold_manifest,
+            calibrators=calibrators,
+            evaluation_report=evaluation,
+            formal_qualification=formal_qualification,
+        ).with_content_id()
         return ForecastLabOutcome(
             status="developed",
             blocked_reasons=(),
-            candidate_bundle=CandidateEvidenceBundle(
-                candidate_id=candidate_id,
-                model_family_id=intent.model_family_id,
-                training_intent_id=intent.training_intent_id,
-                primary_artifact=logistic_artifacts[0],
-                logistic_artifacts=logistic_artifacts,
-                class_prior_artifacts=prior_artifacts,
-                fold_manifest=fold_manifest,
-                calibrators=calibrators,
-                evaluation_report=evaluation,
-                formal_qualification=formal_qualification,
-            ),
+            candidate_bundle=candidate_bundle,
         )
 
     def _has_formal_source_basis(self, intent: TrainingIntentRef) -> bool:
@@ -453,7 +502,7 @@ class ForecastLab:
         seeds: tuple[int, int, int],
         *,
         provenance: ArtifactProvenance,
-    ) -> EvaluationReport:
+    ) -> _EvaluationScores:
         rows_by_id = {row.row_id: row for row in batch.rows}
         folds_by_quarter: dict[str, list[WalkForwardFold]] = defaultdict(list)
         for fold in fold_manifest.folds:
@@ -508,12 +557,10 @@ class ForecastLab:
             for truth, predictions in zip(seed_truth, seed_predictions, strict=True)
         )
         logistic_score = sum(seed_scores) / len(seed_scores)
-        return EvaluationReport.create(
+        return _EvaluationScores(
             class_prior_equal_cell_macro_f1=prior_score,
             logistic_equal_cell_macro_f1=logistic_score,
-            seed_macro_f1=seed_scores,
-            cost_manifest_id=batch.cost_manifest_id,
-            fold_manifest_id=fold_manifest.fold_manifest_id,
+            seed_macro_f1=cast(tuple[float, float, float], seed_scores),
         )
 
     @staticmethod

@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
 
+import pytest
 from fastapi.testclient import TestClient
 
 from stock_forecasting.adapters.rest import create_web_app
@@ -13,7 +14,11 @@ from stock_forecasting.bootstrap_workflow import (
 )
 from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
 from stock_forecasting.forecasting import ArtifactProvenance
-from stock_forecasting.model_governance import BOOTSTRAP_GATE_POLICY_V1
+from stock_forecasting.model_governance import (
+    BOOTSTRAP_GATE_POLICY_V1,
+    LifecycleConflict,
+    RecordCandidate,
+)
 from tests.modeling_support import (
     engineering_model_history,
     passing_hard_gate_evidence,
@@ -51,6 +56,18 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
     workflow = BootstrapGovernanceWorkflow(lab, application.model_lifecycle)
     preview = lab.develop(intent).candidate_bundle
     assert preview is not None
+    with pytest.raises(LifecycleConflict, match="candidate_evidence_invalid"):
+        application.model_lifecycle.execute(
+            RecordCandidate(
+                command_id="ticket-09-tampered-candidate",
+                candidate_bundle=replace(
+                    preview,
+                    formal_qualification=True,
+                ).with_content_id(),
+                expected_version=0,
+                occurred_at=now - timedelta(hours=1),
+            )
+        )
     report = passing_hard_gate_report(preview.evaluation_report.evaluation_report_id)
     application.governance_object_repository.put_verified(
         BytesIO(report.serialized),

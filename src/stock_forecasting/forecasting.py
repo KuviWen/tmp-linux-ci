@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from math import exp, isfinite, log
-from typing import Literal, Protocol, TypeGuard, cast
+from typing import ClassVar, Literal, Protocol, TypeGuard, cast
 
 from stock_forecasting.content_address import canonical_json_bytes, sha256_id
 from stock_forecasting.content_address import content_id as _content_id
@@ -100,6 +100,11 @@ class FeatureBatch:
 
 @dataclass(frozen=True)
 class ArtifactProvenance:
+    field_names: ClassVar[tuple[str, str, str]] = (
+        "feature_schema_id",
+        "runtime_id",
+        "code_provenance",
+    )
     feature_schema_id: str
     runtime_id: str
     code_provenance: str
@@ -112,20 +117,13 @@ class ArtifactProvenance:
             raise ValueError("artifact_provenance_invalid")
 
     def payload(self) -> dict[str, str]:
-        return {
-            "feature_schema_id": self.feature_schema_id,
-            "runtime_id": self.runtime_id,
-            "code_provenance": self.code_provenance,
-        }
+        return {field: getattr(self, field) for field in self.field_names}
 
     @classmethod
     def from_payload(cls, payload: dict[str, object]) -> ArtifactProvenance:
         try:
-            return cls(
-                cast(str, payload["feature_schema_id"]),
-                cast(str, payload["runtime_id"]),
-                cast(str, payload["code_provenance"]),
-            )
+            values = tuple(cast(str, payload[field]) for field in cls.field_names)
+            return cls(*cast(tuple[str, str, str], values))
         except KeyError as error:
             raise ValueError("artifact_provenance_invalid") from error
 
@@ -165,25 +163,6 @@ class ModelArtifact:
     serialized: bytes
     calibrator_ids: tuple[str, ...] = ()
     calibrators: tuple[CalibrationEvidence, ...] = ()
-    evaluation_report_id: str | None = None
-
-    def bind_evaluation_report(self, evaluation_report_id: str) -> ModelArtifact:
-        payload = cast(dict[str, object], json.loads(self.serialized))
-        payload["evaluation_report_id"] = evaluation_report_id
-        serialized = _serialize_payload(payload)
-        return ModelArtifact(
-            artifact_id=_artifact_id(serialized),
-            model_family=self.model_family,
-            seed=self.seed,
-            manifest_ids=self.manifest_ids,
-            training_selection_id=self.training_selection_id,
-            model_parameters_id=self.model_parameters_id,
-            provenance=self.provenance,
-            serialized=serialized,
-            calibrator_ids=self.calibrator_ids,
-            calibrators=self.calibrators,
-            evaluation_report_id=evaluation_report_id,
-        )
 
 
 @dataclass(frozen=True)
@@ -694,9 +673,7 @@ def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
         "seed",
         "manifest_ids",
         "training_selection_id",
-        "feature_schema_id",
-        "runtime_id",
-        "code_provenance",
+        *ArtifactProvenance.field_names,
         "normalizers",
         "class_weights_by_cell",
         "cell_loss_normalizers",
@@ -706,10 +683,9 @@ def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
         "calibrator_ids",
         "calibrators",
     }
-    optional = {"evaluation_report_id"}
     if (
         not required.issubset(payload)
-        or not set(payload).issubset(required | optional)
+        or set(payload) != required
         or payload["artifact_format"] != "safe-json-v1"
         or payload["model_family"] != "regularized_multinomial_logistic"
         or isinstance(payload["seed"], bool)
@@ -825,8 +801,6 @@ def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
         payload,
         expected_cells={cast(str, cell) for cell in class_weights},
     )
-    if "evaluation_report_id" in payload and not isinstance(payload["evaluation_report_id"], str):
-        raise ValueError("artifact_schema_invalid")
     return payload
 
 
@@ -844,17 +818,14 @@ def _load_class_prior_artifact(serialized: bytes) -> dict[str, object]:
         "seed",
         "manifest_ids",
         "training_selection_id",
-        "feature_schema_id",
-        "runtime_id",
-        "code_provenance",
+        *ArtifactProvenance.field_names,
         "probabilities_by_cell",
         "calibrator_ids",
         "calibrators",
     }
-    optional = {"evaluation_report_id"}
     if (
         not required.issubset(payload)
-        or not set(payload).issubset(required | optional)
+        or set(payload) != required
         or payload["artifact_format"] != "safe-json-v1"
         or payload["model_family"] != "class_prior"
         or isinstance(payload["seed"], bool)
@@ -892,8 +863,6 @@ def _load_class_prior_artifact(serialized: bytes) -> dict[str, object]:
         payload,
         expected_cells={cast(str, cell) for cell in probabilities_by_cell},
     )
-    if "evaluation_report_id" in payload and not isinstance(payload["evaluation_report_id"], str):
-        raise ValueError("artifact_schema_invalid")
     return payload
 
 

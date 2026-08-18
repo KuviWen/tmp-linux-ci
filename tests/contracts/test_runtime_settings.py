@@ -15,7 +15,6 @@ from stock_forecasting.authorization_repository import (
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
 )
-from stock_forecasting.evaluation_report import EvaluationReport
 from stock_forecasting.forecast_lab import ForecastLab
 from stock_forecasting.formal_cost_scenario import load_conservative_cost_scenario
 from stock_forecasting.model_governance import (
@@ -29,7 +28,11 @@ from stock_forecasting.model_governance import (
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.runtime import RuntimeSettings
 from stock_forecasting.source_credentials import SecretUseContext
-from tests.modeling_support import passing_hard_gate_evidence, passing_hard_gate_report
+from tests.modeling_support import (
+    lifecycle_candidate_bundle,
+    passing_hard_gate_evidence,
+    passing_hard_gate_report,
+)
 
 
 def _install_fixture_policy_catalog(
@@ -349,13 +352,14 @@ def test_operator_runtime_designates_its_single_owner_for_model_approval(
     monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", policy_set_id)
     application = RuntimeSettings.from_environment().build_application()
     owner_id = identity.context.principal_id
-    evaluation = EvaluationReport.create(
-        class_prior_equal_cell_macro_f1=0.40,
-        logistic_equal_cell_macro_f1=0.52,
-        seed_macro_f1=(0.50, 0.52, 0.54),
-        cost_manifest_id="cost-v1",
-        fold_manifest_id="fold-v1",
+    bundle = lifecycle_candidate_bundle(
+        model_family_id="owner-runtime-family",
+        logistic_macro_f1=0.52,
+        formal_qualification=True,
+        intent_initiator=owner_id,
+        training_executor=owner_id,
     )
+    evaluation = bundle.evaluation_report
     evaluation_id = evaluation.evaluation_report_id
     report = passing_hard_gate_report(evaluation_id)
     application.governance_object_repository.put_verified(
@@ -366,25 +370,16 @@ def test_operator_runtime_designates_its_single_owner_for_model_approval(
     application.model_lifecycle.execute(
         RecordCandidate(
             command_id="record-owner-runtime-candidate",
-            model_family_id="owner-runtime-family",
-            candidate_id="owner-runtime-candidate",
-            model_family="regularized_multinomial_logistic",
-            artifact_id="sha256:owner-runtime-artifact",
-            evaluation_report=evaluation,
-            training_intent_id="owner-runtime-intent",
-            intent_initiator=owner_id,
-            training_executor=owner_id,
-            calibrator_statuses=("sufficient_data",) * 6,
+            candidate_bundle=bundle,
             expected_version=0,
             occurred_at=now,
-            formal_qualification=True,
         )
     )
     application.model_lifecycle.execute(
         EvaluateBootstrapCandidate(
             command_id="gate-owner-runtime-candidate",
             model_family_id="owner-runtime-family",
-            candidate_id="owner-runtime-candidate",
+            candidate_id=bundle.candidate_id,
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=passing_hard_gate_evidence(evaluation_id),
             expected_version=1,
@@ -396,8 +391,8 @@ def test_operator_runtime_designates_its_single_owner_for_model_approval(
         DecideApproval(
             command_id="approve-owner-runtime-candidate",
             model_family_id="owner-runtime-family",
-            candidate_id="owner-runtime-candidate",
-            artifact_id="sha256:owner-runtime-artifact",
+            candidate_id=bundle.candidate_id,
+            artifact_id=bundle.primary_artifact.artifact_id,
             evaluation_report_id=evaluation_id,
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id=owner_id,

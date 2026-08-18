@@ -63,23 +63,12 @@ class BootstrapGovernanceWorkflow:
                 version=failure.version,
             )
         bundle = development.candidate_bundle
-        report = bundle.evaluation_report
         recorded = self._lifecycle.execute(
             RecordCandidate(
                 command_id=f"{command.command_id_prefix}:record-candidate",
-                model_family_id=bundle.model_family_id,
-                candidate_id=bundle.candidate_id,
-                model_family="regularized_multinomial_logistic",
-                artifact_id=bundle.primary_artifact.artifact_id,
-                evaluation_report=report,
-                training_intent_id=bundle.training_intent_id,
-                intent_initiator=command.intent.initiated_by,
-                training_executor=command.intent.executed_by,
-                calibrator_statuses=tuple(item.status for item in bundle.calibrators),
+                candidate_bundle=bundle,
                 expected_version=command.expected_version,
                 occurred_at=command.occurred_at,
-                fold_count=bundle.fold_manifest.fold_count,
-                formal_qualification=bundle.formal_qualification,
             )
         )
         gate = self._lifecycle.execute(

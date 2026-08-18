@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from io import BytesIO
 from math import isfinite
 from types import MappingProxyType
-from typing import BinaryIO, Literal, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from sqlalchemy import func, select
@@ -17,12 +17,30 @@ from sqlalchemy.exc import IntegrityError
 from stock_forecasting.content_address import canonical_json, canonical_json_bytes, sha256_id
 from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.evaluation_report import EvaluationReport
+from stock_forecasting.forecasting import (
+    ClassPriorTrendForecaster,
+    ModelArtifact,
+    RegularizedMultinomialLogisticTrendForecaster,
+)
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import model_lifecycle_events
+
+if TYPE_CHECKING:
+    from stock_forecasting.forecast_lab import CandidateEvidenceBundle
 
 
 class LifecycleConflict(RuntimeError):
     """Raised when an append-only lifecycle precondition is stale or inconsistent."""
+
+
+def _cold_load_model_artifact(artifact: ModelArtifact) -> None:
+    if artifact.model_family == "regularized_multinomial_logistic":
+        RegularizedMultinomialLogisticTrendForecaster.load(artifact.serialized)
+        return
+    if artifact.model_family == "class_prior":
+        ClassPriorTrendForecaster.load(artifact.serialized)
+        return
+    raise ValueError("candidate_model_family_invalid")
 
 
 @dataclass(frozen=True)
@@ -538,19 +556,9 @@ class ObjectEvaluationReportRepository:
 @dataclass(frozen=True)
 class RecordCandidate:
     command_id: str
-    model_family_id: str
-    candidate_id: str
-    model_family: str
-    artifact_id: str
-    evaluation_report: EvaluationReport
-    training_intent_id: str
-    intent_initiator: str
-    training_executor: str
-    calibrator_statuses: tuple[str, ...]
+    candidate_bundle: CandidateEvidenceBundle
     expected_version: int
     occurred_at: datetime
-    fold_count: int = 0
-    formal_qualification: bool = False
 
 
 @dataclass(frozen=True)
@@ -1054,7 +1062,14 @@ class ModelLifecycle:
         self._evaluation_report_repository = (
             evaluation_report_repository or InMemoryEvaluationReportRepository()
         )
-        self._approval_policy = approval_policy or SEPARATED_DUTIES_APPROVAL_POLICY_V1
+        submitted_approval_policy = approval_policy or SEPARATED_DUTIES_APPROVAL_POLICY_V1
+        verified_approval_policy = ModelApprovalPolicyVersion.from_serialized(
+            submitted_approval_policy.policy_version_id,
+            submitted_approval_policy.serialized,
+        )
+        if verified_approval_policy != submitted_approval_policy:
+            raise ValueError("model_approval_policy_checksum_mismatch")
+        self._approval_policy = verified_approval_policy
         self._shadow_eligibility_verifier = (
             shadow_eligibility_verifier or UnavailableShadowEligibilityVerifier()
         )
@@ -1072,36 +1087,107 @@ class ModelLifecycle:
         return self._record_development_failure(command)
 
     def _record_candidate(self, command: RecordCandidate) -> LifecycleResult:
+        bundle = command.candidate_bundle
+        if not self._candidate_evidence_is_valid(bundle):
+            raise LifecycleConflict("candidate_evidence_invalid")
         report = EvaluationReport.from_serialized(
-            command.evaluation_report.evaluation_report_id,
-            command.evaluation_report.serialized,
+            bundle.evaluation_report.evaluation_report_id,
+            bundle.evaluation_report.serialized,
         )
-        if report != command.evaluation_report:
+        if report != bundle.evaluation_report:
             raise LifecycleConflict("evaluation_report_invalid")
         self._evaluation_report_repository.put(report)
         event = self._store.append(
             command_id=command.command_id,
-            model_family_id=command.model_family_id,
+            model_family_id=bundle.model_family_id,
             expected_version=command.expected_version,
             event_kind="CandidateRecorded",
             payload={
-                "candidate_id": command.candidate_id,
-                "model_family": command.model_family,
-                "artifact_id": command.artifact_id,
+                "candidate_id": bundle.candidate_id,
+                "model_family": bundle.primary_artifact.model_family,
+                "artifact_id": bundle.primary_artifact.artifact_id,
+                "logistic_artifact_ids": [
+                    artifact.artifact_id for artifact in bundle.logistic_artifacts
+                ],
+                "class_prior_artifact_ids": [
+                    artifact.artifact_id for artifact in bundle.class_prior_artifacts
+                ],
                 "evaluation_report_id": report.evaluation_report_id,
-                "training_intent_id": command.training_intent_id,
-                "intent_initiator": command.intent_initiator,
-                "training_executor": command.training_executor,
+                "training_intent_id": bundle.training_intent_id,
+                "intent_initiator": bundle.training_intent.initiated_by,
+                "training_executor": bundle.training_intent.executed_by,
                 "improvement_percentage_points": report.improvement_percentage_points,
-                "calibrator_statuses": command.calibrator_statuses,
+                "calibrator_statuses": [item.status for item in bundle.calibrators],
                 "class_prior_equal_cell_macro_f1": (report.class_prior_equal_cell_macro_f1),
                 "logistic_equal_cell_macro_f1": report.logistic_equal_cell_macro_f1,
-                "fold_count": command.fold_count,
-                "formal_qualification": command.formal_qualification,
+                "fold_count": bundle.fold_manifest.fold_count,
+                "formal_qualification": bundle.formal_qualification,
             },
             occurred_at=command.occurred_at,
         )
         return LifecycleResult(status="candidate_recorded", version=event.version)
+
+    @staticmethod
+    def _candidate_evidence_is_valid(bundle: CandidateEvidenceBundle) -> bool:
+        try:
+            intent = bundle.training_intent
+            batch = intent.feature_batch
+            report = EvaluationReport.from_serialized(
+                bundle.evaluation_report.evaluation_report_id,
+                bundle.evaluation_report.serialized,
+            )
+            logistic = bundle.logistic_artifacts
+            class_prior = bundle.class_prior_artifacts
+            expected_manifests = (
+                batch.feature_batch_id,
+                batch.source_policy_manifest_id,
+                batch.label_manifest_id,
+                batch.fold_manifest_id,
+                batch.cost_manifest_id,
+            )
+            if (
+                not bundle.is_content_addressed()
+                or not intent.is_content_addressed()
+                or not batch.is_content_addressed()
+                or len(logistic) != 3
+                or len(class_prior) != 3
+                or bundle.primary_artifact != logistic[0]
+                or tuple(artifact.seed for artifact in logistic) != intent.preregistered_seeds
+                or tuple(artifact.seed for artifact in class_prior) != intent.preregistered_seeds
+                or report.logistic_artifact_ids
+                != tuple(artifact.artifact_id for artifact in logistic)
+                or report.class_prior_artifact_ids
+                != tuple(artifact.artifact_id for artifact in class_prior)
+                or tuple(item.seed for item in report.seed_results) != intent.preregistered_seeds
+                or report.feature_batch_id != batch.feature_batch_id
+                or report.source_policy_manifest_id != batch.source_policy_manifest_id
+                or report.label_manifest_id != batch.label_manifest_id
+                or report.cost_manifest_id != batch.cost_manifest_id
+                or report.fold_manifest_id != bundle.fold_manifest.fold_manifest_id
+                or batch.fold_manifest_id != bundle.fold_manifest.fold_manifest_id
+                or bundle.fold_manifest.fold_count != len(bundle.fold_manifest.folds)
+                or bundle.calibrators != bundle.primary_artifact.calibrators
+                or tuple(item.calibrator_id for item in bundle.calibrators)
+                != bundle.primary_artifact.calibrator_ids
+                or len(bundle.calibrators) != 6
+                or not isinstance(bundle.formal_qualification, bool)
+                or (bundle.formal_qualification and intent.execution_purpose != "formal_candidate")
+            ):
+                return False
+            for artifact in (*logistic, *class_prior):
+                if (
+                    artifact.manifest_ids != expected_manifests
+                    or artifact.provenance != intent.provenance
+                    or sha256_id(artifact.serialized) != artifact.artifact_id
+                    or len(artifact.calibrators) != 6
+                    or artifact.calibrator_ids
+                    != tuple(item.calibrator_id for item in artifact.calibrators)
+                ):
+                    return False
+                _cold_load_model_artifact(artifact)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return False
+        return True
 
     def _evaluate_bootstrap(self, command: EvaluateBootstrapCandidate) -> LifecycleResult:
         candidate = self._candidate(command.model_family_id, command.candidate_id)
@@ -1229,6 +1315,9 @@ class ModelLifecycle:
         raise KeyError(candidate_id)
 
     def _decide_approval(self, command: DecideApproval) -> LifecycleResult:
+        replay = self._approval_replay(command)
+        if replay is not None:
+            return replay
         candidate = self._candidate(command.model_family_id, command.candidate_id)
         _, gate = self._passed_gate(command.model_family_id, command.candidate_id)
         expires_at = command.occurred_at + timedelta(days=7)
@@ -1314,6 +1403,60 @@ class ModelLifecycle:
         return LifecycleResult(
             status="approved" if effective_decision == "approved" else "approval_rejected",
             version=event.version,
+            approval_decision=decision,
+        )
+
+    def _approval_replay(self, command: DecideApproval) -> LifecycleResult | None:
+        existing = next(
+            (
+                event
+                for event in self._store.events(command.model_family_id)
+                if event.command_id == command.command_id
+            ),
+            None,
+        )
+        if existing is None:
+            return None
+        if existing.event_kind != "ApprovalDecisionRecorded":
+            raise LifecycleConflict("command_id_payload_conflict")
+        payload = json.loads(existing.payload_json)
+        submitted = {
+            "candidate_id": command.candidate_id,
+            "artifact_id": command.artifact_id,
+            "evaluation_report_id": command.evaluation_report_id,
+            "policy_version_id": command.policy_version_id,
+            "approver_id": command.approver_id,
+            "requested_decision": command.decision,
+            "reason": command.reason,
+            "expected_assignment": command.expected_assignment,
+        }
+        if any(payload.get(field) != value for field, value in submitted.items()):
+            raise LifecycleConflict("command_id_payload_conflict")
+        try:
+            decision = ApprovalDecision(
+                approval_decision_id=str(payload["approval_decision_id"]),
+                candidate_id=str(payload["candidate_id"]),
+                artifact_id=str(payload["artifact_id"]),
+                evaluation_report_id=str(payload["evaluation_report_id"]),
+                policy_version_id=str(payload["policy_version_id"]),
+                approval_policy_version_id=str(payload["approval_policy_version_id"]),
+                approval_mode=cast(ApprovalMode, payload["approval_mode"]),
+                approval_policy_owner_principal_id=cast(
+                    str | None, payload["approval_policy_owner_principal_id"]
+                ),
+                independent_review=cast(bool, payload["independent_review"]),
+                approver_id=str(payload["approver_id"]),
+                decision=cast(Literal["approved", "rejected"], payload["decision"]),
+                reason=str(payload["reason"]),
+                expected_assignment=str(payload["expected_assignment"]),
+                expires_at=datetime.fromisoformat(str(payload["expires_at"])),
+                invalidated_reason=cast(str | None, payload["invalidated_reason"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise LifecycleConflict("command_id_payload_conflict") from error
+        return LifecycleResult(
+            status="approved" if decision.decision == "approved" else "approval_rejected",
+            version=existing.version,
             approval_decision=decision,
         )
 

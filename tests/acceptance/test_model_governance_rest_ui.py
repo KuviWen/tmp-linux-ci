@@ -9,7 +9,7 @@ from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
     build_fixture_authorization_policy,
 )
-from stock_forecasting.evaluation_report import EvaluationReport
+from stock_forecasting.forecast_lab import CandidateEvidenceBundle
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     SEPARATED_DUTIES_APPROVAL_POLICY_V1,
@@ -18,6 +18,7 @@ from stock_forecasting.model_governance import (
     RecordCandidate,
 )
 from tests.modeling_support import (
+    lifecycle_candidate_bundle,
     passing_hard_gate_evidence,
     passing_hard_gate_report,
 )
@@ -25,7 +26,7 @@ from tests.modeling_support import (
 
 def _governance_application(
     *, owner_operated: bool = False
-) -> tuple[Application, LocalApiKeyIdentity, str]:
+) -> tuple[Application, LocalApiKeyIdentity, CandidateEvidenceBundle]:
     now = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
     identity = LocalApiKeyIdentity.issue(
         owner="model-governance-reader",
@@ -48,13 +49,14 @@ def _governance_application(
         local_identity=identity,
         model_approval_policy=approval_policy,
     )
-    evaluation = EvaluationReport.create(
-        class_prior_equal_cell_macro_f1=0.333,
-        logistic_equal_cell_macro_f1=0.812,
-        seed_macro_f1=(0.80, 0.812, 0.824),
-        cost_manifest_id="cost-v1",
-        fold_manifest_id="fold-v1",
+    bundle = lifecycle_candidate_bundle(
+        model_family_id="dual-market-price-baseline-v1",
+        logistic_macro_f1=0.812,
+        formal_qualification=True,
+        intent_initiator=(identity.context.principal_id if owner_operated else "model-operator-a"),
+        training_executor=(identity.context.principal_id if owner_operated else "model-operator-b"),
     )
+    evaluation = bundle.evaluation_report
     report = passing_hard_gate_report(evaluation.evaluation_report_id)
     application.governance_object_repository.put_verified(
         BytesIO(report.serialized),
@@ -64,41 +66,28 @@ def _governance_application(
     application.model_lifecycle.execute(
         RecordCandidate(
             command_id="record-research-candidate",
-            model_family_id="dual-market-price-baseline-v1",
-            candidate_id="candidate-research",
-            model_family="regularized_multinomial_logistic",
-            artifact_id="sha256:research-artifact",
-            evaluation_report=evaluation,
-            training_intent_id="intent-research",
-            intent_initiator=(
-                identity.context.principal_id if owner_operated else "model-operator-a"
-            ),
-            training_executor=(
-                identity.context.principal_id if owner_operated else "model-operator-b"
-            ),
-            calibrator_statuses=("sufficient_data",) * 6,
+            candidate_bundle=bundle,
             expected_version=0,
             occurred_at=now - timedelta(hours=1),
-            fold_count=16,
-            formal_qualification=True,
         )
     )
     application.model_lifecycle.execute(
         EvaluateBootstrapCandidate(
             command_id="gate-research-candidate",
             model_family_id="dual-market-price-baseline-v1",
-            candidate_id="candidate-research",
+            candidate_id=bundle.candidate_id,
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=passing_hard_gate_evidence(evaluation.evaluation_report_id),
             expected_version=1,
             occurred_at=now,
         )
     )
-    return application, identity, evaluation.evaluation_report_id
+    return application, identity, bundle
 
 
 def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> None:
-    application, identity, evaluation_id = _governance_application()
+    application, identity, bundle = _governance_application()
+    evaluation_id = bundle.evaluation_report.evaluation_report_id
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     headers = {
         "Authorization": identity.credential.authorization_header(),
@@ -118,19 +107,19 @@ def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> Non
     assert rest.json() == {
         "model_family_id": "dual-market-price-baseline-v1",
         "candidate": {
-            "candidate_id": "candidate-research",
+            "candidate_id": bundle.candidate_id,
             "model_family": "regularized_multinomial_logistic",
-            "artifact_id": "sha256:research-artifact",
+            "artifact_id": bundle.primary_artifact.artifact_id,
             "formal_qualification": True,
         },
         "baseline": {
             "model_family": "class_prior",
-            "equal_cell_macro_f1": 0.333,
+            "equal_cell_macro_f1": 0.4,
         },
         "evaluation": {
             "evaluation_report_id": evaluation_id,
             "logistic_equal_cell_macro_f1": 0.812,
-            "improvement_percentage_points": (0.812 - 0.333) * 100,
+            "improvement_percentage_points": (0.812 - 0.4) * 100,
         },
         "calibration": {"sufficient": 6, "required": 6},
         "support": {"fold_count": 16},
@@ -162,7 +151,8 @@ def test_governance_backtest_rest_and_ui_share_the_lifecycle_read_model() -> Non
 
 
 def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> None:
-    application, identity, evaluation_id = _governance_application()
+    application, identity, bundle = _governance_application()
+    evaluation_id = bundle.evaluation_report.evaluation_report_id
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     headers = {
         "Authorization": identity.credential.authorization_header(),
@@ -172,8 +162,8 @@ def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> Non
     }
     body = {
         "model_family_id": "dual-market-price-baseline-v1",
-        "candidate_id": "candidate-research",
-        "artifact_id": "sha256:research-artifact",
+        "candidate_id": bundle.candidate_id,
+        "artifact_id": bundle.primary_artifact.artifact_id,
         "evaluation_report_id": evaluation_id,
         "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
         "decision": "approved",
@@ -186,6 +176,7 @@ def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> Non
         headers=headers,
         json=body,
     )
+    application._fixed_security_time = datetime(2026, 8, 17, 2, 30, tzinfo=UTC)
     replay = client.post(
         "/api/v1/governance/approval-decisions",
         headers=headers,
@@ -201,7 +192,7 @@ def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> Non
     assert first.json() == replay.json()
     assert first.json()["status"] == "approved"
     assert first.json()["decision"]["approver_id"] == identity.context.principal_id
-    assert first.json()["decision"]["artifact_id"] == "sha256:research-artifact"
+    assert first.json()["decision"]["artifact_id"] == bundle.primary_artifact.artifact_id
     assert first.json()["decision"]["expected_assignment"] == ("unassigned")
     assert first.json()["decision"]["approval_policy_version_id"] == (
         SEPARATED_DUTIES_APPROVAL_POLICY_V1.policy_version_id
@@ -220,7 +211,8 @@ def test_separated_approver_posts_an_exact_idempotent_approval_decision() -> Non
 
 
 def test_designated_owner_self_approval_is_disclosed_through_rest_and_ui() -> None:
-    application, identity, evaluation_id = _governance_application(owner_operated=True)
+    application, identity, bundle = _governance_application(owner_operated=True)
+    evaluation_id = bundle.evaluation_report.evaluation_report_id
     approval_policy = ModelApprovalPolicyVersion.create(
         policy_name="owner-operated-model-approval-v1",
         approval_mode="owner_operated",
@@ -244,8 +236,8 @@ def test_designated_owner_self_approval_is_disclosed_through_rest_and_ui() -> No
         },
         json={
             "model_family_id": "dual-market-price-baseline-v1",
-            "candidate_id": "candidate-research",
-            "artifact_id": "sha256:research-artifact",
+            "candidate_id": bundle.candidate_id,
+            "artifact_id": bundle.primary_artifact.artifact_id,
             "evaluation_report_id": evaluation_id,
             "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             "decision": "approved",
@@ -295,7 +287,8 @@ def test_designated_owner_self_approval_is_disclosed_through_rest_and_ui() -> No
 
 
 def test_designated_owner_rejection_still_discloses_no_independent_review() -> None:
-    application, identity, evaluation_id = _governance_application(owner_operated=True)
+    application, identity, bundle = _governance_application(owner_operated=True)
+    evaluation_id = bundle.evaluation_report.evaluation_report_id
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     authorization = identity.credential.authorization_header()
 
@@ -308,8 +301,8 @@ def test_designated_owner_rejection_still_discloses_no_independent_review() -> N
         },
         json={
             "model_family_id": "dual-market-price-baseline-v1",
-            "candidate_id": "candidate-research",
-            "artifact_id": "sha256:research-artifact",
+            "candidate_id": bundle.candidate_id,
+            "artifact_id": bundle.primary_artifact.artifact_id,
             "evaluation_report_id": evaluation_id,
             "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             "decision": "rejected",
@@ -333,7 +326,8 @@ def test_designated_owner_rejection_still_discloses_no_independent_review() -> N
 
 
 def test_invalidated_owner_operated_attempt_is_not_attributed_to_an_owner_rejection() -> None:
-    application, identity, evaluation_id = _governance_application(owner_operated=True)
+    application, identity, bundle = _governance_application(owner_operated=True)
+    evaluation_id = bundle.evaluation_report.evaluation_report_id
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     authorization = identity.credential.authorization_header()
 
@@ -346,7 +340,7 @@ def test_invalidated_owner_operated_attempt_is_not_attributed_to_an_owner_reject
         },
         json={
             "model_family_id": "dual-market-price-baseline-v1",
-            "candidate_id": "candidate-research",
+            "candidate_id": bundle.candidate_id,
             "artifact_id": "sha256:not-the-gated-artifact",
             "evaluation_report_id": evaluation_id,
             "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,

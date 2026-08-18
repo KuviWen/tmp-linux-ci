@@ -1,6 +1,19 @@
-from datetime import date, timedelta
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
+from functools import lru_cache
 
-from stock_forecasting.forecasting import FeatureBatch, FeatureRow, TrendLabel
+from stock_forecasting.evaluation_report import EvaluationReport, SeedArtifactEvaluation
+from stock_forecasting.forecast_lab import (
+    CandidateEvidenceBundle,
+    ForecastLab,
+    TrainingIntentRef,
+)
+from stock_forecasting.forecasting import (
+    ArtifactProvenance,
+    FeatureBatch,
+    FeatureRow,
+    TrendLabel,
+)
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     GateMeasurement,
@@ -105,3 +118,77 @@ def engineering_model_history() -> FeatureBatch:
         cost_manifest_id="cost-zero-fee-v1",
         rows=tuple(rows),
     )
+
+
+@lru_cache(maxsize=1)
+def _lifecycle_candidate_template() -> CandidateEvidenceBundle:
+    lab = ForecastLab()
+    intent = lab.preregister(
+        TrainingIntentRef(
+            training_intent_id="",
+            model_family_id="lifecycle-candidate-template",
+            initiated_by="model-operator-a",
+            executed_by="model-operator-b",
+            created_at=datetime(2026, 8, 17, tzinfo=UTC),
+            feature_batch=engineering_model_history(),
+            preregistered_seeds=(17, 29, 43),
+            provenance=ArtifactProvenance(
+                "feature-schema:price-baseline-v1",
+                "runtime:cpython-3.12-safe-json-v1",
+                "git:ticket-09-lifecycle-fixture",
+            ),
+            execution_purpose="engineering_acceptance",
+        )
+    )
+    outcome = lab.develop(intent)
+    assert outcome.candidate_bundle is not None
+    return outcome.candidate_bundle
+
+
+def lifecycle_candidate_bundle(
+    *,
+    model_family_id: str,
+    logistic_macro_f1: float,
+    formal_qualification: bool,
+    intent_initiator: str = "model-operator-a",
+    training_executor: str = "model-operator-b",
+) -> CandidateEvidenceBundle:
+    template = _lifecycle_candidate_template()
+    intent = replace(
+        template.training_intent,
+        training_intent_id="",
+        model_family_id=model_family_id,
+        initiated_by=intent_initiator,
+        executed_by=training_executor,
+        execution_purpose="formal_candidate",
+    ).with_content_id()
+    report = EvaluationReport.create(
+        class_prior_equal_cell_macro_f1=0.4,
+        logistic_equal_cell_macro_f1=logistic_macro_f1,
+        seed_results=tuple(
+            SeedArtifactEvaluation(
+                seed=seed,
+                logistic_artifact_id=logistic.artifact_id,
+                class_prior_artifact_id=prior.artifact_id,
+                logistic_macro_f1=logistic_macro_f1,
+            )
+            for seed, logistic, prior in zip(
+                intent.preregistered_seeds,
+                template.logistic_artifacts,
+                template.class_prior_artifacts,
+                strict=True,
+            )
+        ),
+        feature_batch_id=intent.feature_batch.feature_batch_id,
+        source_policy_manifest_id=intent.feature_batch.source_policy_manifest_id,
+        label_manifest_id=intent.feature_batch.label_manifest_id,
+        cost_manifest_id=intent.feature_batch.cost_manifest_id,
+        fold_manifest_id=template.fold_manifest.fold_manifest_id,
+    )
+    return replace(
+        template,
+        candidate_id="",
+        training_intent=intent,
+        evaluation_report=report,
+        formal_qualification=formal_qualification,
+    ).with_content_id()

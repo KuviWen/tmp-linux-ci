@@ -351,14 +351,9 @@ def _operator_request(
     return decoded
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    parser = _parser()
-    arguments = parser.parse_args(argv)
-    if (
-        arguments.command == "operator"
-        and arguments.operator_command == "source-credentials"
-        and arguments.source_credential_command == "validate"
-    ):
+def _run_operator_source_credentials(arguments: argparse.Namespace) -> int:
+    action = arguments.source_credential_command
+    if action == "validate":
         try:
             result = _operator_request(
                 method="POST",
@@ -375,64 +370,149 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 3
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
-    if (
-        arguments.command == "operator"
-        and arguments.operator_command == "source-credentials"
-        and arguments.source_credential_command == "status"
-    ):
+    if action == "status":
         result = _operator_request(
             method="GET",
             path="/api/v1/operations/source-credentials",
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
-    if (
-        arguments.command == "operator"
-        and arguments.operator_command == "source-credentials"
-        and arguments.source_credential_command in {"configure", "rotate"}
+    listing = _operator_request(
+        method="GET",
+        path="/api/v1/operations/source-credentials",
+    )
+    items = listing.get("items")
+    if not isinstance(items, list):
+        raise RuntimeError("operator_source_credential_listing_invalid")
+    provider = next(
+        (
+            item
+            for item in items
+            if isinstance(item, dict) and item.get("provider_id") == arguments.provider
+        ),
+        None,
+    )
+    if provider is None:
+        raise RuntimeError("operator_source_provider_not_found")
+    required_fields = provider.get("required_fields")
+    if not isinstance(required_fields, list) or not all(
+        isinstance(field_name, str) and field_name for field_name in required_fields
     ):
-        listing = _operator_request(
-            method="GET",
-            path="/api/v1/operations/source-credentials",
-        )
-        items = listing.get("items")
-        if not isinstance(items, list):
-            raise RuntimeError("operator_source_credential_listing_invalid")
-        provider = next(
-            (
-                item
-                for item in items
-                if isinstance(item, dict) and item.get("provider_id") == arguments.provider
+        raise RuntimeError("operator_source_credential_contract_invalid")
+    credential_fields = {
+        field_name: getpass(f"{arguments.provider} {field_name}: ")
+        for field_name in required_fields
+    }
+    try:
+        rotation_suffix = "/rotations" if action == "rotate" else ""
+        result = _operator_request(
+            method=("POST" if action == "rotate" else "PUT"),
+            path=(
+                f"/api/v1/operations/source-credentials/{quote(arguments.provider, safe='')}"
+                f"{rotation_suffix}"
             ),
-            None,
+            payload={"credential_fields": credential_fields},
         )
-        if provider is None:
-            raise RuntimeError("operator_source_provider_not_found")
-        required_fields = provider.get("required_fields")
-        if not isinstance(required_fields, list) or not all(
-            isinstance(field_name, str) and field_name for field_name in required_fields
-        ):
-            raise RuntimeError("operator_source_credential_contract_invalid")
-        credential_fields = {
-            field_name: getpass(f"{arguments.provider} {field_name}: ")
-            for field_name in required_fields
-        }
-        try:
-            rotation_suffix = (
-                "/rotations" if arguments.source_credential_command == "rotate" else ""
+    finally:
+        credential_fields.clear()
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def _run_authorization_initialization(arguments: argparse.Namespace) -> int:
+    identity = LocalApiKeyIdentity.load(arguments.key_file)
+    repository = AuthorizationPolicyRepository(
+        StateStore(arguments.database_url, create_schema=False)
+    )
+    command = arguments.authorization_command
+    if command == "init-fixtures":
+        if arguments.platform_admin_key_file.exists():
+            platform_admin = LocalApiKeyIdentity.load(arguments.platform_admin_key_file)
+        else:
+            platform_admin = LocalApiKeyIdentity.issue(
+                owner="platform-admin",
+                environment=identity.context.environment,
+                scopes={"fixture_pipeline.execute", "research_prediction.read"},
+                issued_at=identity.context.issued_at,
+                expires_at=identity.context.expires_at,
             )
-            result = _operator_request(
-                method=("POST" if arguments.source_credential_command == "rotate" else "PUT"),
-                path=(
-                    f"/api/v1/operations/source-credentials/{quote(arguments.provider, safe='')}"
-                    f"{rotation_suffix}"
-                ),
-                payload={"credential_fields": credential_fields},
+            platform_admin.save(arguments.platform_admin_key_file)
+        catalog = fixture_authorization_policy_catalog(identity.context)
+        for policy_set_id, policy in catalog.items():
+            repository.install(policy_set_id, policy)
+        repository.install(
+            FIXTURE_REVOKED_POLICY_SET,
+            fixture_authorization_policy_catalog(platform_admin.context)[
+                FIXTURE_REVOKED_POLICY_SET
+            ],
+        )
+        print(
+            json.dumps(
+                {"status": "initialized", "policy_set_count": len(catalog)},
+                sort_keys=True,
             )
-        finally:
-            credential_fields.clear()
-        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        )
         return 0
+    if command in {"init-ticket-06", "init-ticket-07", "init-operator"}:
+        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
+        if command == "init-ticket-06":
+            policy_set_id = TICKET_06_FINMIND_ENGINEERING_POLICY_SET
+            build_policy = build_taiwan_finmind_engineering_authorization_policy
+        elif command == "init-ticket-07":
+            policy_set_id = TICKET_07_ENGINEERING_POLICY_SET
+            build_policy = build_us_zero_fee_engineering_authorization_policy
+        else:
+            policy_set_id = TICKET_09_OWNER_OPERATOR_POLICY_SET
+            build_policy = build_pending_rights_operator_authorization_policy
+        repository.install(policy_set_id, build_policy(identity.context))
+        repository.install(policy_set_id, build_policy(source_adapter_identity.context))
+        print(json.dumps({"status": "initialized", "policy_set_count": 2}, sort_keys=True))
+        return 0
+    if command == "init-qualified-operator":
+        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
+        manifest = FormalSourceRightsManifest.load(
+            arguments.rights_manifest,
+            reviewer_owner=identity.context.owner,
+        )
+        repository.install(
+            manifest.policy_set_id,
+            build_qualified_operator_authorization_policy(identity.context, manifest),
+        )
+        repository.install(
+            manifest.policy_set_id,
+            build_qualified_operator_authorization_policy(
+                source_adapter_identity.context,
+                manifest,
+            ),
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "initialized",
+                    "policy_set_count": 2,
+                    "policy_set_id": manifest.policy_set_id,
+                    "manifest_sha256": manifest.sha256,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "init-ticket-08":
+        policy_set_id = TICKET_08_ENGINEERING_POLICY_SET
+        policy = build_historical_reconstruction_engineering_authorization_policy(identity.context)
+    else:
+        policy_set_id = TICKET_09_ENGINEERING_POLICY_SET
+        policy = build_fixture_authorization_policy(identity.context)
+    repository.install(policy_set_id, policy)
+    print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _parser()
+    arguments = parser.parse_args(argv)
+    if arguments.command == "operator":
+        return _run_operator_source_credentials(arguments)
     if arguments.command == "acceptance" and arguments.ticket in {
         "ticket-01",
         "ticket-02",
@@ -647,155 +727,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             identity.save(arguments.path)
         print(json.dumps({"status": status}, sort_keys=True))
         return 0
-    if arguments.command == "authorization" and arguments.authorization_command == (
-        "init-fixtures"
-    ):
-        identity = LocalApiKeyIdentity.load(arguments.key_file)
-        if arguments.platform_admin_key_file.exists():
-            platform_admin = LocalApiKeyIdentity.load(arguments.platform_admin_key_file)
-        else:
-            platform_admin = LocalApiKeyIdentity.issue(
-                owner="platform-admin",
-                environment=identity.context.environment,
-                scopes={"fixture_pipeline.execute", "research_prediction.read"},
-                issued_at=identity.context.issued_at,
-                expires_at=identity.context.expires_at,
-            )
-            platform_admin.save(arguments.platform_admin_key_file)
-        repository = AuthorizationPolicyRepository(
-            StateStore(arguments.database_url, create_schema=False)
-        )
-        catalog = fixture_authorization_policy_catalog(identity.context)
-        for policy_set_id, policy in catalog.items():
-            repository.install(policy_set_id, policy)
-        repository.install(
-            FIXTURE_REVOKED_POLICY_SET,
-            fixture_authorization_policy_catalog(platform_admin.context)[
-                FIXTURE_REVOKED_POLICY_SET
-            ],
-        )
-        print(
-            json.dumps(
-                {"status": "initialized", "policy_set_count": len(catalog)},
-                sort_keys=True,
-            )
-        )
-        return 0
-    if arguments.command == "authorization" and arguments.authorization_command == (
-        "init-ticket-06"
-    ):
-        identity = LocalApiKeyIdentity.load(arguments.key_file)
-        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
-        repository = AuthorizationPolicyRepository(
-            StateStore(arguments.database_url, create_schema=False)
-        )
-        repository.install(
-            TICKET_06_FINMIND_ENGINEERING_POLICY_SET,
-            build_taiwan_finmind_engineering_authorization_policy(identity.context),
-        )
-        repository.install(
-            TICKET_06_FINMIND_ENGINEERING_POLICY_SET,
-            build_taiwan_finmind_engineering_authorization_policy(source_adapter_identity.context),
-        )
-        print(json.dumps({"status": "initialized", "policy_set_count": 2}, sort_keys=True))
-        return 0
-    if arguments.command == "authorization" and arguments.authorization_command == (
-        "init-ticket-07"
-    ):
-        identity = LocalApiKeyIdentity.load(arguments.key_file)
-        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
-        repository = AuthorizationPolicyRepository(
-            StateStore(arguments.database_url, create_schema=False)
-        )
-        repository.install(
-            TICKET_07_ENGINEERING_POLICY_SET,
-            build_us_zero_fee_engineering_authorization_policy(identity.context),
-        )
-        repository.install(
-            TICKET_07_ENGINEERING_POLICY_SET,
-            build_us_zero_fee_engineering_authorization_policy(source_adapter_identity.context),
-        )
-        print(json.dumps({"status": "initialized", "policy_set_count": 2}, sort_keys=True))
-        return 0
-    if arguments.command == "authorization" and arguments.authorization_command == (
-        "init-ticket-08"
-    ):
-        identity = LocalApiKeyIdentity.load(arguments.key_file)
-        repository = AuthorizationPolicyRepository(
-            StateStore(arguments.database_url, create_schema=False)
-        )
-        repository.install(
-            TICKET_08_ENGINEERING_POLICY_SET,
-            build_historical_reconstruction_engineering_authorization_policy(identity.context),
-        )
-        print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
-        return 0
-    if arguments.command == "authorization" and arguments.authorization_command == (
-        "init-ticket-09"
-    ):
-        identity = LocalApiKeyIdentity.load(arguments.key_file)
-        repository = AuthorizationPolicyRepository(
-            StateStore(arguments.database_url, create_schema=False)
-        )
-        repository.install(
-            TICKET_09_ENGINEERING_POLICY_SET,
-            build_fixture_authorization_policy(identity.context),
-        )
-        print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
-        return 0
-    if arguments.command == "authorization" and arguments.authorization_command == (
-        "init-operator"
-    ):
-        identity = LocalApiKeyIdentity.load(arguments.key_file)
-        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
-        repository = AuthorizationPolicyRepository(
-            StateStore(arguments.database_url, create_schema=False)
-        )
-        repository.install(
-            TICKET_09_OWNER_OPERATOR_POLICY_SET,
-            build_pending_rights_operator_authorization_policy(identity.context),
-        )
-        repository.install(
-            TICKET_09_OWNER_OPERATOR_POLICY_SET,
-            build_pending_rights_operator_authorization_policy(source_adapter_identity.context),
-        )
-        print(json.dumps({"status": "initialized", "policy_set_count": 2}, sort_keys=True))
-        return 0
-    if arguments.command == "authorization" and arguments.authorization_command == (
-        "init-qualified-operator"
-    ):
-        identity = LocalApiKeyIdentity.load(arguments.key_file)
-        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
-        manifest = FormalSourceRightsManifest.load(
-            arguments.rights_manifest,
-            reviewer_owner=identity.context.owner,
-        )
-        repository = AuthorizationPolicyRepository(
-            StateStore(arguments.database_url, create_schema=False)
-        )
-        repository.install(
-            manifest.policy_set_id,
-            build_qualified_operator_authorization_policy(identity.context, manifest),
-        )
-        repository.install(
-            manifest.policy_set_id,
-            build_qualified_operator_authorization_policy(
-                source_adapter_identity.context,
-                manifest,
-            ),
-        )
-        print(
-            json.dumps(
-                {
-                    "status": "initialized",
-                    "policy_set_count": 2,
-                    "policy_set_id": manifest.policy_set_id,
-                    "manifest_sha256": manifest.sha256,
-                },
-                sort_keys=True,
-            )
-        )
-        return 0
+    if arguments.command == "authorization":
+        return _run_authorization_initialization(arguments)
     return 2
 
 

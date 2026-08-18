@@ -285,9 +285,18 @@ def test_forecast_lab_builds_reproducible_dual_market_bootstrap_evidence() -> No
     assert bundle.primary_artifact.calibrator_ids == tuple(
         item.calibrator_id for item in bundle.calibrators
     )
-    assert bundle.primary_artifact.evaluation_report_id == (
-        bundle.evaluation_report.evaluation_report_id
+    assert bundle.evaluation_report.logistic_artifact_ids == tuple(
+        artifact.artifact_id for artifact in bundle.logistic_artifacts
     )
+    assert bundle.evaluation_report.class_prior_artifact_ids == tuple(
+        artifact.artifact_id for artifact in bundle.class_prior_artifacts
+    )
+    assert tuple(item.seed for item in bundle.evaluation_report.seed_results) == (17, 29, 43)
+    assert (
+        bundle.evaluation_report.feature_batch_id
+        == bundle.training_intent.feature_batch.feature_batch_id
+    )
+    assert bundle.is_content_addressed()
     all_artifacts = bundle.logistic_artifacts + bundle.class_prior_artifacts
     assert all(len(artifact.calibrator_ids) == 6 for artifact in all_artifacts)
     for artifact in all_artifacts:
