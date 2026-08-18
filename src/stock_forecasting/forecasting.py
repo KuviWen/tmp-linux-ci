@@ -164,6 +164,60 @@ class ModelArtifact:
     calibrator_ids: tuple[str, ...] = ()
     calibrators: tuple[CalibrationEvidence, ...] = ()
 
+    @classmethod
+    def from_serialized(cls, artifact_id: str, serialized: bytes) -> ModelArtifact:
+        if sha256_id(serialized) != artifact_id:
+            raise ValueError("artifact_checksum_mismatch")
+        try:
+            raw_payload = json.loads(serialized)
+        except (TypeError, ValueError) as error:
+            raise ValueError("artifact_schema_invalid") from error
+        if not isinstance(raw_payload, dict):
+            raise ValueError("artifact_schema_invalid")
+        raw_family = raw_payload.get("model_family")
+        if raw_family == "regularized_multinomial_logistic":
+            payload = _load_logistic_artifact(serialized)
+        elif raw_family == "class_prior":
+            payload = _load_class_prior_artifact(serialized)
+        else:
+            raise ValueError("artifact_schema_invalid")
+        raw_calibrators = cast(list[dict[str, object]], payload["calibrators"])
+        calibrators = tuple(
+            CalibrationEvidence(
+                calibrator_id=cast(str, item["calibrator_id"]),
+                market=cast(Literal["XTAI", "XNAS"], item["market"]),
+                horizon_sessions=cast(Literal[1, 5, 20], item["horizon_sessions"]),
+                status=cast(Literal["sufficient_data", "insufficient_data"], item["status"]),
+                sample_count=cast(int, item["sample_count"]),
+                class_counts=tuple(cast(list[int], item["class_counts"])),
+                temperature=float(cast(int | float, item["temperature"])),
+                fit_method="temperature_scaling",
+                pre_nll=float(cast(int | float, item["pre_nll"])),
+                post_nll=float(cast(int | float, item["post_nll"])),
+            )
+            for item in raw_calibrators
+        )
+        parameter_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"artifact_format", "calibrator_ids", "calibrators"}
+        }
+        return cls(
+            artifact_id=artifact_id,
+            model_family=cast(str, payload["model_family"]),
+            seed=cast(int, payload["seed"]),
+            manifest_ids=cast(
+                tuple[str, str, str, str, str],
+                tuple(cast(list[str], payload["manifest_ids"])),
+            ),
+            training_selection_id=cast(str, payload["training_selection_id"]),
+            model_parameters_id=sha256_id(canonical_json_bytes(parameter_payload)),
+            provenance=ArtifactProvenance.from_payload(payload),
+            serialized=serialized,
+            calibrator_ids=tuple(cast(list[str], payload["calibrator_ids"])),
+            calibrators=calibrators,
+        )
+
 
 @dataclass(frozen=True)
 class PredictionRequest:

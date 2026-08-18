@@ -12,7 +12,11 @@ from stock_forecasting.bootstrap_workflow import (
     BootstrapGovernanceCommand,
     BootstrapGovernanceWorkflow,
 )
-from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
+from stock_forecasting.forecast_lab import (
+    ForecastLab,
+    FormalQualificationEvidence,
+    TrainingIntentRef,
+)
 from stock_forecasting.forecasting import ArtifactProvenance
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
@@ -62,7 +66,10 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
                 command_id="ticket-09-tampered-candidate",
                 candidate_bundle=replace(
                     preview,
-                    formal_qualification=True,
+                    qualification_evidence=FormalQualificationEvidence.create(
+                        preview.training_intent,
+                        preview.fold_manifest,
+                    ),
                 ).with_content_id(),
                 expected_version=0,
                 occurred_at=now - timedelta(hours=1),
@@ -90,6 +97,21 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
     assert candidate.candidate_bundle is not None
     assert candidate.gate_decision is not None
     assert candidate.gate_decision.failed_gates == ("qualification",)
+    recorded_bundle = candidate.candidate_bundle
+    for artifact in (
+        *recorded_bundle.logistic_artifacts,
+        *recorded_bundle.class_prior_artifacts,
+    ):
+        assert (
+            application.governance_object_repository.open_by_id(artifact.artifact_id).read()
+            == artifact.serialized
+        )
+    assert (
+        application.governance_object_repository.open_by_id(
+            recorded_bundle.fold_manifest.fold_manifest_id
+        ).read()
+        == recorded_bundle.fold_manifest.serialized
+    )
     client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
     authorization = approver.credential.authorization_header()
 

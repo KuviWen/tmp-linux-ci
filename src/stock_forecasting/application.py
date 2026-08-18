@@ -54,9 +54,11 @@ from stock_forecasting.historical_evidence import QualifiedHistoricalAvailabilit
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     SEPARATED_DUTIES_APPROVAL_POLICY_V1,
+    FormalQualificationVerifier,
     ModelApprovalPolicyVersion,
     ModelGovernanceQuery,
     ModelLifecycle,
+    ObjectCandidateArtifactRepository,
     ObjectEvaluationReportRepository,
     ObjectGateEvidenceRepository,
     ObjectGatePolicyRepository,
@@ -113,6 +115,7 @@ class Application:
         model_approval_policy: ModelApprovalPolicyVersion | None = None,
         secret_provider: SecretProvider | None = None,
         source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
+        formal_qualification_verifier: FormalQualificationVerifier | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
         self.object_repository = FilesystemObjectRepository(object_root)
@@ -120,18 +123,6 @@ class Application:
         self._governance_object_repository: FilesystemObjectRepository | None = None
         self._model_approval_policy = model_approval_policy or SEPARATED_DUTIES_APPROVAL_POLICY_V1
         self.model_lifecycle_store = SqlAlchemyLifecycleStore(self.state_store.engine)
-        self.model_lifecycle = ModelLifecycle(
-            self.model_lifecycle_store,
-            policy_repository=ObjectGatePolicyRepository(lambda: self.governance_object_repository),
-            evidence_repository=ObjectGateEvidenceRepository(
-                lambda: self.governance_object_repository
-            ),
-            evaluation_report_repository=ObjectEvaluationReportRepository(
-                lambda: self.governance_object_repository
-            ),
-            approval_policy=self._model_approval_policy,
-        )
-        self.model_governance_query = ModelGovernanceQuery(self.model_lifecycle_store)
         historical_claim_verifier = QualifiedHistoricalAvailabilityClaimVerifier(
             self.state_store,
             evaluated_at=fixed_security_time or datetime.now(UTC),
@@ -159,6 +150,24 @@ class Application:
             self.forecast_lab = ForecastLab(
                 historical_claim_verifier=historical_claim_verifier,
             )
+        self.model_lifecycle = ModelLifecycle(
+            self.model_lifecycle_store,
+            policy_repository=ObjectGatePolicyRepository(lambda: self.governance_object_repository),
+            evidence_repository=ObjectGateEvidenceRepository(
+                lambda: self.governance_object_repository
+            ),
+            evaluation_report_repository=ObjectEvaluationReportRepository(
+                lambda: self.governance_object_repository
+            ),
+            candidate_artifact_repository=ObjectCandidateArtifactRepository(
+                lambda: self.governance_object_repository
+            ),
+            approval_policy=self._model_approval_policy,
+            formal_qualification_verifier=(
+                formal_qualification_verifier or self.forecast_lab.qualification_verifier
+            ),
+        )
+        self.model_governance_query = ModelGovernanceQuery(self.model_lifecycle_store)
         self.local_identity = local_identity
         self.security_context: SecurityContext = local_identity.context
         if source_adapter_security_context is not None:
@@ -473,6 +482,7 @@ def build_test_application(
     model_approval_policy: ModelApprovalPolicyVersion | None = None,
     secret_provider: SecretProvider | None = None,
     source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
+    formal_qualification_verifier: FormalQualificationVerifier | None = None,
 ) -> Application:
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
     resolved_database_url = database_url or "sqlite+pysqlite:///:memory:"
@@ -511,6 +521,7 @@ def build_test_application(
         model_approval_policy=model_approval_policy,
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
+        formal_qualification_verifier=formal_qualification_verifier,
     )
 
 

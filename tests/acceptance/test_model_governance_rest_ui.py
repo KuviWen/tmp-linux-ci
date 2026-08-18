@@ -9,7 +9,12 @@ from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
     build_fixture_authorization_policy,
 )
-from stock_forecasting.forecast_lab import CandidateEvidenceBundle
+from stock_forecasting.forecast_lab import (
+    CandidateEvidenceBundle,
+    FoldManifest,
+    FormalQualificationEvidence,
+    TrainingIntentRef,
+)
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     SEPARATED_DUTIES_APPROVAL_POLICY_V1,
@@ -22,6 +27,16 @@ from tests.modeling_support import (
     passing_hard_gate_evidence,
     passing_hard_gate_report,
 )
+
+
+class _VerifiedFormalQualification:
+    def verify(
+        self,
+        evidence: FormalQualificationEvidence,
+        intent: TrainingIntentRef,
+        fold_manifest: FoldManifest,
+    ) -> bool:
+        return evidence.is_content_addressed() and evidence.binds(intent, fold_manifest)
 
 
 def _governance_application(
@@ -48,11 +63,11 @@ def _governance_application(
         observed_at=now,
         local_identity=identity,
         model_approval_policy=approval_policy,
+        formal_qualification_verifier=_VerifiedFormalQualification(),
     )
     bundle = lifecycle_candidate_bundle(
         model_family_id="dual-market-price-baseline-v1",
         logistic_macro_f1=0.812,
-        formal_qualification=True,
         intent_initiator=(identity.context.principal_id if owner_operated else "model-operator-a"),
         training_executor=(identity.context.principal_id if owner_operated else "model-operator-b"),
     )

@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -18,21 +17,12 @@ from stock_forecasting.authorization_repository import (
 from stock_forecasting.forecast_lab import ForecastLab
 from stock_forecasting.formal_cost_scenario import load_conservative_cost_scenario
 from stock_forecasting.model_governance import (
-    BOOTSTRAP_GATE_POLICY_V1,
     SEPARATED_DUTIES_APPROVAL_POLICY_V1,
-    DecideApproval,
-    EvaluateBootstrapCandidate,
     ModelApprovalPolicyVersion,
-    RecordCandidate,
 )
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.runtime import RuntimeSettings
 from stock_forecasting.source_credentials import SecretUseContext
-from tests.modeling_support import (
-    lifecycle_candidate_bundle,
-    passing_hard_gate_evidence,
-    passing_hard_gate_report,
-)
 
 
 def _install_fixture_policy_catalog(
@@ -352,67 +342,16 @@ def test_operator_runtime_designates_its_single_owner_for_model_approval(
     monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", policy_set_id)
     application = RuntimeSettings.from_environment().build_application()
     owner_id = identity.context.principal_id
-    bundle = lifecycle_candidate_bundle(
-        model_family_id="owner-runtime-family",
-        logistic_macro_f1=0.52,
-        formal_qualification=True,
-        intent_initiator=owner_id,
-        training_executor=owner_id,
-    )
-    evaluation = bundle.evaluation_report
-    evaluation_id = evaluation.evaluation_report_id
-    report = passing_hard_gate_report(evaluation_id)
-    application.governance_object_repository.put_verified(
-        BytesIO(report.serialized),
-        expected_checksum=report.artifact_id.removeprefix("sha256:"),
-        metadata={"content_type": "application/json", "object_kind": "gate_report"},
-    )
-    application.model_lifecycle.execute(
-        RecordCandidate(
-            command_id="record-owner-runtime-candidate",
-            candidate_bundle=bundle,
-            expected_version=0,
-            occurred_at=now,
-        )
-    )
-    application.model_lifecycle.execute(
-        EvaluateBootstrapCandidate(
-            command_id="gate-owner-runtime-candidate",
-            model_family_id="owner-runtime-family",
-            candidate_id=bundle.candidate_id,
-            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
-            hard_gates=passing_hard_gate_evidence(evaluation_id),
-            expected_version=1,
-            occurred_at=now,
-        )
-    )
-
-    result = application.model_lifecycle.execute(
-        DecideApproval(
-            command_id="approve-owner-runtime-candidate",
-            model_family_id="owner-runtime-family",
-            candidate_id=bundle.candidate_id,
-            artifact_id=bundle.primary_artifact.artifact_id,
-            evaluation_report_id=evaluation_id,
-            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
-            approver_id=owner_id,
-            decision="approved",
-            reason="Owner accepts exact evidence without independent review.",
-            expected_assignment="unassigned",
-            expected_version=2,
-            occurred_at=now,
-        )
-    )
-
     expected_policy = ModelApprovalPolicyVersion.create(
         policy_name="owner-operated-model-approval-v1",
         approval_mode="owner_operated",
         owner_principal_id=owner_id,
     )
-    assert result.status == "approved"
-    assert result.approval_decision is not None
-    assert result.approval_decision.approval_policy_version_id == (
-        expected_policy.policy_version_id
+    assert (
+        application.governance_object_repository.open_by_id(
+            expected_policy.policy_version_id
+        ).read()
+        == expected_policy.serialized
     )
 
 

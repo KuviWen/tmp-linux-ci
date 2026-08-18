@@ -1,11 +1,13 @@
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
+from typing import Literal
 
 from stock_forecasting.evaluation_report import EvaluationReport, SeedArtifactEvaluation
 from stock_forecasting.forecast_lab import (
     CandidateEvidenceBundle,
     ForecastLab,
+    FormalQualificationEvidence,
     TrainingIntentRef,
 )
 from stock_forecasting.forecasting import (
@@ -149,9 +151,41 @@ def lifecycle_candidate_bundle(
     *,
     model_family_id: str,
     logistic_macro_f1: float,
-    formal_qualification: bool,
     intent_initiator: str = "model-operator-a",
     training_executor: str = "model-operator-b",
+) -> CandidateEvidenceBundle:
+    return _candidate_bundle(
+        model_family_id=model_family_id,
+        logistic_macro_f1=logistic_macro_f1,
+        execution_purpose="formal_candidate",
+        intent_initiator=intent_initiator,
+        training_executor=training_executor,
+    )
+
+
+def engineering_lifecycle_candidate_bundle(
+    *,
+    model_family_id: str,
+    logistic_macro_f1: float,
+    intent_initiator: str = "model-operator-a",
+    training_executor: str = "model-operator-b",
+) -> CandidateEvidenceBundle:
+    return _candidate_bundle(
+        model_family_id=model_family_id,
+        logistic_macro_f1=logistic_macro_f1,
+        execution_purpose="engineering_acceptance",
+        intent_initiator=intent_initiator,
+        training_executor=training_executor,
+    )
+
+
+def _candidate_bundle(
+    *,
+    model_family_id: str,
+    logistic_macro_f1: float,
+    execution_purpose: Literal["formal_candidate", "engineering_acceptance"],
+    intent_initiator: str,
+    training_executor: str,
 ) -> CandidateEvidenceBundle:
     template = _lifecycle_candidate_template()
     intent = replace(
@@ -160,7 +194,7 @@ def lifecycle_candidate_bundle(
         model_family_id=model_family_id,
         initiated_by=intent_initiator,
         executed_by=training_executor,
-        execution_purpose="formal_candidate",
+        execution_purpose=execution_purpose,
     ).with_content_id()
     report = EvaluationReport.create(
         class_prior_equal_cell_macro_f1=0.4,
@@ -190,5 +224,9 @@ def lifecycle_candidate_bundle(
         candidate_id="",
         training_intent=intent,
         evaluation_report=report,
-        formal_qualification=formal_qualification,
+        qualification_evidence=(
+            FormalQualificationEvidence.create(intent, template.fold_manifest)
+            if execution_purpose == "formal_candidate"
+            else None
+        ),
     ).with_content_id()

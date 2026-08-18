@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Literal, Protocol, cast
 
+from stock_forecasting.content_address import canonical_json_bytes, sha256_id
 from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.contracts import HistoricalTrainingLineage
 from stock_forecasting.evaluation_report import EvaluationReport, SeedArtifactEvaluation
@@ -129,6 +131,389 @@ class FoldManifest:
     actual_history_end: date
     purge_sessions: int = 20
     embargo_sessions: int = 20
+    serialized: bytes = b""
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        folds: tuple[WalkForwardFold, ...],
+        actual_history_start: date,
+        actual_history_end: date,
+        purge_sessions: int = 20,
+        embargo_sessions: int = 20,
+    ) -> FoldManifest:
+        if (
+            not folds
+            or isinstance(purge_sessions, bool)
+            or not isinstance(purge_sessions, int)
+            or purge_sessions < 0
+            or isinstance(embargo_sessions, bool)
+            or not isinstance(embargo_sessions, int)
+            or embargo_sessions < 0
+            or not isinstance(actual_history_start, date)
+            or not isinstance(actual_history_end, date)
+            or actual_history_start > actual_history_end
+        ):
+            raise ValueError("fold_manifest_schema_invalid")
+        payload = {
+            "artifact_kind": "walk_forward_fold_manifest",
+            "schema_version": "walk-forward-fold-manifest/v1",
+            "folds": [cls._fold_payload(fold) for fold in folds],
+            "fold_count": len(folds),
+            "actual_history_start": actual_history_start.isoformat(),
+            "actual_history_end": actual_history_end.isoformat(),
+            "purge_sessions": purge_sessions,
+            "embargo_sessions": embargo_sessions,
+        }
+        serialized = canonical_json_bytes(payload)
+        return cls(
+            fold_manifest_id=sha256_id(serialized),
+            folds=folds,
+            fold_count=len(folds),
+            actual_history_start=actual_history_start,
+            actual_history_end=actual_history_end,
+            purge_sessions=purge_sessions,
+            embargo_sessions=embargo_sessions,
+            serialized=serialized,
+        )
+
+    @classmethod
+    def from_serialized(cls, fold_manifest_id: str, serialized: bytes) -> FoldManifest:
+        try:
+            payload = json.loads(serialized)
+        except (TypeError, ValueError) as error:
+            raise ValueError("fold_manifest_schema_invalid") from error
+        expected = {
+            "artifact_kind",
+            "schema_version",
+            "folds",
+            "fold_count",
+            "actual_history_start",
+            "actual_history_end",
+            "purge_sessions",
+            "embargo_sessions",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected
+            or payload["artifact_kind"] != "walk_forward_fold_manifest"
+            or payload["schema_version"] != "walk-forward-fold-manifest/v1"
+            or not isinstance(payload["folds"], list)
+            or isinstance(payload["fold_count"], bool)
+            or not isinstance(payload["fold_count"], int)
+            or payload["fold_count"] != len(payload["folds"])
+            or not isinstance(payload["actual_history_start"], str)
+            or not isinstance(payload["actual_history_end"], str)
+            or isinstance(payload["purge_sessions"], bool)
+            or not isinstance(payload["purge_sessions"], int)
+            or isinstance(payload["embargo_sessions"], bool)
+            or not isinstance(payload["embargo_sessions"], int)
+        ):
+            raise ValueError("fold_manifest_schema_invalid")
+        try:
+            folds = tuple(cls._fold_from_payload(item) for item in payload["folds"])
+            manifest = cls.create(
+                folds=folds,
+                actual_history_start=date.fromisoformat(payload["actual_history_start"]),
+                actual_history_end=date.fromisoformat(payload["actual_history_end"]),
+                purge_sessions=payload["purge_sessions"],
+                embargo_sessions=payload["embargo_sessions"],
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("fold_manifest_schema_invalid") from error
+        if manifest.fold_manifest_id != fold_manifest_id or manifest.serialized != serialized:
+            raise ValueError("fold_manifest_checksum_mismatch")
+        return manifest
+
+    def is_content_addressed(self) -> bool:
+        try:
+            return self.from_serialized(self.fold_manifest_id, self.serialized) == self
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _fold_payload(fold: WalkForwardFold) -> dict[str, object]:
+        if (
+            fold.market not in {"XTAI", "XNAS"}
+            or not isinstance(fold.test_quarter, str)
+            or not fold.test_quarter
+            or any(not isinstance(item, str) or not item for item in fold.training_row_ids)
+            or any(not isinstance(item, str) or not item for item in fold.validation_row_ids)
+            or any(not isinstance(item, str) or not item for item in fold.test_row_ids)
+            or any(not isinstance(item, date) for item in fold.purge_session_dates)
+            or any(not isinstance(item, date) for item in fold.embargo_session_dates)
+        ):
+            raise ValueError("fold_manifest_schema_invalid")
+        return {
+            "market": fold.market,
+            "test_quarter": fold.test_quarter,
+            "training_row_ids": fold.training_row_ids,
+            "validation_row_ids": fold.validation_row_ids,
+            "test_row_ids": fold.test_row_ids,
+            "purge_session_dates": [item.isoformat() for item in fold.purge_session_dates],
+            "embargo_session_dates": [item.isoformat() for item in fold.embargo_session_dates],
+        }
+
+    @staticmethod
+    def _fold_from_payload(raw: object) -> WalkForwardFold:
+        expected = {
+            "market",
+            "test_quarter",
+            "training_row_ids",
+            "validation_row_ids",
+            "test_row_ids",
+            "purge_session_dates",
+            "embargo_session_dates",
+        }
+        if (
+            not isinstance(raw, dict)
+            or set(raw) != expected
+            or raw["market"] not in {"XTAI", "XNAS"}
+            or not isinstance(raw["test_quarter"], str)
+            or any(
+                not isinstance(raw[field], list)
+                or any(not isinstance(item, str) or not item for item in raw[field])
+                for field in (
+                    "training_row_ids",
+                    "validation_row_ids",
+                    "test_row_ids",
+                    "purge_session_dates",
+                    "embargo_session_dates",
+                )
+            )
+        ):
+            raise ValueError("fold_manifest_schema_invalid")
+        return WalkForwardFold(
+            market=cast(Market, raw["market"]),
+            test_quarter=raw["test_quarter"],
+            training_row_ids=tuple(raw["training_row_ids"]),
+            validation_row_ids=tuple(raw["validation_row_ids"]),
+            test_row_ids=tuple(raw["test_row_ids"]),
+            purge_session_dates=tuple(
+                date.fromisoformat(item) for item in raw["purge_session_dates"]
+            ),
+            embargo_session_dates=tuple(
+                date.fromisoformat(item) for item in raw["embargo_session_dates"]
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class FormalQualificationEvidence:
+    qualification_evidence_id: str
+    training_intent_id: str
+    feature_batch_id: str
+    source_policy_manifest_id: str
+    label_manifest_id: str
+    fold_manifest_id: str
+    cost_manifest_id: str
+    historical_claims: tuple[HistoricalClaimRef, ...]
+    feature_rows_digests: tuple[tuple[Market, str], ...]
+    serialized: bytes
+
+    @classmethod
+    def create(
+        cls,
+        intent: TrainingIntentRef,
+        fold_manifest: FoldManifest,
+    ) -> FormalQualificationEvidence:
+        claims = tuple(sorted(intent.historical_claims, key=lambda item: item.market))
+        markets: tuple[Market, Market] = ("XTAI", "XNAS")
+        digests = tuple(
+            (market, intent.feature_batch.market_rows_digest(market)) for market in markets
+        )
+        payload = {
+            "artifact_kind": "formal_candidate_qualification",
+            "schema_version": "formal-candidate-qualification/v1",
+            "training_intent_id": intent.training_intent_id,
+            "feature_batch_id": intent.feature_batch.feature_batch_id,
+            "source_policy_manifest_id": intent.feature_batch.source_policy_manifest_id,
+            "label_manifest_id": intent.feature_batch.label_manifest_id,
+            "fold_manifest_id": fold_manifest.fold_manifest_id,
+            "cost_manifest_id": intent.feature_batch.cost_manifest_id,
+            "historical_claims": [
+                {"market": item.market, "claim_id": item.claim_id} for item in claims
+            ],
+            "feature_rows_digests": [
+                {"market": market, "digest": digest} for market, digest in digests
+            ],
+        }
+        serialized = canonical_json_bytes(payload)
+        return cls(
+            qualification_evidence_id=sha256_id(serialized),
+            training_intent_id=intent.training_intent_id,
+            feature_batch_id=intent.feature_batch.feature_batch_id,
+            source_policy_manifest_id=intent.feature_batch.source_policy_manifest_id,
+            label_manifest_id=intent.feature_batch.label_manifest_id,
+            fold_manifest_id=fold_manifest.fold_manifest_id,
+            cost_manifest_id=intent.feature_batch.cost_manifest_id,
+            historical_claims=claims,
+            feature_rows_digests=digests,
+            serialized=serialized,
+        )
+
+    @classmethod
+    def from_serialized(
+        cls,
+        qualification_evidence_id: str,
+        serialized: bytes,
+    ) -> FormalQualificationEvidence:
+        try:
+            payload = json.loads(serialized)
+        except (TypeError, ValueError) as error:
+            raise ValueError("formal_qualification_schema_invalid") from error
+        expected = {
+            "artifact_kind",
+            "schema_version",
+            "training_intent_id",
+            "feature_batch_id",
+            "source_policy_manifest_id",
+            "label_manifest_id",
+            "fold_manifest_id",
+            "cost_manifest_id",
+            "historical_claims",
+            "feature_rows_digests",
+        }
+        string_fields = (
+            "training_intent_id",
+            "feature_batch_id",
+            "source_policy_manifest_id",
+            "label_manifest_id",
+            "fold_manifest_id",
+            "cost_manifest_id",
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected
+            or payload["artifact_kind"] != "formal_candidate_qualification"
+            or payload["schema_version"] != "formal-candidate-qualification/v1"
+            or any(
+                not isinstance(payload[field], str) or not payload[field] for field in string_fields
+            )
+            or not isinstance(payload["historical_claims"], list)
+            or not isinstance(payload["feature_rows_digests"], list)
+        ):
+            raise ValueError("formal_qualification_schema_invalid")
+        try:
+            claims = tuple(
+                HistoricalClaimRef(market=cast(Market, item["market"]), claim_id=item["claim_id"])
+                for item in payload["historical_claims"]
+                if isinstance(item, dict)
+                and set(item) == {"market", "claim_id"}
+                and item["market"] in {"XTAI", "XNAS"}
+                and isinstance(item["claim_id"], str)
+                and item["claim_id"]
+            )
+            digests = tuple(
+                (cast(Market, item["market"]), item["digest"])
+                for item in payload["feature_rows_digests"]
+                if isinstance(item, dict)
+                and set(item) == {"market", "digest"}
+                and item["market"] in {"XTAI", "XNAS"}
+                and isinstance(item["digest"], str)
+                and item["digest"]
+            )
+        except (KeyError, TypeError) as error:
+            raise ValueError("formal_qualification_schema_invalid") from error
+        if len(claims) != len(payload["historical_claims"]) or len(digests) != len(
+            payload["feature_rows_digests"]
+        ):
+            raise ValueError("formal_qualification_schema_invalid")
+        evidence = cls(
+            qualification_evidence_id=qualification_evidence_id,
+            training_intent_id=payload["training_intent_id"],
+            feature_batch_id=payload["feature_batch_id"],
+            source_policy_manifest_id=payload["source_policy_manifest_id"],
+            label_manifest_id=payload["label_manifest_id"],
+            fold_manifest_id=payload["fold_manifest_id"],
+            cost_manifest_id=payload["cost_manifest_id"],
+            historical_claims=claims,
+            feature_rows_digests=digests,
+            serialized=serialized,
+        )
+        if sha256_id(serialized) != qualification_evidence_id:
+            raise ValueError("formal_qualification_checksum_mismatch")
+        return evidence
+
+    def is_content_addressed(self) -> bool:
+        try:
+            return self.from_serialized(self.qualification_evidence_id, self.serialized) == self
+        except ValueError:
+            return False
+
+    def binds(self, intent: TrainingIntentRef, fold_manifest: FoldManifest) -> bool:
+        expected = self.create(intent, fold_manifest)
+        return expected == self
+
+
+class FormalCandidateQualificationVerifier:
+    def __init__(
+        self,
+        historical_claim_verifier: FormalHistoricalClaimVerifier,
+        cost_scenario_verifier: FormalCostScenarioVerifier,
+    ) -> None:
+        self._historical_claim_verifier = historical_claim_verifier
+        self._cost_scenario_verifier = cost_scenario_verifier
+
+    def verify_source_basis(self, intent: TrainingIntentRef) -> bool:
+        if intent.execution_purpose != "formal_candidate":
+            return False
+        if len(intent.historical_claims) != 2 or {
+            item.market for item in intent.historical_claims
+        } != {"XTAI", "XNAS"}:
+            return False
+        lineages = intent.feature_batch.historical_lineage
+        if len(lineages) != 2 or {item.market for item in lineages} != {"XTAI", "XNAS"}:
+            return False
+        if not intent.feature_batch.is_content_addressed():
+            return False
+        lineage_by_market = {item.market: item for item in lineages}
+        try:
+            return all(
+                (lineage := lineage_by_market[item.market]).claim_id == item.claim_id
+                and lineage.source_policy_manifest_id
+                == intent.feature_batch.source_policy_manifest_id
+                and lineage.label_manifest_id == intent.feature_batch.label_manifest_id
+                and lineage.fold_manifest_id == intent.feature_batch.fold_manifest_id
+                and lineage.feature_rows_digest
+                == intent.feature_batch.market_rows_digest(item.market)
+                and self._historical_claim_verifier.verify_training_lineage(
+                    lineage=lineage,
+                    feature_batch_id=intent.feature_batch.feature_batch_id,
+                    source_policy_manifest_id=intent.feature_batch.source_policy_manifest_id,
+                    label_manifest_id=intent.feature_batch.label_manifest_id,
+                    fold_manifest_id=intent.feature_batch.fold_manifest_id,
+                    feature_rows_digest=intent.feature_batch.market_rows_digest(item.market),
+                )
+                for item in intent.historical_claims
+            )
+        except (KeyError, RuntimeError, ValueError):
+            return False
+
+    def verify_cost_scenario(self, intent: TrainingIntentRef) -> bool:
+        if intent.execution_purpose != "formal_candidate":
+            return False
+        try:
+            return self._cost_scenario_verifier.verify_cost_scenario(
+                intent.feature_batch.cost_manifest_id
+            )
+        except (KeyError, RuntimeError, ValueError):
+            return False
+
+    def verify(
+        self,
+        evidence: FormalQualificationEvidence,
+        intent: TrainingIntentRef,
+        fold_manifest: FoldManifest,
+    ) -> bool:
+        return (
+            evidence.is_content_addressed()
+            and evidence.binds(intent, fold_manifest)
+            and fold_manifest.is_content_addressed()
+            and self.verify_source_basis(intent)
+            and self.verify_cost_scenario(intent)
+        )
 
 
 @dataclass(frozen=True)
@@ -141,7 +526,11 @@ class CandidateEvidenceBundle:
     fold_manifest: FoldManifest
     calibrators: tuple[CalibrationEvidence, ...]
     evaluation_report: EvaluationReport
-    formal_qualification: bool
+    qualification_evidence: FormalQualificationEvidence | None
+
+    @property
+    def formal_qualification(self) -> bool:
+        return self.qualification_evidence is not None
 
     @property
     def model_family_id(self) -> str:
@@ -169,7 +558,11 @@ class CandidateEvidenceBundle:
                 "calibrator_ids": [item.calibrator_id for item in self.calibrators],
                 "calibrator_statuses": [item.status for item in self.calibrators],
                 "evaluation_report_id": self.evaluation_report.evaluation_report_id,
-                "formal_qualification": self.formal_qualification,
+                "qualification_evidence_id": (
+                    self.qualification_evidence.qualification_evidence_id
+                    if self.qualification_evidence is not None
+                    else None
+                ),
             },
         )
 
@@ -211,6 +604,10 @@ class ForecastLab:
             historical_claim_verifier or _UnavailableHistoricalClaimVerifier()
         )
         self._cost_scenario_verifier = cost_scenario_verifier or _UnavailableCostScenarioVerifier()
+        self.qualification_verifier = FormalCandidateQualificationVerifier(
+            self._historical_claim_verifier,
+            self._cost_scenario_verifier,
+        )
         self._class_prior_forecaster = class_prior_forecaster or ClassPriorTrendForecaster()
         self._logistic_forecaster = (
             logistic_forecaster or RegularizedMultinomialLogisticTrendForecaster()
@@ -265,7 +662,11 @@ class ForecastLab:
         formal_cost_scenario = self._has_formal_cost_scenario(intent)
         if intent.execution_purpose == "formal_candidate" and not formal_cost_scenario:
             return self._blocked("unverified_cost_scenario")
-        formal_qualification = formal_source_basis and formal_cost_scenario
+        qualification_evidence = (
+            FormalQualificationEvidence.create(intent, fold_manifest)
+            if formal_source_basis and formal_cost_scenario
+            else None
+        )
         try:
             evaluation_scores = self._evaluate(
                 feature_batch,
@@ -338,7 +739,7 @@ class ForecastLab:
             fold_manifest=fold_manifest,
             calibrators=calibrators,
             evaluation_report=evaluation,
-            formal_qualification=formal_qualification,
+            qualification_evidence=qualification_evidence,
         ).with_content_id()
         return ForecastLabOutcome(
             status="developed",
@@ -347,51 +748,10 @@ class ForecastLab:
         )
 
     def _has_formal_source_basis(self, intent: TrainingIntentRef) -> bool:
-        if intent.execution_purpose != "formal_candidate":
-            return False
-        if len(intent.historical_claims) != len(self._markets):
-            return False
-        if {item.market for item in intent.historical_claims} != set(self._markets):
-            return False
-        lineages = intent.feature_batch.historical_lineage
-        if len(lineages) != len(self._markets):
-            return False
-        if {item.market for item in lineages} != set(self._markets):
-            return False
-        if not intent.feature_batch.is_content_addressed():
-            return False
-        lineage_by_market = {item.market: item for item in lineages}
-        try:
-            return all(
-                (lineage := lineage_by_market[item.market]).claim_id == item.claim_id
-                and lineage.source_policy_manifest_id
-                == intent.feature_batch.source_policy_manifest_id
-                and lineage.label_manifest_id == intent.feature_batch.label_manifest_id
-                and lineage.fold_manifest_id == intent.feature_batch.fold_manifest_id
-                and lineage.feature_rows_digest
-                == intent.feature_batch.market_rows_digest(item.market)
-                and self._historical_claim_verifier.verify_training_lineage(
-                    lineage=lineage,
-                    feature_batch_id=intent.feature_batch.feature_batch_id,
-                    source_policy_manifest_id=intent.feature_batch.source_policy_manifest_id,
-                    label_manifest_id=intent.feature_batch.label_manifest_id,
-                    fold_manifest_id=intent.feature_batch.fold_manifest_id,
-                    feature_rows_digest=intent.feature_batch.market_rows_digest(item.market),
-                )
-                for item in intent.historical_claims
-            )
-        except (KeyError, RuntimeError, ValueError):
-            return False
+        return self.qualification_verifier.verify_source_basis(intent)
 
     def _has_formal_cost_scenario(self, intent: TrainingIntentRef) -> bool:
-        if intent.execution_purpose != "formal_candidate":
-            return False
-        try:
-            return self._cost_scenario_verifier.verify_cost_scenario(
-                intent.feature_batch.cost_manifest_id
-            )
-        except (KeyError, RuntimeError, ValueError):
-            return False
+        return self.qualification_verifier.verify_cost_scenario(intent)
 
     @staticmethod
     def _blocked(reason: str) -> ForecastLabOutcome:
@@ -465,22 +825,8 @@ class ForecastLab:
                 )
         if not folds:
             return None
-        payload = [
-            {
-                "market": fold.market,
-                "test_quarter": fold.test_quarter,
-                "training_row_ids": fold.training_row_ids,
-                "validation_row_ids": fold.validation_row_ids,
-                "test_row_ids": fold.test_row_ids,
-                "purge_session_dates": [item.isoformat() for item in fold.purge_session_dates],
-                "embargo_session_dates": [item.isoformat() for item in fold.embargo_session_dates],
-            }
-            for fold in folds
-        ]
-        return FoldManifest(
-            fold_manifest_id=_content_id("walk_forward_fold_manifest", payload),
+        return FoldManifest.create(
             folds=tuple(folds),
-            fold_count=len(folds),
             actual_history_start=all_dates[0],
             actual_history_end=all_dates[-1],
         )

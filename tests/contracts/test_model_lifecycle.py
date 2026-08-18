@@ -9,7 +9,12 @@ import pytest
 from sqlalchemy import create_engine, func, select
 
 from stock_forecasting.evaluation_report import EvaluationReport
-from stock_forecasting.forecast_lab import CandidateEvidenceBundle
+from stock_forecasting.forecast_lab import (
+    CandidateEvidenceBundle,
+    FoldManifest,
+    FormalQualificationEvidence,
+    TrainingIntentRef,
+)
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     BootstrapGatePolicyVersion,
@@ -34,7 +39,11 @@ from stock_forecasting.model_governance import (
 )
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import metadata
-from tests.modeling_support import lifecycle_candidate_bundle, passing_hard_gate_evidence
+from tests.modeling_support import (
+    engineering_lifecycle_candidate_bundle,
+    lifecycle_candidate_bundle,
+    passing_hard_gate_evidence,
+)
 
 _RECORDED_EVALUATION_REPORTS: dict[str, EvaluationReport] = {}
 _RECORDED_CANDIDATES: dict[str, CandidateEvidenceBundle] = {}
@@ -67,6 +76,16 @@ class _VerifiedShadowRunVerifier:
         return True
 
 
+class _VerifiedFormalQualification:
+    def verify(
+        self,
+        evidence: FormalQualificationEvidence,
+        intent: TrainingIntentRef,
+        fold_manifest: FoldManifest,
+    ) -> bool:
+        return evidence.is_content_addressed() and evidence.binds(intent, fold_manifest)
+
+
 def _verified_lifecycle(
     store: InMemoryLifecycleStore | SqlAlchemyLifecycleStore,
     *,
@@ -78,6 +97,7 @@ def _verified_lifecycle(
         store,
         evidence_repository=_VerifiedEvidenceRepository(),
         evaluation_report_repository=evaluation_report_repository,
+        formal_qualification_verifier=_VerifiedFormalQualification(),
         shadow_eligibility_verifier=shadow_eligibility_verifier,
         shadow_run_verifier=shadow_run_verifier,
     )
@@ -138,6 +158,7 @@ def _bound_shadow_evidence(
         candidate_id=candidate_id or _SHADOW_BINDING["candidate_id"],
         artifact_id=_SHADOW_BINDING["artifact_id"],
         evaluation_report_id=_SHADOW_BINDING["evaluation_report_id"],
+        gate_decision_id=_SHADOW_BINDING["gate_decision_id"],
         approval_decision_id=_SHADOW_BINDING["approval_decision_id"],
         approval_policy_version_id=_SHADOW_BINDING["approval_policy_version_id"],
         expected_assignment=_SHADOW_BINDING["expected_assignment"],
@@ -160,7 +181,7 @@ def test_bootstrap_gate_rejects_unqualified_candidate_and_tampered_metric_eviden
         candidate_id="candidate-unqualified-evidence",
         model_family_id="family-unqualified-evidence",
         improvement=12.0,
-        formal_qualification=False,
+        qualification="unqualified",
     )
     evidence = HardGateEvidence.create(
         evidence_kind="formal_evidence",
@@ -245,6 +266,7 @@ def test_lifecycle_fails_closed_when_policy_uses_an_unknown_gate_category() -> N
         store,
         policy_repository=ObjectGatePolicyRepository(PolicyObjects()),
         evidence_repository=_VerifiedEvidenceRepository(),
+        formal_qualification_verifier=_VerifiedFormalQualification(),
     )
     candidate_id = "candidate-invalid-policy"
     model_family_id = "family-invalid-policy"
@@ -286,7 +308,10 @@ def test_lifecycle_fails_closed_when_policy_uses_an_unknown_gate_category() -> N
 
 
 def test_bootstrap_gate_rejects_unresolved_artifact_references() -> None:
-    lifecycle = ModelLifecycle(InMemoryLifecycleStore())
+    lifecycle = ModelLifecycle(
+        InMemoryLifecycleStore(),
+        formal_qualification_verifier=_VerifiedFormalQualification(),
+    )
     _record_candidate(
         lifecycle,
         candidate_id="candidate-unresolved-evidence",
@@ -417,7 +442,6 @@ def test_candidate_recording_rejects_a_tampered_evaluation_report() -> None:
     bundle = lifecycle_candidate_bundle(
         model_family_id="family-tampered-report",
         logistic_macro_f1=0.52,
-        formal_qualification=True,
     )
     tampered = replace(
         bundle,
@@ -438,6 +462,162 @@ def test_candidate_recording_rejects_a_tampered_evaluation_report() -> None:
         )
 
 
+def test_candidate_recording_rejects_tampered_fold_contents_with_a_stale_id() -> None:
+    lifecycle = ModelLifecycle(InMemoryLifecycleStore())
+    bundle = engineering_lifecycle_candidate_bundle(
+        model_family_id="family-tampered-fold",
+        logistic_macro_f1=0.52,
+    )
+    first_fold = bundle.fold_manifest.folds[0]
+    tampered_fold_manifest = replace(
+        bundle.fold_manifest,
+        folds=(
+            replace(first_fold, test_row_ids=first_fold.test_row_ids[1:]),
+            *bundle.fold_manifest.folds[1:],
+        ),
+    )
+    tampered = replace(
+        bundle,
+        candidate_id="",
+        fold_manifest=tampered_fold_manifest,
+    ).with_content_id()
+
+    with pytest.raises(LifecycleConflict, match="candidate_evidence_invalid"):
+        lifecycle.execute(
+            RecordCandidate(
+                command_id="record-tampered-fold",
+                candidate_bundle=tampered,
+                expected_version=0,
+                occurred_at=datetime(2026, 8, 17, 1, 0, tzinfo=UTC),
+            )
+        )
+
+
+def test_candidate_recording_compares_model_wrapper_to_its_serialized_bytes() -> None:
+    lifecycle = ModelLifecycle(InMemoryLifecycleStore())
+    bundle = engineering_lifecycle_candidate_bundle(
+        model_family_id="family-wrapped-model-bytes",
+        logistic_macro_f1=0.52,
+    )
+    declared_seed_17 = bundle.logistic_artifacts[0]
+    serialized_seed_29 = bundle.logistic_artifacts[1]
+    contradictory = replace(
+        declared_seed_17,
+        artifact_id=serialized_seed_29.artifact_id,
+        serialized=serialized_seed_29.serialized,
+    )
+    logistic_artifacts = (contradictory, *bundle.logistic_artifacts[1:])
+    report = EvaluationReport.create(
+        class_prior_equal_cell_macro_f1=(bundle.evaluation_report.class_prior_equal_cell_macro_f1),
+        logistic_equal_cell_macro_f1=bundle.evaluation_report.logistic_equal_cell_macro_f1,
+        seed_results=tuple(
+            replace(item, logistic_artifact_id=artifact.artifact_id)
+            for item, artifact in zip(
+                bundle.evaluation_report.seed_results,
+                logistic_artifacts,
+                strict=True,
+            )
+        ),
+        feature_batch_id=bundle.evaluation_report.feature_batch_id,
+        source_policy_manifest_id=bundle.evaluation_report.source_policy_manifest_id,
+        label_manifest_id=bundle.evaluation_report.label_manifest_id,
+        cost_manifest_id=bundle.evaluation_report.cost_manifest_id,
+        fold_manifest_id=bundle.evaluation_report.fold_manifest_id,
+    )
+    tampered = replace(
+        bundle,
+        candidate_id="",
+        primary_artifact=contradictory,
+        logistic_artifacts=logistic_artifacts,
+        calibrators=contradictory.calibrators,
+        evaluation_report=report,
+    ).with_content_id()
+
+    with pytest.raises(LifecycleConflict, match="candidate_evidence_invalid"):
+        lifecycle.execute(
+            RecordCandidate(
+                command_id="record-wrapped-model-bytes",
+                candidate_bundle=tampered,
+                expected_version=0,
+                occurred_at=datetime(2026, 8, 17, 1, 0, tzinfo=UTC),
+            )
+        )
+
+
+def test_candidate_qualification_fails_closed_without_a_repository_backed_verifier() -> None:
+    store = InMemoryLifecycleStore()
+    lifecycle = ModelLifecycle(store)
+    bundle = lifecycle_candidate_bundle(
+        model_family_id="family-unverified-qualification",
+        logistic_macro_f1=0.52,
+    )
+
+    lifecycle.execute(
+        RecordCandidate(
+            command_id="record-unverified-qualification",
+            candidate_bundle=bundle,
+            expected_version=0,
+            occurred_at=datetime(2026, 8, 17, 1, 0, tzinfo=UTC),
+        )
+    )
+
+    recorded = json.loads(store.events("family-unverified-qualification")[0].payload_json)
+    assert recorded["formal_qualification"] is False
+
+
+def test_approval_replay_rejects_a_corrupted_current_decision_event() -> None:
+    store = InMemoryLifecycleStore()
+    approval_policy = ModelApprovalPolicyVersion.create(
+        policy_name="owner-operated-model-approval-v1",
+        approval_mode="owner_operated",
+        owner_principal_id="owner-a",
+    )
+    lifecycle = ModelLifecycle(store, approval_policy=approval_policy)
+    command = DecideApproval(
+        command_id="corrupted-approval-replay",
+        model_family_id="family-corrupted-approval",
+        candidate_id="candidate-corrupted-approval",
+        artifact_id="sha256:artifact",
+        evaluation_report_id="sha256:evaluation",
+        policy_version_id="sha256:gate-policy",
+        approver_id="owner-a",
+        decision="approved",
+        reason="Exact evidence reviewed.",
+        expected_assignment="unassigned",
+        expected_version=0,
+        occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+    )
+    store.append(
+        command_id=command.command_id,
+        model_family_id=command.model_family_id,
+        expected_version=0,
+        event_kind="ApprovalDecisionRecorded",
+        payload={
+            "approval_decision_id": "sha256:forged",
+            "candidate_id": command.candidate_id,
+            "artifact_id": command.artifact_id,
+            "evaluation_report_id": command.evaluation_report_id,
+            "policy_version_id": command.policy_version_id,
+            "gate_decision_id": "sha256:gate-decision",
+            "approval_policy_version_id": approval_policy.policy_version_id,
+            "approval_mode": "owner_operated",
+            "approval_policy_owner_principal_id": "owner-a",
+            "independent_review": "false",
+            "approver_id": command.approver_id,
+            "requested_decision": command.decision,
+            "decision": "approved",
+            "reason": command.reason,
+            "expected_assignment": command.expected_assignment,
+            "expires_at": "2026-08-25T02:00:00+00:00",
+            "invalidated_reason": None,
+        },
+        occurred_at=command.occurred_at,
+    )
+
+    with pytest.raises(LifecycleConflict, match="command_id_payload_conflict"):
+        lifecycle.execute(command)
+
+
 def _record_candidate(
     lifecycle: ModelLifecycle,
     *,
@@ -445,15 +625,19 @@ def _record_candidate(
     model_family_id: str,
     improvement: float,
     actual_improvement: float | None = None,
-    formal_qualification: bool = True,
+    qualification: Literal["verified", "unqualified"] = "verified",
     intent_initiator: str = "model-operator-a",
     training_executor: str = "model-operator-b",
 ) -> None:
     verified_improvement = improvement if actual_improvement is None else actual_improvement
-    bundle = lifecycle_candidate_bundle(
+    bundle_factory = (
+        lifecycle_candidate_bundle
+        if qualification == "verified"
+        else engineering_lifecycle_candidate_bundle
+    )
+    bundle = bundle_factory(
         model_family_id=model_family_id,
         logistic_macro_f1=0.4 + verified_improvement / 100,
-        formal_qualification=formal_qualification,
         intent_initiator=intent_initiator,
         training_executor=training_executor,
     )
@@ -692,6 +876,7 @@ def test_owner_operated_approval_binds_the_designated_owner_policy() -> None:
         InMemoryLifecycleStore(),
         evidence_repository=_VerifiedEvidenceRepository(),
         approval_policy=approval_policy,
+        formal_qualification_verifier=_VerifiedFormalQualification(),
     )
     _record_candidate(
         lifecycle,
@@ -771,6 +956,7 @@ def test_owner_operated_approval_requires_owner_training_participation() -> None
             approval_mode="owner_operated",
             owner_principal_id=owner_id,
         ),
+        formal_qualification_verifier=_VerifiedFormalQualification(),
     )
     _record_candidate(
         lifecycle,
@@ -930,6 +1116,7 @@ def test_governance_query_preserves_honest_disclosure_for_legacy_approvals() -> 
             "candidate_id": _candidate_id("legacy-approved-candidate"),
             "artifact_id": _artifact_id("legacy-approved-candidate"),
             "evaluation_report_id": _evaluation_report_id("legacy-approved-candidate"),
+            "gate_decision_id": "unavailable:legacy-gate-decision",
             "approval_decision_id": "unavailable:legacy-approval-decision",
             "approval_policy_version_id": "unavailable:legacy-approval-policy",
             "expected_assignment": "unassigned",
@@ -1074,6 +1261,7 @@ def _approved_lifecycle(
             "candidate_id": _candidate_id("candidate-shadow"),
             "artifact_id": _artifact_id("candidate-shadow"),
             "evaluation_report_id": _evaluation_report_id("candidate-shadow"),
+            "gate_decision_id": approval.approval_decision.gate_decision_id,
             "approval_decision_id": approval.approval_decision.approval_decision_id,
             "approval_policy_version_id": (approval.approval_decision.approval_policy_version_id),
             "expected_assignment": "unassigned",
@@ -1298,6 +1486,40 @@ def test_later_hard_gate_veto_invalidates_approval_before_shadow() -> None:
     assert blocked.shadow_evidence.blocked_reason == "hard_gate_vetoed"
     assert blocked.shadow_evidence.eligible_cycle_count == 0
     assert store.events("family-shadow")[-1].event_kind == "ShadowEodBlocked"
+
+
+def test_later_passing_gate_with_different_evidence_invalidates_stale_approval() -> None:
+    lifecycle, _ = _approved_lifecycle()
+    reevaluated = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-shadow-later-passing-evidence",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates(
+                "candidate-shadow",
+                overrides={"economics.ic_information_ratio": 0.31},
+            ),
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 2, 30, tzinfo=UTC),
+        )
+    )
+
+    shadow = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-after-later-passing-evidence",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+            expected_version=4,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert reevaluated.status == "gate_passed"
+    assert shadow.status == "shadow_blocked"
+    assert shadow.shadow_evidence is not None
+    assert shadow.shadow_evidence.blocked_reason == "gate_lineage_changed"
 
 
 def test_bootstrap_policy_is_permanently_disabled_after_first_assignment() -> None:

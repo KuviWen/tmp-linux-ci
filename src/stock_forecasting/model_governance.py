@@ -26,21 +26,46 @@ from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_even
 from stock_forecasting.platform.schema import model_lifecycle_events
 
 if TYPE_CHECKING:
-    from stock_forecasting.forecast_lab import CandidateEvidenceBundle
+    from stock_forecasting.forecast_lab import (
+        CandidateEvidenceBundle,
+        FoldManifest,
+        FormalQualificationEvidence,
+        TrainingIntentRef,
+    )
 
 
 class LifecycleConflict(RuntimeError):
     """Raised when an append-only lifecycle precondition is stale or inconsistent."""
 
 
-def _cold_load_model_artifact(artifact: ModelArtifact) -> None:
+class FormalQualificationVerifier(Protocol):
+    def verify(
+        self,
+        evidence: FormalQualificationEvidence,
+        intent: TrainingIntentRef,
+        fold_manifest: FoldManifest,
+    ) -> bool: ...
+
+
+class UnavailableFormalQualificationVerifier:
+    def verify(
+        self,
+        evidence: FormalQualificationEvidence,
+        intent: TrainingIntentRef,
+        fold_manifest: FoldManifest,
+    ) -> bool:
+        return False
+
+
+def _cold_load_model_artifact(artifact: ModelArtifact) -> ModelArtifact:
+    parsed = ModelArtifact.from_serialized(artifact.artifact_id, artifact.serialized)
     if artifact.model_family == "regularized_multinomial_logistic":
         RegularizedMultinomialLogisticTrendForecaster.load(artifact.serialized)
-        return
-    if artifact.model_family == "class_prior":
+    elif artifact.model_family == "class_prior":
         ClassPriorTrendForecaster.load(artifact.serialized)
-        return
-    raise ValueError("candidate_model_family_invalid")
+    else:
+        raise ValueError("candidate_model_family_invalid")
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -461,6 +486,12 @@ class EvaluationReportRepository(Protocol):
     def resolve(self, evaluation_report_id: str) -> EvaluationReport | None: ...
 
 
+class CandidateArtifactRepository(Protocol):
+    def put(self, artifact_id: str, serialized: bytes, *, object_kind: str) -> None: ...
+
+    def resolve(self, artifact_id: str) -> bytes | None: ...
+
+
 class InMemoryGatePolicyRepository:
     def __init__(self, policies: tuple[BootstrapGatePolicyVersion, ...]) -> None:
         self._policies = {policy.policy_version_id: policy for policy in policies}
@@ -524,6 +555,45 @@ class InMemoryEvaluationReportRepository:
 
     def resolve(self, evaluation_report_id: str) -> EvaluationReport | None:
         return self._reports.get(evaluation_report_id)
+
+
+class InMemoryCandidateArtifactRepository:
+    def __init__(self) -> None:
+        self._artifacts: dict[str, bytes] = {}
+
+    def put(self, artifact_id: str, serialized: bytes, *, object_kind: str) -> None:
+        if sha256_id(serialized) != artifact_id or not object_kind:
+            raise ValueError("candidate_artifact_checksum_mismatch")
+        existing = self._artifacts.get(artifact_id)
+        if existing is not None and existing != serialized:
+            raise ValueError("candidate_artifact_id_conflict")
+        self._artifacts[artifact_id] = serialized
+
+    def resolve(self, artifact_id: str) -> bytes | None:
+        return self._artifacts.get(artifact_id)
+
+
+class ObjectCandidateArtifactRepository:
+    def __init__(
+        self,
+        objects: EvaluationReportObjectRepository | Callable[[], EvaluationReportObjectRepository],
+    ) -> None:
+        self._objects = objects
+
+    def put(self, artifact_id: str, serialized: bytes, *, object_kind: str) -> None:
+        objects = self._objects() if callable(self._objects) else self._objects
+        objects.put_verified(
+            BytesIO(serialized),
+            expected_checksum=artifact_id.removeprefix("sha256:"),
+            metadata={"content_type": "application/json", "object_kind": object_kind},
+        )
+
+    def resolve(self, artifact_id: str) -> bytes | None:
+        try:
+            objects = self._objects() if callable(self._objects) else self._objects
+            return objects.open_by_id(artifact_id).read()
+        except (FileNotFoundError, KeyError, OSError, TypeError, ValueError):
+            return None
 
 
 class ObjectEvaluationReportRepository:
@@ -595,6 +665,7 @@ class ShadowRunEvidence:
     candidate_id: str
     artifact_id: str
     evaluation_report_id: str
+    gate_decision_id: str
     approval_decision_id: str
     approval_policy_version_id: str
     expected_assignment: str
@@ -616,6 +687,7 @@ class ShadowRunEvidence:
         candidate_id: str,
         artifact_id: str,
         evaluation_report_id: str,
+        gate_decision_id: str,
         approval_decision_id: str,
         approval_policy_version_id: str,
         expected_assignment: str,
@@ -637,6 +709,7 @@ class ShadowRunEvidence:
             "candidate_id": candidate_id,
             "artifact_id": artifact_id,
             "evaluation_report_id": evaluation_report_id,
+            "gate_decision_id": gate_decision_id,
             "approval_decision_id": approval_decision_id,
             "approval_policy_version_id": approval_policy_version_id,
             "expected_assignment": expected_assignment,
@@ -656,6 +729,7 @@ class ShadowRunEvidence:
             candidate_id=candidate_id,
             artifact_id=artifact_id,
             evaluation_report_id=evaluation_report_id,
+            gate_decision_id=gate_decision_id,
             approval_decision_id=approval_decision_id,
             approval_policy_version_id=approval_policy_version_id,
             expected_assignment=expected_assignment,
@@ -676,6 +750,7 @@ class ShadowRunEvidence:
             candidate_id=self.candidate_id,
             artifact_id=self.artifact_id,
             evaluation_report_id=self.evaluation_report_id,
+            gate_decision_id=self.gate_decision_id,
             approval_decision_id=self.approval_decision_id,
             approval_policy_version_id=self.approval_policy_version_id,
             expected_assignment=self.expected_assignment,
@@ -761,16 +836,215 @@ class ApprovalDecision:
     artifact_id: str
     evaluation_report_id: str
     policy_version_id: str
+    gate_decision_id: str
     approval_policy_version_id: str
     approval_mode: ApprovalMode
     approval_policy_owner_principal_id: str | None
     independent_review: bool
     approver_id: str
+    requested_decision: Literal["approved", "rejected"]
     decision: Literal["approved", "rejected"]
     reason: str
     expected_assignment: str
     expires_at: datetime
     invalidated_reason: str | None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        candidate_id: str,
+        artifact_id: str,
+        evaluation_report_id: str,
+        policy_version_id: str,
+        gate_decision_id: str,
+        approval_policy_version_id: str,
+        approval_mode: ApprovalMode,
+        approval_policy_owner_principal_id: str | None,
+        independent_review: bool,
+        approver_id: str,
+        requested_decision: Literal["approved", "rejected"],
+        decision: Literal["approved", "rejected"],
+        reason: str,
+        expected_assignment: str,
+        expires_at: datetime,
+        invalidated_reason: str | None,
+    ) -> ApprovalDecision:
+        strings = (
+            candidate_id,
+            artifact_id,
+            evaluation_report_id,
+            policy_version_id,
+            gate_decision_id,
+            approval_policy_version_id,
+            approver_id,
+            expected_assignment,
+        )
+        if (
+            any(not isinstance(value, str) or not value for value in strings)
+            or approval_mode not in {"separated_duties", "owner_operated"}
+            or (
+                approval_mode == "separated_duties"
+                and approval_policy_owner_principal_id is not None
+            )
+            or (
+                approval_mode == "owner_operated"
+                and (
+                    not isinstance(approval_policy_owner_principal_id, str)
+                    or not approval_policy_owner_principal_id
+                    or independent_review is not False
+                )
+            )
+            or not isinstance(independent_review, bool)
+            or requested_decision not in {"approved", "rejected"}
+            or decision not in {"approved", "rejected"}
+            or not isinstance(reason, str)
+            or not isinstance(expires_at, datetime)
+            or expires_at.tzinfo is None
+            or (invalidated_reason is not None and not isinstance(invalidated_reason, str))
+            or (decision == "approved" and invalidated_reason is not None)
+            or (decision == "rejected" and invalidated_reason is None)
+        ):
+            raise ValueError("approval_decision_schema_invalid")
+        payload = {
+            "candidate_id": candidate_id,
+            "artifact_id": artifact_id,
+            "evaluation_report_id": evaluation_report_id,
+            "policy_version_id": policy_version_id,
+            "gate_decision_id": gate_decision_id,
+            "approval_policy_version_id": approval_policy_version_id,
+            "approval_mode": approval_mode,
+            "approval_policy_owner_principal_id": approval_policy_owner_principal_id,
+            "independent_review": independent_review,
+            "approver_id": approver_id,
+            "requested_decision": requested_decision,
+            "decision": decision,
+            "reason": reason,
+            "expected_assignment": expected_assignment,
+            "expires_at": expires_at.isoformat(),
+            "invalidated_reason": invalidated_reason,
+        }
+        return cls(
+            approval_decision_id=_content_id("approval_decision", payload),
+            candidate_id=candidate_id,
+            artifact_id=artifact_id,
+            evaluation_report_id=evaluation_report_id,
+            policy_version_id=policy_version_id,
+            gate_decision_id=gate_decision_id,
+            approval_policy_version_id=approval_policy_version_id,
+            approval_mode=approval_mode,
+            approval_policy_owner_principal_id=approval_policy_owner_principal_id,
+            independent_review=independent_review,
+            approver_id=approver_id,
+            requested_decision=requested_decision,
+            decision=decision,
+            reason=reason,
+            expected_assignment=expected_assignment,
+            expires_at=expires_at,
+            invalidated_reason=invalidated_reason,
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "approval_decision_id": self.approval_decision_id,
+            "candidate_id": self.candidate_id,
+            "artifact_id": self.artifact_id,
+            "evaluation_report_id": self.evaluation_report_id,
+            "policy_version_id": self.policy_version_id,
+            "gate_decision_id": self.gate_decision_id,
+            "approval_policy_version_id": self.approval_policy_version_id,
+            "approval_mode": self.approval_mode,
+            "approval_policy_owner_principal_id": self.approval_policy_owner_principal_id,
+            "independent_review": self.independent_review,
+            "approver_id": self.approver_id,
+            "requested_decision": self.requested_decision,
+            "decision": self.decision,
+            "reason": self.reason,
+            "expected_assignment": self.expected_assignment,
+            "expires_at": self.expires_at.isoformat(),
+            "invalidated_reason": self.invalidated_reason,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> ApprovalDecision:
+        expected = {
+            "approval_decision_id",
+            "candidate_id",
+            "artifact_id",
+            "evaluation_report_id",
+            "policy_version_id",
+            "gate_decision_id",
+            "approval_policy_version_id",
+            "approval_mode",
+            "approval_policy_owner_principal_id",
+            "independent_review",
+            "approver_id",
+            "requested_decision",
+            "decision",
+            "reason",
+            "expected_assignment",
+            "expires_at",
+            "invalidated_reason",
+        }
+        string_fields = (
+            "approval_decision_id",
+            "candidate_id",
+            "artifact_id",
+            "evaluation_report_id",
+            "policy_version_id",
+            "gate_decision_id",
+            "approval_policy_version_id",
+            "approver_id",
+            "reason",
+            "expected_assignment",
+            "expires_at",
+        )
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != expected
+            or any(not isinstance(payload[field], str) for field in string_fields)
+            or not isinstance(payload["independent_review"], bool)
+            or payload["approval_mode"] not in {"separated_duties", "owner_operated"}
+            or payload["requested_decision"] not in {"approved", "rejected"}
+            or payload["decision"] not in {"approved", "rejected"}
+            or (
+                payload["approval_policy_owner_principal_id"] is not None
+                and not isinstance(payload["approval_policy_owner_principal_id"], str)
+            )
+            or (
+                payload["invalidated_reason"] is not None
+                and not isinstance(payload["invalidated_reason"], str)
+            )
+        ):
+            raise ValueError("approval_decision_schema_invalid")
+        rebuilt = cls.create(
+            candidate_id=payload["candidate_id"],
+            artifact_id=payload["artifact_id"],
+            evaluation_report_id=payload["evaluation_report_id"],
+            policy_version_id=payload["policy_version_id"],
+            gate_decision_id=payload["gate_decision_id"],
+            approval_policy_version_id=payload["approval_policy_version_id"],
+            approval_mode=cast(ApprovalMode, payload["approval_mode"]),
+            approval_policy_owner_principal_id=payload["approval_policy_owner_principal_id"],
+            independent_review=payload["independent_review"],
+            approver_id=payload["approver_id"],
+            requested_decision=cast(Literal["approved", "rejected"], payload["requested_decision"]),
+            decision=cast(Literal["approved", "rejected"], payload["decision"]),
+            reason=payload["reason"],
+            expected_assignment=payload["expected_assignment"],
+            expires_at=datetime.fromisoformat(payload["expires_at"]),
+            invalidated_reason=payload["invalidated_reason"],
+        )
+        if rebuilt.approval_decision_id != payload["approval_decision_id"]:
+            raise ValueError("approval_decision_checksum_mismatch")
+        return rebuilt
+
+    def matches_policy(self, policy: ModelApprovalPolicyVersion) -> bool:
+        return (
+            self.approval_policy_version_id == policy.policy_version_id
+            and self.approval_mode == policy.approval_mode
+            and self.approval_policy_owner_principal_id == policy.owner_principal_id
+        )
 
 
 @dataclass(frozen=True)
@@ -1050,7 +1324,9 @@ class ModelLifecycle:
         policy_repository: GatePolicyRepository | None = None,
         evidence_repository: GateEvidenceRepository | None = None,
         evaluation_report_repository: EvaluationReportRepository | None = None,
+        candidate_artifact_repository: CandidateArtifactRepository | None = None,
         approval_policy: ModelApprovalPolicyVersion | None = None,
+        formal_qualification_verifier: FormalQualificationVerifier | None = None,
         shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
         shadow_run_verifier: ShadowRunVerifier | None = None,
     ) -> None:
@@ -1062,6 +1338,9 @@ class ModelLifecycle:
         self._evaluation_report_repository = (
             evaluation_report_repository or InMemoryEvaluationReportRepository()
         )
+        self._candidate_artifact_repository = (
+            candidate_artifact_repository or InMemoryCandidateArtifactRepository()
+        )
         submitted_approval_policy = approval_policy or SEPARATED_DUTIES_APPROVAL_POLICY_V1
         verified_approval_policy = ModelApprovalPolicyVersion.from_serialized(
             submitted_approval_policy.policy_version_id,
@@ -1070,6 +1349,9 @@ class ModelLifecycle:
         if verified_approval_policy != submitted_approval_policy:
             raise ValueError("model_approval_policy_checksum_mismatch")
         self._approval_policy = verified_approval_policy
+        self._formal_qualification_verifier = (
+            formal_qualification_verifier or UnavailableFormalQualificationVerifier()
+        )
         self._shadow_eligibility_verifier = (
             shadow_eligibility_verifier or UnavailableShadowEligibilityVerifier()
         )
@@ -1096,7 +1378,12 @@ class ModelLifecycle:
         )
         if report != bundle.evaluation_report:
             raise LifecycleConflict("evaluation_report_invalid")
-        self._evaluation_report_repository.put(report)
+        try:
+            self._persist_candidate_artifacts(bundle)
+            self._evaluation_report_repository.put(report)
+        except (OSError, RuntimeError, TypeError, ValueError) as error:
+            raise LifecycleConflict("candidate_evidence_persistence_failed") from error
+        formal_qualification = self._formal_qualification_is_valid(bundle)
         event = self._store.append(
             command_id=command.command_id,
             model_family_id=bundle.model_family_id,
@@ -1121,7 +1408,12 @@ class ModelLifecycle:
                 "class_prior_equal_cell_macro_f1": (report.class_prior_equal_cell_macro_f1),
                 "logistic_equal_cell_macro_f1": report.logistic_equal_cell_macro_f1,
                 "fold_count": bundle.fold_manifest.fold_count,
-                "formal_qualification": bundle.formal_qualification,
+                "formal_qualification": formal_qualification,
+                "qualification_evidence_id": (
+                    bundle.qualification_evidence.qualification_evidence_id
+                    if formal_qualification and bundle.qualification_evidence is not None
+                    else None
+                ),
             },
             occurred_at=command.occurred_at,
         )
@@ -1165,13 +1457,20 @@ class ModelLifecycle:
                 or report.cost_manifest_id != batch.cost_manifest_id
                 or report.fold_manifest_id != bundle.fold_manifest.fold_manifest_id
                 or batch.fold_manifest_id != bundle.fold_manifest.fold_manifest_id
+                or not bundle.fold_manifest.is_content_addressed()
                 or bundle.fold_manifest.fold_count != len(bundle.fold_manifest.folds)
                 or bundle.calibrators != bundle.primary_artifact.calibrators
                 or tuple(item.calibrator_id for item in bundle.calibrators)
                 != bundle.primary_artifact.calibrator_ids
                 or len(bundle.calibrators) != 6
-                or not isinstance(bundle.formal_qualification, bool)
-                or (bundle.formal_qualification and intent.execution_purpose != "formal_candidate")
+                or (
+                    bundle.qualification_evidence is not None
+                    and (
+                        intent.execution_purpose != "formal_candidate"
+                        or not bundle.qualification_evidence.is_content_addressed()
+                        or not bundle.qualification_evidence.binds(intent, bundle.fold_manifest)
+                    )
+                )
             ):
                 return False
             for artifact in (*logistic, *class_prior):
@@ -1184,10 +1483,76 @@ class ModelLifecycle:
                     != tuple(item.calibrator_id for item in artifact.calibrators)
                 ):
                     return False
-                _cold_load_model_artifact(artifact)
+                if _cold_load_model_artifact(artifact) != artifact:
+                    return False
         except (AttributeError, KeyError, TypeError, ValueError):
             return False
         return True
+
+    def _formal_qualification_is_valid(self, bundle: CandidateEvidenceBundle) -> bool:
+        evidence = bundle.qualification_evidence
+        if evidence is None:
+            return False
+        try:
+            return self._formal_qualification_verifier.verify(
+                evidence,
+                bundle.training_intent,
+                bundle.fold_manifest,
+            )
+        except Exception:
+            return False
+
+    def _persist_candidate_artifacts(self, bundle: CandidateEvidenceBundle) -> None:
+        artifacts = (*bundle.logistic_artifacts, *bundle.class_prior_artifacts)
+        for artifact in artifacts:
+            self._candidate_artifact_repository.put(
+                artifact.artifact_id,
+                artifact.serialized,
+                object_kind="bootstrap_model_artifact",
+            )
+        self._candidate_artifact_repository.put(
+            bundle.fold_manifest.fold_manifest_id,
+            bundle.fold_manifest.serialized,
+            object_kind="walk_forward_fold_manifest",
+        )
+        if bundle.qualification_evidence is not None:
+            self._candidate_artifact_repository.put(
+                bundle.qualification_evidence.qualification_evidence_id,
+                bundle.qualification_evidence.serialized,
+                object_kind="formal_candidate_qualification",
+            )
+        for artifact in artifacts:
+            resolved = self._candidate_artifact_repository.resolve(artifact.artifact_id)
+            if (
+                resolved is None
+                or ModelArtifact.from_serialized(artifact.artifact_id, resolved) != artifact
+            ):
+                raise ValueError("candidate_model_artifact_unresolvable")
+        fold_serialized = self._candidate_artifact_repository.resolve(
+            bundle.fold_manifest.fold_manifest_id
+        )
+        if (
+            fold_serialized is None
+            or type(bundle.fold_manifest).from_serialized(
+                bundle.fold_manifest.fold_manifest_id,
+                fold_serialized,
+            )
+            != bundle.fold_manifest
+        ):
+            raise ValueError("candidate_fold_manifest_unresolvable")
+        if bundle.qualification_evidence is not None:
+            qualification_serialized = self._candidate_artifact_repository.resolve(
+                bundle.qualification_evidence.qualification_evidence_id
+            )
+            if (
+                qualification_serialized is None
+                or type(bundle.qualification_evidence).from_serialized(
+                    bundle.qualification_evidence.qualification_evidence_id,
+                    qualification_serialized,
+                )
+                != bundle.qualification_evidence
+            ):
+                raise ValueError("candidate_qualification_evidence_unresolvable")
 
     def _evaluate_bootstrap(self, command: EvaluateBootstrapCandidate) -> LifecycleResult:
         candidate = self._candidate(command.model_family_id, command.candidate_id)
@@ -1355,34 +1720,18 @@ class ModelLifecycle:
         effective_decision: Literal["approved", "rejected"] = (
             "rejected" if invalidated_reason is not None else "approved"
         )
-        decision_payload = {
-            "candidate_id": command.candidate_id,
-            "artifact_id": command.artifact_id,
-            "evaluation_report_id": command.evaluation_report_id,
-            "policy_version_id": command.policy_version_id,
-            "approval_policy_version_id": self._approval_policy.policy_version_id,
-            "approval_mode": self._approval_policy.approval_mode,
-            "approval_policy_owner_principal_id": self._approval_policy.owner_principal_id,
-            "independent_review": recorded_independent_review,
-            "approver_id": command.approver_id,
-            "requested_decision": command.decision,
-            "decision": effective_decision,
-            "reason": command.reason,
-            "expected_assignment": command.expected_assignment,
-            "expires_at": expires_at.isoformat(),
-            "invalidated_reason": invalidated_reason,
-        }
-        decision = ApprovalDecision(
-            approval_decision_id=_content_id("approval_decision", decision_payload),
+        decision = ApprovalDecision.create(
             candidate_id=command.candidate_id,
             artifact_id=command.artifact_id,
             evaluation_report_id=command.evaluation_report_id,
             policy_version_id=command.policy_version_id,
+            gate_decision_id=cast(str, gate["gate_decision_id"]),
             approval_policy_version_id=self._approval_policy.policy_version_id,
             approval_mode=self._approval_policy.approval_mode,
             approval_policy_owner_principal_id=self._approval_policy.owner_principal_id,
             independent_review=recorded_independent_review,
             approver_id=command.approver_id,
+            requested_decision=command.decision,
             decision=effective_decision,
             reason=command.reason,
             expected_assignment=command.expected_assignment,
@@ -1394,10 +1743,7 @@ class ModelLifecycle:
             model_family_id=command.model_family_id,
             expected_version=command.expected_version,
             event_kind="ApprovalDecisionRecorded",
-            payload={
-                **decision_payload,
-                "approval_decision_id": decision.approval_decision_id,
-            },
+            payload=decision.to_payload(),
             occurred_at=command.occurred_at,
         )
         return LifecycleResult(
@@ -1419,41 +1765,22 @@ class ModelLifecycle:
             return None
         if existing.event_kind != "ApprovalDecisionRecorded":
             raise LifecycleConflict("command_id_payload_conflict")
-        payload = json.loads(existing.payload_json)
-        submitted = {
-            "candidate_id": command.candidate_id,
-            "artifact_id": command.artifact_id,
-            "evaluation_report_id": command.evaluation_report_id,
-            "policy_version_id": command.policy_version_id,
-            "approver_id": command.approver_id,
-            "requested_decision": command.decision,
-            "reason": command.reason,
-            "expected_assignment": command.expected_assignment,
-        }
-        if any(payload.get(field) != value for field, value in submitted.items()):
-            raise LifecycleConflict("command_id_payload_conflict")
         try:
-            decision = ApprovalDecision(
-                approval_decision_id=str(payload["approval_decision_id"]),
-                candidate_id=str(payload["candidate_id"]),
-                artifact_id=str(payload["artifact_id"]),
-                evaluation_report_id=str(payload["evaluation_report_id"]),
-                policy_version_id=str(payload["policy_version_id"]),
-                approval_policy_version_id=str(payload["approval_policy_version_id"]),
-                approval_mode=cast(ApprovalMode, payload["approval_mode"]),
-                approval_policy_owner_principal_id=cast(
-                    str | None, payload["approval_policy_owner_principal_id"]
-                ),
-                independent_review=cast(bool, payload["independent_review"]),
-                approver_id=str(payload["approver_id"]),
-                decision=cast(Literal["approved", "rejected"], payload["decision"]),
-                reason=str(payload["reason"]),
-                expected_assignment=str(payload["expected_assignment"]),
-                expires_at=datetime.fromisoformat(str(payload["expires_at"])),
-                invalidated_reason=cast(str | None, payload["invalidated_reason"]),
-            )
+            decision = ApprovalDecision.from_payload(json.loads(existing.payload_json))
         except (KeyError, TypeError, ValueError) as error:
             raise LifecycleConflict("command_id_payload_conflict") from error
+        if (
+            not decision.matches_policy(self._approval_policy)
+            or decision.candidate_id != command.candidate_id
+            or decision.artifact_id != command.artifact_id
+            or decision.evaluation_report_id != command.evaluation_report_id
+            or decision.policy_version_id != command.policy_version_id
+            or decision.approver_id != command.approver_id
+            or decision.requested_decision != command.decision
+            or decision.reason != command.reason
+            or decision.expected_assignment != command.expected_assignment
+        ):
+            raise LifecycleConflict("command_id_payload_conflict")
         return LifecycleResult(
             status="approved" if decision.decision == "approved" else "approval_rejected",
             version=existing.version,
@@ -1465,6 +1792,21 @@ class ModelLifecycle:
             if event.event_kind != "ApprovalDecisionRecorded":
                 continue
             payload = json.loads(event.payload_json)
+            if isinstance(payload, dict) and "approval_decision_id" in payload:
+                try:
+                    decision = ApprovalDecision.from_payload(payload)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    decision.candidate_id == command.candidate_id
+                    and decision.artifact_id == command.artifact_id
+                    and decision.evaluation_report_id == command.evaluation_report_id
+                    and decision.policy_version_id == command.policy_version_id
+                    and decision.requested_decision == "rejected"
+                    and decision.invalidated_reason == "approver_rejected"
+                ):
+                    return True
+                continue
             if (
                 payload.get("candidate_id") == command.candidate_id
                 and payload.get("artifact_id") == command.artifact_id
@@ -1496,13 +1838,20 @@ class ModelLifecycle:
 
     def _record_shadow(self, command: RecordShadowEod) -> LifecycleResult:
         candidate = self._candidate(command.model_family_id, command.candidate_id)
-        approval = self._current_approval(command.model_family_id, command.candidate_id)
+        approval_payload = self._current_approval(command.model_family_id, command.candidate_id)
+        approval: ApprovalDecision | None = None
+        approval_evidence_invalid = False
+        if "approval_decision_id" in approval_payload:
+            try:
+                approval = ApprovalDecision.from_payload(approval_payload)
+            except (TypeError, ValueError):
+                approval_evidence_invalid = True
         try:
-            self._passed_gate(command.model_family_id, command.candidate_id)
+            _, current_gate = self._passed_gate(command.model_family_id, command.candidate_id)
             current_gate_passed = True
         except LifecycleConflict:
+            current_gate = None
             current_gate_passed = False
-        expires_at = datetime.fromisoformat(str(approval["expires_at"]))
         evidence = command.evidence
         prior_shadow_events = tuple(
             event
@@ -1513,20 +1862,22 @@ class ModelLifecycle:
         prior_payloads = tuple(json.loads(event.payload_json) for event in prior_shadow_events)
         previous = prior_payloads[-1] if prior_payloads else None
         blocked_reason: str | None = None
-        approval_policy_version_id = approval.get("approval_policy_version_id")
-        if (
-            not isinstance(approval_policy_version_id, str)
-            or not approval_policy_version_id.startswith("sha256:")
-            or len(approval_policy_version_id) != 71
-        ):
+        if approval_evidence_invalid:
+            blocked_reason = "approval_evidence_invalid"
+        elif approval is None:
             blocked_reason = "approval_policy_unbound"
         elif not current_gate_passed:
             blocked_reason = "hard_gate_vetoed"
-        elif approval["decision"] != "approved" or approval["invalidated_reason"] is not None:
+        elif current_gate is None or (
+            approval.gate_decision_id != current_gate.get("gate_decision_id")
+            or approval.policy_version_id != current_gate.get("policy_version_id")
+        ):
+            blocked_reason = "gate_lineage_changed"
+        elif approval.decision != "approved" or approval.invalidated_reason is not None:
             blocked_reason = "approval_not_valid"
-        elif command.occurred_at >= expires_at:
+        elif command.occurred_at >= approval.expires_at:
             blocked_reason = "approval_expired"
-        elif approval["expected_assignment"] != self._current_assignment(command.model_family_id):
+        elif approval.expected_assignment != self._current_assignment(command.model_family_id):
             blocked_reason = "expected_assignment_changed"
         elif not evidence.is_content_addressed():
             blocked_reason = "shadow_evidence_checksum_mismatch"
@@ -1534,9 +1885,10 @@ class ModelLifecycle:
             evidence.candidate_id != command.candidate_id
             or evidence.artifact_id != candidate["artifact_id"]
             or evidence.evaluation_report_id != candidate["evaluation_report_id"]
-            or evidence.approval_decision_id != approval["approval_decision_id"]
-            or evidence.approval_policy_version_id != approval_policy_version_id
-            or evidence.expected_assignment != approval["expected_assignment"]
+            or evidence.gate_decision_id != approval.gate_decision_id
+            or evidence.approval_decision_id != approval.approval_decision_id
+            or evidence.approval_policy_version_id != approval.approval_policy_version_id
+            or evidence.expected_assignment != approval.expected_assignment
         ):
             blocked_reason = "shadow_evidence_binding_mismatch"
         elif set(evidence.markets) != {"XTAI", "XNAS"}:
@@ -1593,6 +1945,7 @@ class ModelLifecycle:
                 "candidate_id": command.candidate_id,
                 "artifact_id": evidence.artifact_id,
                 "evaluation_report_id": evidence.evaluation_report_id,
+                "gate_decision_id": evidence.gate_decision_id,
                 "approval_decision_id": evidence.approval_decision_id,
                 "approval_policy_version_id": evidence.approval_policy_version_id,
                 "expected_assignment": evidence.expected_assignment,
@@ -1732,32 +2085,7 @@ class ModelGovernanceQuery:
                 if gate is not None
                 else {"status": "not_evaluated"}
             ),
-            "approval": (
-                {
-                    "status": ("approved" if approval["decision"] == "approved" else "rejected"),
-                    "approval_policy_version_id": approval.get("approval_policy_version_id"),
-                    "approval_mode": approval.get("approval_mode", "separated_duties"),
-                    "approval_policy_owner_principal_id": approval.get(
-                        "approval_policy_owner_principal_id"
-                    ),
-                    "independent_review": approval.get(
-                        "independent_review",
-                        approval.get("approver_id")
-                        not in {
-                            candidate["intent_initiator"],
-                            candidate["training_executor"],
-                        },
-                    ),
-                }
-                if approval is not None
-                else {
-                    "status": (
-                        "blocked_by_gate"
-                        if gate is not None and gate["status"] == "failed"
-                        else "awaiting_approval"
-                    )
-                }
-            ),
+            "approval": self._approval_projection(approval, candidate, gate),
             "shadow": {"eligible_cycle_count": shadow_count, "required": 5},
             "serving": {
                 "status": "assigned" if assignments else "blocked",
@@ -1778,3 +2106,38 @@ class ModelGovernanceQuery:
             if payload["candidate_id"] == candidate_id:
                 return payload
         return None
+
+    @staticmethod
+    def _approval_projection(
+        approval: dict[str, object] | None,
+        candidate: dict[str, object],
+        gate: dict[str, object] | None,
+    ) -> dict[str, object]:
+        if approval is None:
+            return {
+                "status": (
+                    "blocked_by_gate"
+                    if gate is not None and gate["status"] == "failed"
+                    else "awaiting_approval"
+                )
+            }
+        if "approval_decision_id" in approval:
+            try:
+                decision = ApprovalDecision.from_payload(approval)
+            except (TypeError, ValueError):
+                return {"status": "approval_evidence_invalid"}
+            return {
+                "status": "approved" if decision.decision == "approved" else "rejected",
+                "approval_policy_version_id": decision.approval_policy_version_id,
+                "approval_mode": decision.approval_mode,
+                "approval_policy_owner_principal_id": (decision.approval_policy_owner_principal_id),
+                "independent_review": decision.independent_review,
+            }
+        return {
+            "status": "approved" if approval.get("decision") == "approved" else "rejected",
+            "approval_policy_version_id": None,
+            "approval_mode": "separated_duties",
+            "approval_policy_owner_principal_id": None,
+            "independent_review": approval.get("approver_id")
+            not in {candidate["intent_initiator"], candidate["training_executor"]},
+        }
