@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -15,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from stock_forecasting.content_address import canonical_json
+from stock_forecasting.content_address import canonical_json, canonical_json_bytes, sha256_id
 from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.evaluation_report import EvaluationReport
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
@@ -60,9 +59,9 @@ class HardGateReportArtifact:
             "evaluation_report_id": evaluation_report_id,
             "measurements": [{"name": item.name, "value": item.value} for item in ordered],
         }
-        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        serialized = canonical_json_bytes(payload)
         return cls(
-            artifact_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
+            artifact_id=sha256_id(serialized),
             policy_version_id=policy_version_id,
             evaluation_report_id=evaluation_report_id,
             measurements=ordered,
@@ -242,9 +241,9 @@ class BootstrapGatePolicyVersion:
                 for name, threshold in ordered
             ],
         }
-        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        serialized = canonical_json_bytes(payload)
         return cls(
-            policy_version_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
+            policy_version_id=sha256_id(serialized),
             policy_name=policy_name,
             thresholds=ordered,
             serialized=serialized,
@@ -367,9 +366,9 @@ class ModelApprovalPolicyVersion:
             "approval_mode": approval_mode,
             "owner_principal_id": owner_principal_id,
         }
-        serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        serialized = canonical_json_bytes(payload)
         return cls(
-            policy_version_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
+            policy_version_id=sha256_id(serialized),
             policy_name=policy_name,
             approval_mode=approval_mode,
             owner_principal_id=owner_principal_id,
@@ -1350,6 +1349,11 @@ class ModelLifecycle:
     def _record_shadow(self, command: RecordShadowEod) -> LifecycleResult:
         candidate = self._candidate(command.model_family_id, command.candidate_id)
         approval = self._current_approval(command.model_family_id, command.candidate_id)
+        try:
+            self._passed_gate(command.model_family_id, command.candidate_id)
+            current_gate_passed = True
+        except LifecycleConflict:
+            current_gate_passed = False
         expires_at = datetime.fromisoformat(str(approval["expires_at"]))
         evidence = command.evidence
         prior_shadow_events = tuple(
@@ -1368,6 +1372,8 @@ class ModelLifecycle:
             or len(approval_policy_version_id) != 71
         ):
             blocked_reason = "approval_policy_unbound"
+        elif not current_gate_passed:
+            blocked_reason = "hard_gate_vetoed"
         elif approval["decision"] != "approved" or approval["invalidated_reason"] is not None:
             blocked_reason = "approval_not_valid"
         elif command.occurred_at >= expires_at:

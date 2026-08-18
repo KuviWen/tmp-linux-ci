@@ -128,6 +128,7 @@ class ForecastLab:
     _markets: tuple[Market, ...] = ("XTAI", "XNAS")
     _horizons: tuple[Horizon, ...] = (1, 5, 20)
     _labels: tuple[TrendLabel, ...] = ("up", "flat", "down")
+    _minimum_joint_statistical_test_quarters = 6
 
     def __init__(
         self,
@@ -152,6 +153,11 @@ class ForecastLab:
         fold_manifest = self._build_fold_manifest(intent.feature_batch.rows)
         if fold_manifest is None:
             return self._blocked("insufficient_fold_history")
+        if (
+            intent.execution_purpose == "formal_candidate"
+            and not self._has_statistical_fold_support(fold_manifest)
+        ):
+            return self._blocked("insufficient_statistical_support")
         final_lineages = tuple(
             replace(lineage, fold_manifest_id=fold_manifest.fold_manifest_id)
             for lineage in intent.feature_batch.historical_lineage
@@ -307,6 +313,14 @@ class ForecastLab:
                 if labels != set(self._labels):
                     return False
         return True
+
+    def _has_statistical_fold_support(self, fold_manifest: FoldManifest) -> bool:
+        quarters_by_market = {
+            market: {fold.test_quarter for fold in fold_manifest.folds if fold.market == market}
+            for market in self._markets
+        }
+        joint_quarters = set.intersection(*(quarters_by_market[market] for market in self._markets))
+        return len(joint_quarters) >= self._minimum_joint_statistical_test_quarters
 
     def _build_fold_manifest(self, rows: tuple[FeatureRow, ...]) -> FoldManifest | None:
         all_dates = sorted({row.session_date for row in rows if row.session_date is not None})

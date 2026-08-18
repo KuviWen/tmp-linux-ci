@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from math import isfinite
 
-from stock_forecasting.content_address import canonical_json
+from stock_forecasting.content_address import canonical_json_bytes, sha256_id
 
 
 @dataclass(frozen=True)
@@ -55,9 +54,9 @@ class EvaluationReport:
             "cost_manifest_id": cost_manifest_id,
             "fold_manifest_id": fold_manifest_id,
         }
-        serialized = canonical_json(payload).encode("utf-8")
+        serialized = canonical_json_bytes(payload)
         return cls(
-            evaluation_report_id=f"sha256:{hashlib.sha256(serialized).hexdigest()}",
+            evaluation_report_id=sha256_id(serialized),
             class_prior_equal_cell_macro_f1=class_prior_equal_cell_macro_f1,
             logistic_equal_cell_macro_f1=logistic_equal_cell_macro_f1,
             improvement_percentage_points=improvement,

@@ -854,6 +854,23 @@ def test_model_approval_policy_loader_rejects_unknown_shape_and_stale_id() -> No
         ModelApprovalPolicyVersion.from_serialized("sha256:stale", policy.serialized)
 
 
+def test_governance_artifact_identity_uses_canonical_utf8_bytes() -> None:
+    policy = ModelApprovalPolicyVersion.create(
+        policy_name="單一擁有者核准",
+        approval_mode="owner_operated",
+        owner_principal_id="擁有者甲",
+    )
+
+    assert policy.serialized == bytes(
+        '{"approval_mode":"owner_operated","owner_principal_id":"擁有者甲",'
+        '"policy_name":"單一擁有者核准"}',
+        "utf-8",
+    )
+    assert policy.policy_version_id == (
+        "sha256:d20a8e062af65d11c144439d7ea053f42d5daef4165b57dced4debf8db627d37"
+    )
+
+
 def test_governance_query_preserves_honest_disclosure_for_legacy_approvals() -> None:
     store = InMemoryLifecycleStore()
     lifecycle = _verified_lifecycle(store)
@@ -1231,6 +1248,42 @@ def test_expired_approval_blocks_shadow_and_preserves_failure_evidence() -> None
     assert blocked.status == "shadow_blocked"
     assert blocked.shadow_evidence is not None
     assert blocked.shadow_evidence.blocked_reason == "approval_expired"
+    assert store.events("family-shadow")[-1].event_kind == "ShadowEodBlocked"
+
+
+def test_later_hard_gate_veto_invalidates_approval_before_shadow() -> None:
+    lifecycle, store = _approved_lifecycle()
+    veto = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-shadow-later-veto",
+            model_family_id="family-shadow",
+            candidate_id="candidate-shadow",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates(
+                "candidate-shadow",
+                overrides={"security.critical_finding_count": 1.0},
+            ),
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 2, 30, tzinfo=UTC),
+        )
+    )
+
+    blocked = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-after-later-veto",
+            model_family_id="family-shadow",
+            candidate_id="candidate-shadow",
+            evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+            expected_version=4,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert veto.status == "gate_failed"
+    assert blocked.status == "shadow_blocked"
+    assert blocked.shadow_evidence is not None
+    assert blocked.shadow_evidence.blocked_reason == "hard_gate_vetoed"
+    assert blocked.shadow_evidence.eligible_cycle_count == 0
     assert store.events("family-shadow")[-1].event_kind == "ShadowEodBlocked"
 
 

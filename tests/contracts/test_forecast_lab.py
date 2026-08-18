@@ -61,6 +61,35 @@ def test_forecast_lab_blocks_candidate_when_class_support_is_incomplete() -> Non
     assert outcome.candidate_bundle is None
 
 
+def test_formal_candidate_requires_six_joint_statistical_test_quarters() -> None:
+    batch = engineering_model_history()
+    five_quarters = replace(
+        batch,
+        feature_batch_id="feature-batch-five-quarters",
+        rows=tuple(
+            row
+            for row in batch.rows
+            if row.session_date is not None and row.session_date < date(2024, 4, 1)
+        ),
+    )
+    intent = TrainingIntentRef(
+        training_intent_id="intent-insufficient-statistical-support",
+        model_family_id="dual-market-price-baseline-v1",
+        initiated_by="model-operator-a",
+        executed_by="model-operator-b",
+        created_at=datetime(2026, 8, 17, tzinfo=UTC),
+        feature_batch=five_quarters,
+        preregistered_seeds=(17, 29, 43),
+        execution_purpose="formal_candidate",
+    )
+
+    outcome = ForecastLab().develop(intent)
+
+    assert outcome.status == "blocked"
+    assert outcome.blocked_reasons == ("insufficient_statistical_support",)
+    assert outcome.candidate_bundle is None
+
+
 def test_forecast_lab_builds_reproducible_dual_market_bootstrap_evidence() -> None:
     intent = TrainingIntentRef(
         training_intent_id="intent-engineering-success",

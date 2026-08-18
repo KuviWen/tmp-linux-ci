@@ -13,6 +13,14 @@ def canonical_json(payload: object) -> str:
     )
 
 
+def canonical_json_bytes(payload: object) -> bytes:
+    return canonical_json(payload).encode("utf-8")
+
+
+def sha256_id(content: bytes) -> str:
+    return f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
 def content_id(kind: str, payload: object) -> str:
-    serialized = canonical_json(payload).encode("utf-8")
-    return f"sha256:{hashlib.sha256(kind.encode() + serialized).hexdigest()}"
+    serialized = canonical_json_bytes(payload)
+    return sha256_id(kind.encode() + serialized)
