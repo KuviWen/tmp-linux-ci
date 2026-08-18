@@ -7,7 +7,11 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
+from getpass import getpass
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 from stock_forecasting.acceptance import (
     run_ticket_01,
@@ -21,6 +25,7 @@ from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
     build_fixture_authorization_policy,
     build_historical_reconstruction_engineering_authorization_policy,
+    build_pending_rights_operator_authorization_policy,
     build_taiwan_finmind_engineering_authorization_policy,
     build_us_zero_fee_engineering_authorization_policy,
 )
@@ -30,6 +35,7 @@ from stock_forecasting.authorization_repository import (
     TICKET_07_ENGINEERING_POLICY_SET,
     TICKET_08_ENGINEERING_POLICY_SET,
     TICKET_09_ENGINEERING_POLICY_SET,
+    TICKET_09_OWNER_OPERATOR_POLICY_SET,
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
 )
@@ -49,6 +55,16 @@ def _instant(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise argparse.ArgumentTypeError("information cutoff must include a timezone")
     return parsed
+
+
+def _local_key_lifetime_hours(value: str) -> int:
+    try:
+        hours = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("lifetime hours must be an integer") from error
+    if not 1 <= hours <= 720:
+        raise argparse.ArgumentTypeError("lifetime hours must be between 1 and 720")
+    return hours
 
 
 def _container_image_digest_from_environment() -> str | None:
@@ -227,6 +243,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     local_key_init.add_argument("--issued-at", type=_instant)
     local_key_init.add_argument("--expires-at", type=_instant)
+    local_key_init.add_argument("--lifetime-hours", type=_local_key_lifetime_hours)
     authorization = commands.add_parser("authorization")
     authorization_commands = authorization.add_subparsers(
         dest="authorization_command", required=True
@@ -257,12 +274,142 @@ def _parser() -> argparse.ArgumentParser:
     ticket_09_authorization = authorization_commands.add_parser("init-ticket-09")
     ticket_09_authorization.add_argument("--database-url", required=True)
     ticket_09_authorization.add_argument("--key-file", type=Path, required=True)
+    operator_authorization = authorization_commands.add_parser("init-operator")
+    operator_authorization.add_argument("--database-url", required=True)
+    operator_authorization.add_argument("--key-file", type=Path, required=True)
+    operator_authorization.add_argument(
+        "--source-adapter-key-file",
+        type=Path,
+        required=True,
+    )
+    operator = commands.add_parser("operator")
+    operator_commands = operator.add_subparsers(dest="operator_command", required=True)
+    source_credentials = operator_commands.add_parser("source-credentials")
+    source_credential_commands = source_credentials.add_subparsers(
+        dest="source_credential_command",
+        required=True,
+    )
+    configure_source_credential = source_credential_commands.add_parser("configure")
+    configure_source_credential.add_argument("--provider", required=True)
+    source_credential_commands.add_parser("status")
+    validate_source_credential = source_credential_commands.add_parser("validate")
+    validate_source_credential.add_argument("--provider", required=True)
     return parser
+
+
+def _operator_request(
+    *,
+    method: str,
+    path: str,
+    payload: dict[str, object] | None = None,
+) -> dict[str, object]:
+    base_url = os.environ.get("OPERATOR_BASE_URL")
+    key_file_text = os.environ.get("LOCAL_API_KEY_FILE")
+    if not base_url:
+        raise RuntimeError("OPERATOR_BASE_URL is required")
+    if not key_file_text:
+        raise RuntimeError("LOCAL_API_KEY_FILE is required")
+    identity = LocalApiKeyIdentity.load(Path(key_file_text))
+    body = (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        if payload is not None
+        else None
+    )
+    request = Request(
+        f"{base_url.rstrip('/')}{path}",
+        data=body,
+        method=method,
+        headers={
+            "Authorization": identity.credential.authorization_header(),
+            "Accept": "application/json",
+            **({"Content-Type": "application/json"} if body is not None else {}),
+        },
+    )
+    with urlopen(request, timeout=10.0) as response:
+        decoded = json.loads(response.read())
+    if not isinstance(decoded, dict):
+        raise RuntimeError("operator_response_invalid")
+    return decoded
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
+    if (
+        arguments.command == "operator"
+        and arguments.operator_command == "source-credentials"
+        and arguments.source_credential_command == "validate"
+    ):
+        try:
+            result = _operator_request(
+                method="POST",
+                path=(
+                    "/api/v1/operations/source-credentials/"
+                    f"{quote(arguments.provider, safe='')}/validations"
+                ),
+            )
+        except HTTPError as error:
+            problem = json.loads(error.read())
+            if not isinstance(problem, dict):
+                raise RuntimeError("operator_response_invalid") from error
+            print(json.dumps(problem, ensure_ascii=False, sort_keys=True))
+            return 3
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
+    if (
+        arguments.command == "operator"
+        and arguments.operator_command == "source-credentials"
+        and arguments.source_credential_command == "status"
+    ):
+        result = _operator_request(
+            method="GET",
+            path="/api/v1/operations/source-credentials",
+        )
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
+    if (
+        arguments.command == "operator"
+        and arguments.operator_command == "source-credentials"
+        and arguments.source_credential_command == "configure"
+    ):
+        listing = _operator_request(
+            method="GET",
+            path="/api/v1/operations/source-credentials",
+        )
+        items = listing.get("items")
+        if not isinstance(items, list):
+            raise RuntimeError("operator_source_credential_listing_invalid")
+        provider = next(
+            (
+                item
+                for item in items
+                if isinstance(item, dict) and item.get("provider_id") == arguments.provider
+            ),
+            None,
+        )
+        if provider is None:
+            raise RuntimeError("operator_source_provider_not_found")
+        required_fields = provider.get("required_fields")
+        if not isinstance(required_fields, list) or not all(
+            isinstance(field_name, str) and field_name for field_name in required_fields
+        ):
+            raise RuntimeError("operator_source_credential_contract_invalid")
+        credential_fields = {
+            field_name: getpass(f"{arguments.provider} {field_name}: ")
+            for field_name in required_fields
+        }
+        try:
+            result = _operator_request(
+                method="PUT",
+                path=(
+                    f"/api/v1/operations/source-credentials/{quote(arguments.provider, safe='')}"
+                ),
+                payload={"credential_fields": credential_fields},
+            )
+        finally:
+            credential_fields.clear()
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
     if arguments.command == "acceptance" and arguments.ticket in {
         "ticket-01",
         "ticket-02",
@@ -422,9 +569,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.command == "local-key" and arguments.local_key_command == "init":
         if (arguments.issued_at is None) != (arguments.expires_at is None):
             parser.error("--issued-at and --expires-at must be provided together")
+        if arguments.issued_at is not None and arguments.lifetime_hours is not None:
+            parser.error("--lifetime-hours cannot be combined with explicit times")
         generated_at = datetime.now(UTC)
         issued_at = arguments.issued_at or generated_at
-        expires_at = arguments.expires_at or generated_at + timedelta(hours=24)
+        expires_at = arguments.expires_at or generated_at + timedelta(
+            hours=arguments.lifetime_hours or 24
+        )
         status = "initialized"
         if arguments.path.exists():
             identity = LocalApiKeyIdentity.load(arguments.path)
@@ -440,6 +591,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.principal_classification is not None
                 and identity.context.principal_classification != arguments.principal_classification
             )
+            explicit_lifetime_conflict = arguments.lifetime_hours is not None and (
+                identity.context.expires_at - identity.context.issued_at
+                != timedelta(hours=arguments.lifetime_hours)
+            )
             if (
                 identity.context.owner != arguments.owner
                 or identity.context.environment != arguments.environment
@@ -447,6 +602,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 or explicit_times_conflict
                 or explicit_classes_conflict
                 or explicit_principal_classification_conflict
+                or explicit_lifetime_conflict
                 or identity.context.expires_at <= generated_at
             ):
                 raise RuntimeError("local_api_key_file_conflict")
@@ -563,6 +719,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_fixture_authorization_policy(identity.context),
         )
         print(json.dumps({"status": "initialized", "policy_set_count": 1}, sort_keys=True))
+        return 0
+    if arguments.command == "authorization" and arguments.authorization_command == (
+        "init-operator"
+    ):
+        identity = LocalApiKeyIdentity.load(arguments.key_file)
+        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
+        repository = AuthorizationPolicyRepository(
+            StateStore(arguments.database_url, create_schema=False)
+        )
+        repository.install(
+            TICKET_09_OWNER_OPERATOR_POLICY_SET,
+            build_pending_rights_operator_authorization_policy(identity.context),
+        )
+        repository.install(
+            TICKET_09_OWNER_OPERATOR_POLICY_SET,
+            build_pending_rights_operator_authorization_policy(source_adapter_identity.context),
+        )
+        print(json.dumps({"status": "initialized", "policy_set_count": 2}, sort_keys=True))
         return 0
     return 2
 

@@ -1674,6 +1674,149 @@ def build_historical_reconstruction_engineering_authorization_policy(
     )
 
 
+def build_pending_rights_operator_authorization_policy(
+    context: SecurityContext,
+) -> AuthorizationPolicy:
+    """Authorize local operator controls while leaving live source rights ungranted."""
+    supported_actions: frozenset[AuthorizationAction] = frozenset(
+        {
+            "market_data.collect",
+            "price_research_eligibility.read",
+            "source_credential.read",
+            "source_credential.manage",
+            "model_governance.read",
+            "model_governance.approve",
+        }
+    )
+    actions = supported_actions & context.scopes
+    grant_payload: dict[str, object] = {
+        "principal_id": context.principal_id,
+        "actions": sorted(actions),
+        "environment": context.environment,
+        "valid_from": _instant(context.issued_at),
+        "valid_to": _instant(context.expires_at),
+    }
+    grant = ActionGrant(
+        version_id=_contract_version_id("operator-pending-rights/action-grant", grant_payload),
+        principal_id=context.principal_id,
+        actions=actions,
+        environment=context.environment,
+        valid_from=context.issued_at,
+        valid_to=context.expires_at,
+    )
+    price_actions: frozenset[AuthorizationAction] = (
+        cast(
+            frozenset[AuthorizationAction],
+            frozenset({"price_research_eligibility.read"}),
+        )
+        & actions
+    )
+    credential_actions: frozenset[AuthorizationAction] = (
+        cast(
+            frozenset[AuthorizationAction],
+            frozenset({"source_credential.read", "source_credential.manage"}),
+        )
+        & actions
+    )
+    governance_actions: frozenset[AuthorizationAction] = (
+        cast(
+            frozenset[AuthorizationAction],
+            frozenset({"model_governance.read", "model_governance.approve"}),
+        )
+        & actions
+    )
+    resource_contracts: tuple[
+        tuple[
+            str,
+            frozenset[AuthorizationAction],
+            frozenset[AuthorizationPurpose],
+            DataProtectionClass,
+        ],
+        ...,
+    ] = (
+        (
+            "price-research-eligibility",
+            price_actions,
+            frozenset({"price_research"}),
+            "internal",
+        ),
+        (
+            "source-credential-metadata",
+            credential_actions,
+            frozenset({"source_administration"}),
+            "restricted",
+        ),
+        (
+            "model-governance-ledger",
+            governance_actions,
+            frozenset({"model_governance"}),
+            "internal",
+        ),
+    )
+    source_policies: list[SourcePolicyVersion] = []
+    source_entitlements: list[SourceEntitlement] = []
+    for dataset_id, resource_actions, purposes, protection_class in resource_contracts:
+        if not resource_actions:
+            continue
+        policy_payload: dict[str, object] = {
+            "dataset_id": dataset_id,
+            "allowed_actions": sorted(resource_actions),
+            "purposes": sorted(purposes),
+            "environments": [context.environment],
+            "data_protection_class": protection_class,
+            "resource_states": ["active"],
+            "valid_from": _instant(context.issued_at),
+            "valid_to": _instant(context.expires_at),
+        }
+        source_policies.append(
+            SourcePolicyVersion(
+                version_id=_contract_version_id(
+                    f"operator-pending-rights/{dataset_id}/source-policy",
+                    policy_payload,
+                ),
+                dataset_id=dataset_id,
+                allowed_actions=resource_actions,
+                purposes=purposes,
+                environments=frozenset({context.environment}),
+                data_protection_class=protection_class,
+                resource_states=frozenset({"active"}),
+                valid_from=context.issued_at,
+                valid_to=context.expires_at,
+            )
+        )
+        entitlement_payload: dict[str, object] = {
+            "principal_id": context.principal_id,
+            "dataset_id": dataset_id,
+            "status": "active",
+            "allowed_actions": sorted(resource_actions),
+            "purposes": sorted(purposes),
+            "environments": [context.environment],
+            "valid_from": _instant(context.issued_at),
+            "valid_to": _instant(context.expires_at),
+        }
+        source_entitlements.append(
+            SourceEntitlement(
+                version_id=_contract_version_id(
+                    f"operator-pending-rights/{dataset_id}/source-entitlement",
+                    entitlement_payload,
+                ),
+                principal_id=context.principal_id,
+                dataset_id=dataset_id,
+                status="active",
+                allowed_actions=resource_actions,
+                purposes=purposes,
+                environments=frozenset({context.environment}),
+                valid_from=context.issued_at,
+                valid_to=context.expires_at,
+            )
+        )
+    return AuthorizationPolicy(
+        action_grants=(grant,),
+        source_policies=tuple(source_policies),
+        source_entitlements=tuple(source_entitlements),
+    )
+
+
 def _build_zero_fee_engineering_authorization_policy(
     context: SecurityContext,
     *,

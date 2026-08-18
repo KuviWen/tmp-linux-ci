@@ -12,6 +12,9 @@ from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
 
 settings = RuntimeSettings.from_environment()
 application = settings.build_application()
+fixture_information_cutoff = settings.fixture_information_cutoff
+if fixture_information_cutoff is None:
+    raise RuntimeError("FIXTURE_INFORMATION_CUTOFF is required for the fixture Dagster runtime")
 authorization_acceptance_mode = os.environ.get("AUTHORIZATION_ACCEPTANCE_MODE")
 xtai_trace_id = (
     "trace-p1-trace-auth-01-deployed-dagster-denied"
@@ -24,12 +27,12 @@ xtai_idempotency_key = (
     else "p1-trace-tw-01"
 )
 fixture_command = FixtureEodCommand(
-    information_cutoff=settings.fixture_information_cutoff,
+    information_cutoff=fixture_information_cutoff,
     trace_id=xtai_trace_id,
     idempotency_key=xtai_idempotency_key,
 )
 xnas_fixture_command = FixtureEodCommand(
-    information_cutoff=settings.fixture_information_cutoff,
+    information_cutoff=fixture_information_cutoff,
     trace_id="trace-p1-trace-us-01",
     idempotency_key="p1-trace-us-01",
     market="XNAS",

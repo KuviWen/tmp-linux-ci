@@ -52,6 +52,15 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
         "ticket-09-api",
         "ticket-09-api-ingress",
         "ticket-09-acceptance",
+        "ticket-09-operator-postgres",
+        "ticket-09-operator-migration",
+        "ticket-09-operator-local-key-init",
+        "ticket-09-operator-source-adapter-key-init",
+        "ticket-09-operator-authorization-init",
+        "ticket-09-operator-database-grants",
+        "ticket-09-operator-api",
+        "ticket-09-operator-api-ingress",
+        "ticket-09-operator-cli",
     }
     assert services["postgres"]["image"] == "postgres:17-alpine"
     assert services["postgres"]["environment"] == {
@@ -516,6 +525,117 @@ def test_compose_declares_ticket_09_bootstrap_governance_acceptance() -> None:
     assert acceptance["depends_on"]["ticket-09-api"]["condition"] == "service_healthy"
     assert acceptance["depends_on"]["ticket-09-api-ingress"]["condition"] == ("service_healthy")
     assert "ticket-09-local-key" in compose["volumes"]
+
+
+def test_compose_declares_the_persistent_owner_operator_runtime() -> None:
+    compose_path = REPOSITORY_ROOT / "compose.yaml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    services = compose["services"]
+    profile = ["ticket-09-operator"]
+
+    operator_services = {
+        "ticket-09-operator-postgres",
+        "ticket-09-operator-migration",
+        "ticket-09-operator-local-key-init",
+        "ticket-09-operator-source-adapter-key-init",
+        "ticket-09-operator-authorization-init",
+        "ticket-09-operator-database-grants",
+        "ticket-09-operator-api",
+        "ticket-09-operator-api-ingress",
+        "ticket-09-operator-cli",
+    }
+    assert all(services[name]["profiles"] == profile for name in operator_services)
+
+    postgres = services["ticket-09-operator-postgres"]
+    assert postgres["volumes"] == ["ticket-09-operator-postgres-data:/var/lib/postgresql/data"]
+    assert "ports" not in postgres
+
+    owner_key = services["ticket-09-operator-local-key-init"]
+    assert owner_key["command"][:5] == [
+        "python",
+        "-m",
+        "stock_forecasting.cli",
+        "local-key",
+        "init",
+    ]
+    assert "${OPERATOR_OWNER_PRINCIPAL:-owner-local}" in owner_key["command"]
+    assert {
+        "price_research_eligibility.read",
+        "source_credential.read",
+        "source_credential.manage",
+        "model_governance.read",
+        "model_governance.approve",
+    } <= set(owner_key["command"])
+    assert "market_data.collect" not in owner_key["command"]
+    assert owner_key["command"][owner_key["command"].index("--lifetime-hours") + 1] == "720"
+
+    adapter_key = services["ticket-09-operator-source-adapter-key-init"]
+    assert "market_data.collect" in adapter_key["command"]
+    assert "source_credential.manage" not in adapter_key["command"]
+    assert adapter_key["command"][adapter_key["command"].index("--lifetime-hours") + 1] == ("720")
+
+    authorization = services["ticket-09-operator-authorization-init"]
+    assert "init-operator" in authorization["command"]
+    assert "--source-adapter-key-file" in authorization["command"]
+
+    api = services["ticket-09-operator-api"]
+    assert api["environment"]["RUNTIME_ENVIRONMENT"] == "local"
+    assert api["environment"]["AUTHORIZATION_POLICY_SET_ID"] == ("ticket-09-owner-operator-v1")
+    assert api["environment"]["SOURCE_SECRET_ROOT"] == ("/var/lib/stock-forecasting/source-secrets")
+    assert "FIXTURE_INFORMATION_CUTOFF" not in api["environment"]
+    assert "FIXTURE_COLLECTION_OBSERVED_AT" not in api["environment"]
+    assert api["ports"] == ["127.0.0.1:18009:8080"]
+    assert {
+        "ticket-09-operator-objects:/var/lib/stock-forecasting/objects",
+        "ticket-09-operator-source-secrets:/var/lib/stock-forecasting/source-secrets",
+        "ticket-09-operator-local-key:/run/stock-forecasting:ro",
+        ("ticket-09-operator-source-adapter-key:/run/stock-forecasting-source-adapter:ro"),
+    } <= set(api["volumes"])
+    assert services["ticket-09-operator-api-ingress"]["network_mode"] == (
+        "service:ticket-09-operator-api"
+    )
+
+    operator_cli = services["ticket-09-operator-cli"]
+    assert operator_cli["command"] == [
+        "python",
+        "-m",
+        "stock_forecasting.cli",
+        "operator",
+        "--help",
+    ]
+    assert operator_cli["environment"] == {
+        "OPERATOR_BASE_URL": "http://ticket-09-operator-api:8080",
+        "LOCAL_API_KEY_FILE": "/run/stock-forecasting/local-api-key.json",
+    }
+    assert operator_cli["volumes"] == ["ticket-09-operator-local-key:/run/stock-forecasting:ro"]
+
+    assert {
+        "ticket-09-operator-postgres-data",
+        "ticket-09-operator-objects",
+        "ticket-09-operator-local-key",
+        "ticket-09-operator-source-adapter-key",
+        "ticket-09-operator-source-secrets",
+    } <= set(compose["volumes"])
+    serialized = compose_path.read_text(encoding="utf-8")
+    assert "FINMIND_TOKEN" not in serialized
+    assert "ALPACA_API_KEY" not in serialized
+    assert "ALPACA_API_SECRET" not in serialized
+
+
+def test_operator_runbook_targets_only_the_operator_dependency_tree() -> None:
+    runbook = (REPOSITORY_ROOT / "docs" / "operations" / "ticket-09-ac5-7-runbook.md").read_text(
+        encoding="utf-8"
+    )
+    project = "docker compose -p stock-forecasting-ticket-09-operator"
+
+    assert (
+        f"{project} --profile ticket-09-operator up -d --build --wait ticket-09-operator-cli"
+    ) in runbook
+    assert (
+        f"{project} --profile ticket-09-operator up -d --wait ticket-09-operator-cli"
+    ) in runbook
+    assert "HTTP 403 `authorization_denied`" in runbook
+    assert "Compose wrapper 應回傳非零" in runbook
 
 
 def test_container_build_is_pinned_non_root_and_uses_a_lock_file() -> None:

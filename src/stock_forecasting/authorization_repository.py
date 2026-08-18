@@ -37,6 +37,7 @@ TICKET_06_FINMIND_ENGINEERING_POLICY_SET = "ticket-06-finmind-zero-fee-engineeri
 TICKET_07_ENGINEERING_POLICY_SET = "ticket-07-us-zero-fee-engineering-v1"
 TICKET_08_ENGINEERING_POLICY_SET = "ticket-08-historical-reconstruction-engineering-v1"
 TICKET_09_ENGINEERING_POLICY_SET = "ticket-09-bootstrap-governance-engineering-v1"
+TICKET_09_OWNER_OPERATOR_POLICY_SET = "ticket-09-owner-operator-v1"
 
 
 def _parse_instant(value: object) -> datetime:

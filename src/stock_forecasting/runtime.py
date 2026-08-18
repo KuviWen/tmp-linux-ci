@@ -32,8 +32,8 @@ class RuntimeSettings:
     database_url: str
     object_root: Path
     source_secret_root: Path
-    fixture_information_cutoff: datetime
-    fixture_collection_observed_at: datetime
+    fixture_information_cutoff: datetime | None
+    fixture_collection_observed_at: datetime | None
     runtime_environment: RuntimeEnvironment
     public_bind_host: str
     local_api_key_mode: Literal["disabled", "enabled"]
@@ -58,17 +58,25 @@ class RuntimeSettings:
             raise RuntimeError("DATABASE_URL is required")
         if not object_root:
             raise RuntimeError("OBJECT_ROOT is required")
-        if not cutoff_text:
-            raise RuntimeError("FIXTURE_INFORMATION_CUTOFF is required")
-        if not observed_at_text:
+        if cutoff_text and not observed_at_text:
             raise RuntimeError("FIXTURE_COLLECTION_OBSERVED_AT is required")
+        if observed_at_text and not cutoff_text:
+            raise RuntimeError("FIXTURE_INFORMATION_CUTOFF is required")
         if not authorization_policy_set_id:
             raise RuntimeError("AUTHORIZATION_POLICY_SET_ID is required")
-        cutoff = datetime.fromisoformat(cutoff_text.replace("Z", "+00:00"))
-        observed_at = datetime.fromisoformat(observed_at_text.replace("Z", "+00:00"))
-        if cutoff.tzinfo is None:
+        cutoff = (
+            datetime.fromisoformat(cutoff_text.replace("Z", "+00:00"))
+            if cutoff_text is not None
+            else None
+        )
+        observed_at = (
+            datetime.fromisoformat(observed_at_text.replace("Z", "+00:00"))
+            if observed_at_text is not None
+            else None
+        )
+        if cutoff is not None and cutoff.tzinfo is None:
             raise RuntimeError("FIXTURE_INFORMATION_CUTOFF must include a timezone")
-        if observed_at.tzinfo is None:
+        if observed_at is not None and observed_at.tzinfo is None:
             raise RuntimeError("FIXTURE_COLLECTION_OBSERVED_AT must include a timezone")
         if environment_text not in {"local", "development", "test", "staging", "production"}:
             raise RuntimeError("RUNTIME_ENVIRONMENT is invalid")
@@ -100,8 +108,10 @@ class RuntimeSettings:
                 if source_secret_root is not None
                 else Path(object_root).parent / "source-secrets"
             ),
-            fixture_information_cutoff=cutoff.astimezone(UTC),
-            fixture_collection_observed_at=observed_at.astimezone(UTC),
+            fixture_information_cutoff=(cutoff.astimezone(UTC) if cutoff is not None else None),
+            fixture_collection_observed_at=(
+                observed_at.astimezone(UTC) if observed_at is not None else None
+            ),
             runtime_environment=cast(RuntimeEnvironment, environment_text),
             public_bind_host=public_bind_host,
             local_api_key_mode=cast(Literal["disabled", "enabled"], local_api_key_mode_text),

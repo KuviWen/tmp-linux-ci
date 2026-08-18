@@ -230,6 +230,39 @@ def test_local_key_cli_defaults_to_a_fresh_short_lived_key(
     ]
 
 
+def test_local_key_cli_supports_a_bounded_thirty_day_operator_identity(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    key_file = tmp_path / "run" / "operator-api-key.json"
+    arguments = [
+        "local-key",
+        "init",
+        "--path",
+        str(key_file),
+        "--owner",
+        "owner-local",
+        "--environment",
+        "local",
+        "--scope",
+        "source_credential.manage",
+        "--lifetime-hours",
+        "720",
+    ]
+
+    return_code = main(arguments)
+    reused_return_code = main(arguments)
+    identity = LocalApiKeyIdentity.load(key_file)
+
+    assert return_code == 0
+    assert reused_return_code == 0
+    assert identity.context.expires_at - identity.context.issued_at == timedelta(days=30)
+    assert capsys.readouterr().out.splitlines() == [
+        '{"status": "initialized"}',
+        '{"status": "existing"}',
+    ]
+
+
 def test_active_grant_entitlement_and_policy_allow_fixture_pipeline() -> None:
     now = datetime(2026, 8, 14, 1, 0, tzinfo=UTC)
     credential, verifier = LocalApiKeyVerifier.issue(

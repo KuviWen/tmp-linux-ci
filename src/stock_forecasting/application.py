@@ -480,7 +480,7 @@ def build_application(
     *,
     database_url: str,
     object_root: Path,
-    observed_at: datetime,
+    observed_at: datetime | None,
     relay_fault: RelayFault | None = None,
     event_compatibility: EventCompatibility | None = None,
     relay_clock: RelayClock | None = None,

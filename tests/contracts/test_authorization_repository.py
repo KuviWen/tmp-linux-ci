@@ -295,3 +295,75 @@ def test_ticket_07_authorization_init_installs_zero_fee_and_credential_contracts
         "alpaca-us-stock-bars",
         "alpaca-us-trading-calendar-v2",
     }
+
+
+def test_operator_authorization_init_installs_owner_controls_and_pending_source_rights(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    now = datetime(2026, 8, 18, 8, 0, tzinfo=UTC)
+    owner = LocalApiKeyIdentity.issue(
+        owner="owner-local",
+        environment="local",
+        scopes={
+            "price_research_eligibility.read",
+            "source_credential.read",
+            "source_credential.manage",
+            "model_governance.read",
+            "model_governance.approve",
+        },
+        issued_at=now,
+        expires_at=now.replace(day=19),
+        data_protection_classes={"internal", "licensed", "restricted", "secret"},
+        principal_classification="individual_non_commercial",
+    )
+    owner_key_file = tmp_path / "owner-api-key.json"
+    owner.save(owner_key_file)
+    source_adapter = LocalApiKeyIdentity.issue(
+        owner="owner-local-source-adapter",
+        environment="local",
+        scopes={"market_data.collect"},
+        issued_at=now,
+        expires_at=now.replace(day=19),
+        data_protection_classes={"licensed", "secret"},
+        principal_classification="individual_non_commercial",
+    )
+    source_adapter_key_file = tmp_path / "source-adapter-api-key.json"
+    source_adapter.save(source_adapter_key_file)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'operator-authorization.db'}"
+    StateStore(database_url, create_schema=True)
+
+    exit_code = main(
+        [
+            "authorization",
+            "init-operator",
+            "--database-url",
+            database_url,
+            "--key-file",
+            str(owner_key_file),
+            "--source-adapter-key-file",
+            str(source_adapter_key_file),
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == '{"policy_set_count": 2, "status": "initialized"}\n'
+    repository = AuthorizationPolicyRepository(StateStore(database_url, create_schema=False))
+    policy_set_id = "ticket-09-owner-operator-v1"
+    owner_policy = repository.get(
+        policy_set_id,
+        principal_id=owner.context.principal_id,
+    )
+    adapter_policy = repository.get(
+        policy_set_id,
+        principal_id=source_adapter.context.principal_id,
+    )
+    assert {item.dataset_id for item in owner_policy.source_policies} == {
+        "price-research-eligibility",
+        "source-credential-metadata",
+        "model-governance-ledger",
+    }
+    assert owner_policy.action_grants[0].actions == owner.context.scopes
+    assert adapter_policy.action_grants[0].actions == frozenset({"market_data.collect"})
+    assert adapter_policy.source_policies == ()
+    assert adapter_policy.source_entitlements == ()

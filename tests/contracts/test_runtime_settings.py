@@ -4,10 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from stock_forecasting.authorization import LocalApiKeyIdentity
+from stock_forecasting.authorization import (
+    LocalApiKeyIdentity,
+    build_pending_rights_operator_authorization_policy,
+)
 from stock_forecasting.authorization_repository import (
     FIXTURE_ACTIVE_POLICY_SET,
     FIXTURE_REVOKED_POLICY_SET,
+    TICKET_09_OWNER_OPERATOR_POLICY_SET,
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
 )
@@ -43,6 +47,70 @@ def test_runtime_requires_a_platform_owned_fixture_observation_instant(
 
     with pytest.raises(RuntimeError, match="FIXTURE_COLLECTION_OBSERVED_AT is required"):
         RuntimeSettings.from_environment()
+
+
+def test_operator_runtime_does_not_require_fixture_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 18, 8, 0, tzinfo=UTC)
+    owner = LocalApiKeyIdentity.issue(
+        owner="owner-local",
+        environment="local",
+        scopes={
+            "price_research_eligibility.read",
+            "source_credential.read",
+            "source_credential.manage",
+            "model_governance.read",
+            "model_governance.approve",
+        },
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"internal", "licensed", "restricted", "secret"},
+        principal_classification="individual_non_commercial",
+    )
+    owner_key_file = tmp_path / "run" / "owner-api-key.json"
+    owner.save(owner_key_file)
+    source_adapter = LocalApiKeyIdentity.issue(
+        owner="owner-local-source-adapter",
+        environment="local",
+        scopes={"market_data.collect"},
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"licensed", "secret"},
+        principal_classification="individual_non_commercial",
+    )
+    source_adapter_key_file = tmp_path / "run" / "source-adapter-api-key.json"
+    source_adapter.save(source_adapter_key_file)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'operator-runtime.db'}"
+    repository = AuthorizationPolicyRepository(StateStore(database_url, create_schema=True))
+    repository.install(
+        TICKET_09_OWNER_OPERATOR_POLICY_SET,
+        build_pending_rights_operator_authorization_policy(owner.context),
+    )
+    repository.install(
+        TICKET_09_OWNER_OPERATOR_POLICY_SET,
+        build_pending_rights_operator_authorization_policy(source_adapter.context),
+    )
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("OBJECT_ROOT", str(tmp_path / "objects"))
+    monkeypatch.setenv("SOURCE_SECRET_ROOT", str(tmp_path / "source-secrets"))
+    monkeypatch.delenv("FIXTURE_INFORMATION_CUTOFF", raising=False)
+    monkeypatch.delenv("FIXTURE_COLLECTION_OBSERVED_AT", raising=False)
+    monkeypatch.setenv("RUNTIME_ENVIRONMENT", "local")
+    monkeypatch.setenv("PUBLIC_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("LOCAL_API_KEY_MODE", "enabled")
+    monkeypatch.setenv("LOCAL_API_KEY_FILE", str(owner_key_file))
+    monkeypatch.setenv("SOURCE_ADAPTER_API_KEY_FILE", str(source_adapter_key_file))
+    monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", TICKET_09_OWNER_OPERATOR_POLICY_SET)
+
+    settings = RuntimeSettings.from_environment()
+    application = settings.build_application()
+
+    assert settings.fixture_information_cutoff is None
+    assert settings.fixture_collection_observed_at is None
+    assert application.security_context.principal_id == owner.context.principal_id
+    assert application.source_adapter_security_context == source_adapter.context
 
 
 def test_runtime_keeps_observation_time_distinct_from_information_cutoff(
