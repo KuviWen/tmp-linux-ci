@@ -1815,27 +1815,27 @@ def test_five_joint_market_shadows_complete_without_production_assignment() -> N
     lifecycle, store = _approved_lifecycle()
 
     outcome = None
+    last_command = None
     for cycle in range(1, 6):
-        outcome = lifecycle.execute(
-            RecordShadowEod(
-                command_id=f"shadow-{cycle}",
-                model_family_id="family-shadow",
-                candidate_id=_candidate_id("candidate-shadow"),
-                evidence=_shadow_evidence(
+        last_command = RecordShadowEod(
+            command_id=f"shadow-{cycle}",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            evidence=_shadow_evidence(
+                cycle,
+                previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+            ),
+            expected_version=cycle + 2,
+            occurred_at=datetime.combine(
+                _shadow_evidence(
                     cycle,
                     previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
-                ),
-                expected_version=cycle + 2,
-                occurred_at=datetime.combine(
-                    _shadow_evidence(
-                        cycle,
-                        previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
-                    ).eligible_eod_date,
-                    time(3, 0),
-                    tzinfo=UTC,
-                ),
-            )
+                ).eligible_eod_date,
+                time(3, 0),
+                tzinfo=UTC,
+            ),
         )
+        outcome = lifecycle.execute(last_command)
 
     assert outcome is not None
     assert outcome.status == "shadow_complete"
@@ -1843,6 +1843,8 @@ def test_five_joint_market_shadows_complete_without_production_assignment() -> N
     assert outcome.shadow_evidence.eligible_cycle_count == 5
     assert outcome.shadow_evidence.production_history_written is False
     assert store.production_assignments("family-shadow") == ()
+    assert last_command is not None
+    assert lifecycle.execute(last_command) == outcome
 
     duplicate = lifecycle.execute(
         RecordShadowEod(
@@ -1942,6 +1944,78 @@ def test_shadow_checksum_mismatch_is_an_explicit_conflict_without_an_event() -> 
         )
 
     assert len(store.events("family-shadow")) == 3
+
+
+def test_shadow_command_replays_the_original_result_and_rejects_changed_evidence() -> None:
+    lifecycle, store = _approved_lifecycle()
+    command = RecordShadowEod(
+        command_id="shadow-idempotent-replay",
+        model_family_id="family-shadow",
+        candidate_id=_candidate_id("candidate-shadow"),
+        evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+        expected_version=3,
+        occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+    )
+
+    first = lifecycle.execute(command)
+    replay = lifecycle.execute(command)
+
+    assert replay == first
+    assert len(store.events("family-shadow")) == 4
+    with pytest.raises(LifecycleConflict, match="command_id_payload_conflict"):
+        lifecycle.execute(
+            replace(
+                command,
+                evidence=_bound_shadow_evidence(
+                    shadow_run_id="shadow-run-1",
+                    eligible_eod_date=date(2026, 8, 18),
+                    previous_shadow_run_id=None,
+                    cpu_prediction_seconds=419.0,
+                ),
+            )
+        )
+    assert len(store.events("family-shadow")) == 4
+
+
+def test_future_eligible_shadow_date_is_blocked_before_completion() -> None:
+    lifecycle, _ = _approved_lifecycle()
+    for cycle in range(1, 5):
+        lifecycle.execute(
+            RecordShadowEod(
+                command_id=f"shadow-before-future-date-{cycle}",
+                model_family_id="family-shadow",
+                candidate_id=_candidate_id("candidate-shadow"),
+                evidence=_shadow_evidence(
+                    cycle,
+                    previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                ),
+                expected_version=cycle + 2,
+                occurred_at=datetime.combine(
+                    _shadow_evidence(
+                        cycle,
+                        previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                    ).eligible_eod_date,
+                    time(3, 0),
+                    tzinfo=UTC,
+                ),
+            )
+        )
+
+    future = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-future-date",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            evidence=_shadow_evidence(5, previous_shadow_run_id="shadow-run-4"),
+            expected_version=7,
+            occurred_at=datetime(2026, 8, 23, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert future.status == "shadow_blocked"
+    assert future.shadow_evidence is not None
+    assert future.shadow_evidence.eligible_cycle_count == 4
+    assert future.shadow_evidence.blocked_reason == "shadow_eod_not_observed"
 
 
 def test_corrupted_persisted_shadow_evidence_cannot_complete_five_cycles() -> None:

@@ -826,6 +826,7 @@ class ShadowRunRecord:
             or isinstance(eligible_cycle_count, bool)
             or not isinstance(eligible_cycle_count, int)
             or eligible_cycle_count < 0
+            or eligible_cycle_count > 5
             or (
                 blocked_reason is not None
                 and (not isinstance(blocked_reason, str) or not blocked_reason)
@@ -2369,6 +2370,9 @@ class ModelLifecycle:
         raise LifecycleConflict("candidate_gate_not_evaluated")
 
     def _record_shadow(self, command: RecordShadowEod) -> LifecycleResult:
+        replay = self._shadow_replay(command)
+        if replay is not None:
+            return replay
         candidate = self._candidate(command.model_family_id, command.candidate_id)
         evidence = command.evidence
         if not evidence.is_content_addressed():
@@ -2449,6 +2453,8 @@ class ModelLifecycle:
             blocked_reason = "shadow_evidence_binding_mismatch"
         elif set(evidence.markets) != {"XTAI", "XNAS"}:
             blocked_reason = "incomplete_market_shadow"
+        elif command.occurred_at.date() < evidence.eligible_eod_date:
+            blocked_reason = "shadow_eod_not_observed"
         elif not self._is_eligible_shadow_eod(evidence):
             blocked_reason = "shadow_eod_not_eligible"
         elif not self._is_verified_shadow_run(evidence):
@@ -2510,6 +2516,48 @@ class ModelLifecycle:
             ),
             version=event.version,
             shadow_evidence=outcome_evidence,
+        )
+
+    def _shadow_replay(self, command: RecordShadowEod) -> LifecycleResult | None:
+        existing = next(
+            (
+                event
+                for event in self._store.events(command.model_family_id)
+                if event.command_id == command.command_id
+            ),
+            None,
+        )
+        if existing is None:
+            return None
+        if existing.event_kind not in {"ShadowEodRecorded", "ShadowEodBlocked"}:
+            raise LifecycleConflict("command_id_payload_conflict")
+        try:
+            record = ShadowRunRecord.from_payload(json.loads(existing.payload_json))
+        except (KeyError, TypeError, ValueError) as error:
+            raise LifecycleConflict("command_id_payload_conflict") from error
+        is_blocked = record.blocked_reason is not None
+        if (
+            record.evidence != command.evidence
+            or record.evidence.candidate_id != command.candidate_id
+            or (existing.event_kind == "ShadowEodBlocked") != is_blocked
+            or (not is_blocked and record.eligible_cycle_count == 0)
+        ):
+            raise LifecycleConflict("command_id_payload_conflict")
+        return LifecycleResult(
+            status=(
+                "shadow_blocked"
+                if is_blocked
+                else "shadow_complete"
+                if record.eligible_cycle_count == 5
+                else "shadow_recorded"
+            ),
+            version=existing.version,
+            shadow_evidence=ShadowEvidence(
+                shadow_run_id=record.evidence.shadow_run_id,
+                candidate_id=record.evidence.candidate_id,
+                eligible_cycle_count=record.eligible_cycle_count,
+                blocked_reason=record.blocked_reason,
+            ),
         )
 
     def _is_eligible_shadow_eod(self, evidence: ShadowRunEvidence) -> bool:
