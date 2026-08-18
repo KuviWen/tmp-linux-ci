@@ -84,6 +84,15 @@ __all__ = [
 ]
 
 
+def _corporate_action_envelope(payload: object) -> dict[str, object] | None:
+    if not isinstance(payload, dict):
+        return None
+    envelope = payload.get("corporate_actions", payload)
+    if not isinstance(envelope, dict):
+        return None
+    return cast(dict[str, object], envelope)
+
+
 def load_candidate_alpaca_reference_graph() -> AlpacaReferenceGraph:
     from stock_forecasting.us_stock_pool import load_us_stock_pool_manifest
 
@@ -555,10 +564,8 @@ class AlpacaLiveContractValidator:
 
     @staticmethod
     def _corporate_action_rows(payload: object, action_type: str) -> object:
-        if not isinstance(payload, dict):
-            return None
-        envelope = payload.get("corporate_actions", payload)
-        if not isinstance(envelope, dict):
+        envelope = _corporate_action_envelope(payload)
+        if envelope is None:
             return None
         return envelope.get(action_type)
 
@@ -1317,10 +1324,8 @@ class AlpacaSourceDecoder:
 
     @staticmethod
     def _action_rows(payload: object) -> list[dict[str, object]]:
-        if not isinstance(payload, dict):
-            raise ValueError("source_provider_schema_invalid")
-        action_groups = payload.get("corporate_actions", payload)
-        if not isinstance(action_groups, dict):
+        action_groups = _corporate_action_envelope(payload)
+        if action_groups is None:
             raise ValueError("source_provider_schema_invalid")
         provider_types = {
             "cash_dividends": "cash_dividend",

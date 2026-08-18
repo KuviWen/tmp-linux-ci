@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -25,6 +26,90 @@ from stock_forecasting.formal_cost_scenario import (
 )
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from tests.modeling_support import engineering_model_history
+
+_FEATURE_SCHEMA_ID = "feature-schema:price-baseline-v1"
+_RUNTIME_ID = "runtime:cpython-3.12-safe-json-v1"
+_CODE_PROVENANCE = "git:ticket-09-test-fixture"
+
+
+def test_develop_requires_the_exact_preregistered_training_intent() -> None:
+    lab = ForecastLab()
+    draft = TrainingIntentRef(
+        training_intent_id="",
+        model_family_id="dual-market-price-baseline-v1",
+        initiated_by="model-operator-a",
+        executed_by="model-operator-b",
+        created_at=datetime(2026, 8, 17, tzinfo=UTC),
+        feature_batch=engineering_model_history(),
+        preregistered_seeds=(17, 29, 43),
+        feature_schema_id="feature-schema:price-baseline-v1",
+        runtime_id="runtime:cpython-3.12-safe-json-v1",
+        code_provenance="git:ticket-09-review-fixture",
+        execution_purpose="engineering_acceptance",
+    )
+    intent = lab.preregister(draft)
+
+    assert intent.training_intent_id.startswith("sha256:")
+    assert intent.feature_batch.feature_batch_id.startswith("sha256:")
+    assert intent.feature_batch.fold_manifest_id.startswith("sha256:")
+    developed = lab.develop(intent)
+    assert developed.status == "developed"
+    assert developed.candidate_bundle is not None
+    artifact_payload = json.loads(developed.candidate_bundle.primary_artifact.serialized)
+    assert artifact_payload["feature_schema_id"] == "feature-schema:price-baseline-v1"
+    assert artifact_payload["runtime_id"] == "runtime:cpython-3.12-safe-json-v1"
+    assert artifact_payload["code_provenance"] == "git:ticket-09-review-fixture"
+
+    tampered_rows = (
+        replace(intent.feature_batch.rows[0], values=(999.0, -999.0)),
+        *intent.feature_batch.rows[1:],
+    )
+    tampered_batch = replace(intent.feature_batch, rows=tampered_rows).with_content_id()
+    replay = lab.develop(replace(intent, feature_batch=tampered_batch))
+
+    assert replay.status == "blocked"
+    assert replay.blocked_reasons == ("training_intent_mismatch",)
+    assert replay.candidate_bundle is None
+
+    changed_code = lab.develop(replace(intent, code_provenance="git:different-code"))
+
+    assert changed_code.status == "blocked"
+    assert changed_code.blocked_reasons == ("training_intent_mismatch",)
+    assert changed_code.candidate_bundle is None
+
+
+@pytest.mark.parametrize(
+    "seeds",
+    (
+        (17, 17, 43),
+        cast(tuple[int, int, int], (17, 29)),
+    ),
+)
+def test_develop_requires_exactly_three_distinct_preregistered_seeds(
+    seeds: tuple[int, int, int],
+) -> None:
+    lab = ForecastLab()
+    intent = lab.preregister(
+        TrainingIntentRef(
+            training_intent_id="",
+            model_family_id="dual-market-price-baseline-v1",
+            initiated_by="model-operator-a",
+            executed_by="model-operator-b",
+            created_at=datetime(2026, 8, 17, tzinfo=UTC),
+            feature_batch=engineering_model_history(),
+            preregistered_seeds=seeds,
+            feature_schema_id=_FEATURE_SCHEMA_ID,
+            runtime_id=_RUNTIME_ID,
+            code_provenance=_CODE_PROVENANCE,
+            execution_purpose="engineering_acceptance",
+        )
+    )
+
+    outcome = lab.develop(intent)
+
+    assert outcome.status == "blocked"
+    assert outcome.blocked_reasons == ("invalid_preregistered_seeds",)
+    assert outcome.candidate_bundle is None
 
 
 def test_forecast_lab_blocks_candidate_when_class_support_is_incomplete() -> None:
@@ -61,6 +146,9 @@ def test_forecast_lab_blocks_candidate_when_class_support_is_incomplete() -> Non
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=batch,
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
     )
 
     outcome = ForecastLab().develop(intent)
@@ -99,10 +187,15 @@ def test_formal_candidate_requires_six_joint_statistical_test_quarters(
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=bounded_history,
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
         execution_purpose="formal_candidate",
     )
 
-    outcome = ForecastLab().develop(intent)
+    lab = ForecastLab()
+    intent = lab.preregister(intent)
+    outcome = lab.develop(intent)
 
     assert outcome.status == "blocked"
     assert outcome.blocked_reasons == (expected_reason,)
@@ -118,10 +211,14 @@ def test_forecast_lab_builds_reproducible_dual_market_bootstrap_evidence() -> No
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
         execution_purpose="engineering_acceptance",
     )
 
-    outcome = ForecastLab().develop(intent)
+    lab = ForecastLab()
+    outcome = lab.develop(lab.preregister(intent))
 
     assert outcome.status == "developed"
     assert outcome.blocked_reasons == ()
@@ -202,6 +299,9 @@ def test_latest_test_quarter_cannot_influence_fitted_artifact_or_calibrators() -
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=original_batch,
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
         execution_purpose="engineering_acceptance",
     )
     changed_rows = tuple(
@@ -215,8 +315,9 @@ def test_latest_test_quarter_cannot_influence_fitted_artifact_or_calibrators() -
         feature_batch=replace(original_batch, rows=changed_rows),
     )
 
-    original = ForecastLab().develop(intent).candidate_bundle
-    changed = ForecastLab().develop(changed_intent).candidate_bundle
+    lab = ForecastLab()
+    original = lab.develop(lab.preregister(intent)).candidate_bundle
+    changed = lab.develop(lab.preregister(changed_intent)).candidate_bundle
 
     assert original is not None
     assert changed is not None
@@ -263,10 +364,14 @@ def test_insufficient_latest_validation_classes_block_all_candidate_artifacts() 
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=replace(batch, rows=rows),
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
         execution_purpose="engineering_acceptance",
     )
 
-    outcome = ForecastLab().develop(intent)
+    lab = ForecastLab()
+    outcome = lab.develop(lab.preregister(intent))
 
     assert outcome.status == "blocked"
     assert outcome.blocked_reasons == ("insufficient_calibration_support",)
@@ -282,9 +387,13 @@ def test_formal_candidate_requires_verified_ticket_08_historical_claim_chain() -
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
     )
 
-    outcome = ForecastLab().develop(intent)
+    lab = ForecastLab()
+    outcome = lab.develop(lab.preregister(intent))
 
     assert outcome.status == "blocked"
     assert outcome.blocked_reasons == ("unverified_source_basis",)
@@ -361,8 +470,12 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains(tmp_path
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=qualified_batch,
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
         historical_claims=tuple(claim_ref(item) for item in lineages),
     )
+    intent = ForecastLab().preregister(intent)
 
     unverified_cost = ForecastLab(
         historical_claim_verifier=VerifiedClaimBoundary(),
@@ -381,14 +494,8 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains(tmp_path
     assert outcome.status == "developed"
     assert outcome.candidate_bundle is not None
     assert outcome.candidate_bundle.formal_qualification is True
-    final_fold_id = outcome.candidate_bundle.fold_manifest.fold_manifest_id
-    final_lineages = tuple(replace(item, fold_manifest_id=final_fold_id) for item in lineages)
-    expected_batch = replace(
-        qualified_batch,
-        fold_manifest_id=final_fold_id,
-        historical_lineage=final_lineages,
-    ).with_content_id()
-    assert verified_lineages == list(final_lineages)
+    expected_batch = intent.feature_batch
+    assert verified_lineages == list(expected_batch.historical_lineage)
     for artifact in (
         outcome.candidate_bundle.logistic_artifacts + outcome.candidate_bundle.class_prior_artifacts
     ):
@@ -404,9 +511,15 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains(tmp_path
         replace(qualified_batch.rows[0], values=(999.0, -999.0)),
         *qualified_batch.rows[1:],
     )
-    tampered = ForecastLab(historical_claim_verifier=VerifiedClaimBoundary()).develop(
-        replace(intent, feature_batch=replace(qualified_batch, rows=tampered_rows))
+    tampered_lab = ForecastLab(historical_claim_verifier=VerifiedClaimBoundary())
+    tampered_intent = tampered_lab.preregister(
+        replace(
+            intent,
+            training_intent_id="",
+            feature_batch=replace(qualified_batch, rows=tampered_rows),
+        )
     )
+    tampered = tampered_lab.develop(tampered_intent)
     assert tampered.status == "blocked"
     assert tampered.blocked_reasons == ("unverified_source_basis",)
 
@@ -433,13 +546,17 @@ def test_verified_claim_ids_cannot_qualify_an_unrelated_feature_batch() -> None:
         created_at=datetime(2026, 8, 17, tzinfo=UTC),
         feature_batch=engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
         historical_claims=(
             HistoricalClaimRef("XTAI", "sha256:claim-xtai"),
             HistoricalClaimRef("XNAS", "sha256:claim-xnas"),
         ),
     )
 
-    outcome = ForecastLab(historical_claim_verifier=PermissiveClaimBoundary()).develop(intent)
+    lab = ForecastLab(historical_claim_verifier=PermissiveClaimBoundary())
+    outcome = lab.develop(lab.preregister(intent))
 
     assert outcome.status == "blocked"
     assert outcome.blocked_reasons == ("unverified_source_basis",)

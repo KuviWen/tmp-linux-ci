@@ -15,6 +15,10 @@ from stock_forecasting.forecasting import (
     TrendLabel,
 )
 
+_FEATURE_SCHEMA_ID = "feature-schema:price-baseline-v1"
+_RUNTIME_ID = "runtime:cpython-3.12-safe-json-v1"
+_CODE_PROVENANCE = "git:ticket-09-test-fixture"
+
 
 def _literal_calibrator(*, temperature: float = 1.0) -> dict[str, object]:
     payload: dict[str, object] = {
@@ -44,6 +48,9 @@ def _literal_logistic_payload() -> dict[str, object]:
         "seed": 17,
         "manifest_ids": ["feature", "source", "label", "fold", "cost"],
         "training_selection_id": "sha256:selection",
+        "feature_schema_id": _FEATURE_SCHEMA_ID,
+        "runtime_id": _RUNTIME_ID,
+        "code_provenance": _CODE_PROVENANCE,
         "normalizers": {
             "XTAI": {
                 "iqrs": [1.0],
@@ -73,10 +80,34 @@ def _literal_class_prior_payload() -> dict[str, object]:
         "seed": 17,
         "manifest_ids": ["feature", "source", "label", "fold", "cost"],
         "training_selection_id": "sha256:selection",
+        "feature_schema_id": _FEATURE_SCHEMA_ID,
+        "runtime_id": _RUNTIME_ID,
+        "code_provenance": _CODE_PROVENANCE,
         "probabilities_by_cell": {"XTAI:1": {"up": 0.5, "flat": 0.25, "down": 0.25}},
         "calibrator_ids": [calibrator["calibrator_id"]],
         "calibrators": [calibrator],
     }
+
+
+@pytest.mark.parametrize(
+    ("payload_factory", "loader"),
+    (
+        (_literal_class_prior_payload, ClassPriorTrendForecaster.load),
+        (_literal_logistic_payload, RegularizedMultinomialLogisticTrendForecaster.load),
+    ),
+)
+@pytest.mark.parametrize("missing_field", ("feature_schema_id", "runtime_id", "code_provenance"))
+def test_offline_loaders_require_complete_artifact_provenance(
+    payload_factory: Callable[[], dict[str, object]],
+    loader: Callable[[bytes], object],
+    missing_field: str,
+) -> None:
+    payload = payload_factory()
+    del payload[missing_field]
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+    with pytest.raises(ValueError, match="artifact_schema_invalid"):
+        loader(serialized)
 
 
 def test_class_prior_artifact_loads_offline_and_predicts_training_priors() -> None:
@@ -98,6 +129,9 @@ def test_class_prior_artifact_loads_offline_and_predicts_training_priors() -> No
         training_row_ids=("row-1", "row-2", "row-3", "row-4"),
         validation_row_ids=(),
         seed=17,
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
     )
 
     artifact = ClassPriorTrendForecaster().train(request)
@@ -137,7 +171,15 @@ def test_class_prior_fits_separate_empirical_priors_per_market_horizon_cell() ->
     )
     batch = FeatureBatch("feature", "source", "label", "fold", "cost", rows)
     artifact = ClassPriorTrendForecaster().train(
-        TrainingRequest(batch, tuple(row.row_id for row in rows), (), 17)
+        TrainingRequest(
+            batch,
+            tuple(row.row_id for row in rows),
+            (),
+            17,
+            _FEATURE_SCHEMA_ID,
+            _RUNTIME_ID,
+            _CODE_PROVENANCE,
+        )
     )
 
     predictions = ClassPriorTrendForecaster.load(artifact.serialized).predict(
@@ -282,6 +324,9 @@ def test_logistic_artifact_loads_offline_and_prediction_is_order_invariant() -> 
         training_row_ids=tuple(row.row_id for row in rows),
         validation_row_ids=(),
         seed=29,
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
     )
 
     artifact = RegularizedMultinomialLogisticTrendForecaster().train(request)
@@ -360,6 +405,9 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
             training_row_ids=tuple(row.row_id for row in taiwan_rows + us_rows + balanced_rows),
             validation_row_ids=(),
             seed=17,
+            feature_schema_id=_FEATURE_SCHEMA_ID,
+            runtime_id=_RUNTIME_ID,
+            code_provenance=_CODE_PROVENANCE,
         )
     )
 
@@ -399,6 +447,9 @@ def test_logistic_offline_artifact_applies_bound_market_horizon_temperature() ->
         manifest_ids=("feature", "source", "label", "fold", "cost"),
         training_selection_id="sha256:selection",
         model_parameters_id="sha256:parameters",
+        feature_schema_id=_FEATURE_SCHEMA_ID,
+        runtime_id=_RUNTIME_ID,
+        code_provenance=_CODE_PROVENANCE,
         serialized=serialized,
         calibrator_ids=(calibrator_ids[0],),
     )

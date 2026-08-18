@@ -1,12 +1,20 @@
 from decimal import Decimal
 from io import BytesIO
-from pathlib import Path
 
 from stock_forecasting.formal_cost_scenario import (
     ObjectFormalCostScenarioVerifier,
     load_conservative_cost_scenario,
 )
-from stock_forecasting.platform.object_repository import FilesystemObjectRepository
+
+
+class MutableCostScenarioRepository:
+    def __init__(self) -> None:
+        self.serialized: bytes | None = None
+
+    def open_by_id(self, object_id: str) -> BytesIO:
+        if self.serialized is None:
+            raise FileNotFoundError(object_id)
+        return BytesIO(self.serialized)
 
 
 def test_packaged_conservative_scenario_preserves_the_approved_cost_formulas() -> None:
@@ -45,9 +53,9 @@ def test_packaged_conservative_scenario_preserves_the_approved_cost_formulas() -
     )
 
 
-def test_object_verifier_only_accepts_the_installed_approved_manifest(tmp_path: Path) -> None:
+def test_object_verifier_only_accepts_the_installed_approved_manifest() -> None:
     scenario = load_conservative_cost_scenario()
-    repository = FilesystemObjectRepository(tmp_path / "governance-objects")
+    repository = MutableCostScenarioRepository()
     verifier = ObjectFormalCostScenarioVerifier(
         repository,
         approved_manifest_ids=frozenset({scenario.cost_manifest_id}),
@@ -55,18 +63,11 @@ def test_object_verifier_only_accepts_the_installed_approved_manifest(tmp_path: 
 
     assert verifier.verify_cost_scenario(scenario.cost_manifest_id) is False
 
-    reference = repository.put_verified(
-        BytesIO(scenario.serialized),
-        expected_checksum=scenario.cost_manifest_id.removeprefix("sha256:"),
-        metadata={"object_kind": "formal_cost_scenario"},
-    )
+    repository.serialized = scenario.serialized
 
-    assert reference.object_id == scenario.cost_manifest_id
     assert verifier.verify_cost_scenario(scenario.cost_manifest_id) is True
     assert verifier.verify_cost_scenario("sha256:" + "0" * 64) is False
 
-    reference_path = tmp_path / "governance-objects" / "sha256"
-    object_path = next(reference_path.rglob(scenario.cost_manifest_id.removeprefix("sha256:")))
-    object_path.write_bytes(scenario.serialized + b" ")
+    repository.serialized = scenario.serialized + b" "
 
     assert verifier.verify_cost_scenario(scenario.cost_manifest_id) is False

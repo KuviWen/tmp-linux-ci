@@ -160,7 +160,8 @@ def run_ticket_09_acceptance(
         evidence_repository=ObjectGateEvidenceRepository(governance_object_repository),
         evaluation_report_repository=ObjectEvaluationReportRepository(governance_object_repository),
     )
-    workflow = BootstrapGovernanceWorkflow(ForecastLab(), lifecycle)
+    lab = ForecastLab()
+    workflow = BootstrapGovernanceWorkflow(lab, lifecycle)
     governance_time = datetime.now(UTC)
     intent = TrainingIntentRef(
         training_intent_id="ticket-09-engineering-intent-v1",
@@ -170,9 +171,13 @@ def run_ticket_09_acceptance(
         created_at=observed_at,
         feature_batch=_engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id="feature-schema:price-baseline-v1",
+        runtime_id="runtime:ticket-09-compose-acceptance-v1",
+        code_provenance="build:ticket-09-compose-acceptance-v1",
         execution_purpose="engineering_acceptance",
     )
-    preview = ForecastLab().develop(intent).candidate_bundle
+    intent = lab.preregister(intent)
+    preview = lab.develop(intent).candidate_bundle
     if preview is None:
         return {"ticket": "09", "status": "failed", "reason": "preview_missing"}
     candidate = workflow.execute(
@@ -205,15 +210,18 @@ def run_ticket_09_acceptance(
         identity=identity,
     )
     read_model = json.loads(rest_text)
+    formal_intent = lab.preregister(
+        replace(
+            intent,
+            training_intent_id="",
+            model_family_id="dual-market-price-baseline-formal-v1",
+            execution_purpose="formal_candidate",
+        )
+    )
     formal = workflow.execute(
         BootstrapGovernanceCommand(
             command_id_prefix="ticket-09-formal-blocked-v1",
-            intent=replace(
-                intent,
-                training_intent_id="ticket-09-formal-blocked-intent-v1",
-                model_family_id="dual-market-price-baseline-formal-v1",
-                execution_purpose="formal_candidate",
-            ),
+            intent=formal_intent,
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=_engineering_hard_gate_evidence(
                 preview.evaluation_report.evaluation_report_id

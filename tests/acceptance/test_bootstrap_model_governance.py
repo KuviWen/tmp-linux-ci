@@ -38,10 +38,15 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
         created_at=now - timedelta(hours=2),
         feature_batch=engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
+        feature_schema_id="feature-schema:price-baseline-v1",
+        runtime_id="runtime:cpython-3.12-safe-json-v1",
+        code_provenance="git:ticket-09-acceptance-fixture",
         execution_purpose="engineering_acceptance",
     )
-    workflow = BootstrapGovernanceWorkflow(ForecastLab(), application.model_lifecycle)
-    preview = ForecastLab().develop(intent).candidate_bundle
+    lab = ForecastLab()
+    intent = lab.preregister(intent)
+    workflow = BootstrapGovernanceWorkflow(lab, application.model_lifecycle)
+    preview = lab.develop(intent).candidate_bundle
     assert preview is not None
     report = passing_hard_gate_report(preview.evaluation_report.evaluation_report_id)
     application.governance_object_repository.put_verified(
@@ -87,15 +92,18 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
     assert "0 / 5" in page.text
     assert application.model_lifecycle_store.production_assignments(intent.model_family_id) == ()
 
+    formal_intent = lab.preregister(
+        replace(
+            intent,
+            training_intent_id="",
+            model_family_id="dual-market-price-baseline-formal-v1",
+            execution_purpose="formal_candidate",
+        )
+    )
     formal = workflow.execute(
         BootstrapGovernanceCommand(
             command_id_prefix="ticket-09-formal-blocked",
-            intent=replace(
-                intent,
-                training_intent_id="intent-ticket-09-formal-blocked",
-                model_family_id="dual-market-price-baseline-formal-v1",
-                execution_purpose="formal_candidate",
-            ),
+            intent=formal_intent,
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=passing_hard_gate_evidence(preview.evaluation_report.evaluation_report_id),
             expected_version=0,
@@ -109,15 +117,18 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
     malformed_rows = (
         replace(intent.feature_batch.rows[0], values=(1.0,)),
     ) + intent.feature_batch.rows[1:]
+    model_failure_intent = lab.preregister(
+        replace(
+            intent,
+            training_intent_id="",
+            model_family_id="dual-market-price-baseline-model-failure-v1",
+            feature_batch=replace(intent.feature_batch, rows=malformed_rows),
+        )
+    )
     model_failure = workflow.execute(
         BootstrapGovernanceCommand(
             command_id_prefix="ticket-09-logistic-failure",
-            intent=replace(
-                intent,
-                training_intent_id="intent-ticket-09-logistic-failure",
-                model_family_id="dual-market-price-baseline-model-failure-v1",
-                feature_batch=replace(intent.feature_batch, rows=malformed_rows),
-            ),
+            intent=model_failure_intent,
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             hard_gates=passing_hard_gate_evidence(preview.evaluation_report.evaluation_report_id),
             expected_version=0,

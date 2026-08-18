@@ -104,6 +104,9 @@ class TrainingRequest:
     training_row_ids: tuple[str, ...]
     validation_row_ids: tuple[str, ...]
     seed: int
+    feature_schema_id: str
+    runtime_id: str
+    code_provenance: str
 
 
 @dataclass(frozen=True)
@@ -128,6 +131,9 @@ class ModelArtifact:
     manifest_ids: tuple[str, str, str, str, str]
     training_selection_id: str
     model_parameters_id: str
+    feature_schema_id: str
+    runtime_id: str
+    code_provenance: str
     serialized: bytes
     calibrator_ids: tuple[str, ...] = ()
     calibrators: tuple[CalibrationEvidence, ...] = ()
@@ -144,6 +150,9 @@ class ModelArtifact:
             manifest_ids=self.manifest_ids,
             training_selection_id=self.training_selection_id,
             model_parameters_id=self.model_parameters_id,
+            feature_schema_id=self.feature_schema_id,
+            runtime_id=self.runtime_id,
+            code_provenance=self.code_provenance,
             serialized=serialized,
             calibrator_ids=self.calibrator_ids,
             calibrators=self.calibrators,
@@ -208,6 +217,7 @@ class ClassPriorTrendForecaster:
             "seed": request.seed,
             "manifest_ids": manifest_ids,
             "training_selection_id": training_selection_id,
+            **_artifact_provenance(request),
             "probabilities_by_cell": probabilities_by_cell,
         }
         model_parameters_id = _artifact_id(_serialize_payload(payload))
@@ -225,6 +235,9 @@ class ClassPriorTrendForecaster:
             manifest_ids=manifest_ids,
             training_selection_id=training_selection_id,
             model_parameters_id=model_parameters_id,
+            feature_schema_id=request.feature_schema_id,
+            runtime_id=request.runtime_id,
+            code_provenance=request.code_provenance,
             serialized=serialized,
             calibrator_ids=tuple(item.calibrator_id for item in calibrators),
             calibrators=calibrators,
@@ -383,6 +396,7 @@ class RegularizedMultinomialLogisticTrendForecaster:
             "seed": request.seed,
             "manifest_ids": manifest_ids,
             "training_selection_id": training_selection_id,
+            **_artifact_provenance(request),
             "normalizers": normalizers,
             "class_weights_by_cell": class_weights_by_cell,
             "cell_loss_normalizers": cell_loss_normalizers,
@@ -417,6 +431,9 @@ class RegularizedMultinomialLogisticTrendForecaster:
             manifest_ids=manifest_ids,
             training_selection_id=training_selection_id,
             model_parameters_id=model_parameters_id,
+            feature_schema_id=request.feature_schema_id,
+            runtime_id=request.runtime_id,
+            code_provenance=request.code_provenance,
             serialized=serialized,
             calibrator_ids=tuple(item.calibrator_id for item in calibrators),
             calibrators=calibrators,
@@ -655,6 +672,9 @@ def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
         "seed",
         "manifest_ids",
         "training_selection_id",
+        "feature_schema_id",
+        "runtime_id",
+        "code_provenance",
         "normalizers",
         "class_weights_by_cell",
         "cell_loss_normalizers",
@@ -673,6 +693,7 @@ def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
         or isinstance(payload["seed"], bool)
         or not isinstance(payload["seed"], int)
         or not isinstance(payload["training_selection_id"], str)
+        or not _valid_artifact_provenance(payload)
         or payload["loss_weighting"] != "equal_market_horizon_cells"
         or not _is_finite_number(payload["regularization"])
         or payload["regularization"] < 0
@@ -801,6 +822,9 @@ def _load_class_prior_artifact(serialized: bytes) -> dict[str, object]:
         "seed",
         "manifest_ids",
         "training_selection_id",
+        "feature_schema_id",
+        "runtime_id",
+        "code_provenance",
         "probabilities_by_cell",
         "calibrator_ids",
         "calibrators",
@@ -814,6 +838,7 @@ def _load_class_prior_artifact(serialized: bytes) -> dict[str, object]:
         or isinstance(payload["seed"], bool)
         or not isinstance(payload["seed"], int)
         or not isinstance(payload["training_selection_id"], str)
+        or not _valid_artifact_provenance(payload)
     ):
         raise ValueError("artifact_schema_invalid")
     manifest_ids = payload["manifest_ids"]
@@ -952,6 +977,24 @@ def _valid_cell_key(cell: str, markets: set[object]) -> bool:
 
 def _serialize_payload(payload: object) -> bytes:
     return canonical_json_bytes(payload)
+
+
+def _artifact_provenance(request: TrainingRequest) -> dict[str, str]:
+    values = {
+        "feature_schema_id": request.feature_schema_id,
+        "runtime_id": request.runtime_id,
+        "code_provenance": request.code_provenance,
+    }
+    if any(not value for value in values.values()):
+        raise ValueError("artifact_provenance_required")
+    return values
+
+
+def _valid_artifact_provenance(payload: dict[str, object]) -> bool:
+    return all(
+        isinstance(payload.get(field), str) and bool(payload[field])
+        for field in ("feature_schema_id", "runtime_id", "code_provenance")
+    )
 
 
 def _artifact_id(serialized: bytes) -> str:

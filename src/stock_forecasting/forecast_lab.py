@@ -78,8 +78,38 @@ class TrainingIntentRef:
     created_at: datetime
     feature_batch: FeatureBatch
     preregistered_seeds: tuple[int, int, int]
+    feature_schema_id: str
+    runtime_id: str
+    code_provenance: str
     execution_purpose: Literal["formal_candidate", "engineering_acceptance"] = "formal_candidate"
     historical_claims: tuple[HistoricalClaimRef, ...] = ()
+
+    def content_id(self) -> str:
+        return _content_id(
+            "training_intent",
+            {
+                "model_family_id": self.model_family_id,
+                "initiated_by": self.initiated_by,
+                "executed_by": self.executed_by,
+                "created_at": self.created_at.isoformat(),
+                "feature_batch_id": self.feature_batch.feature_batch_id,
+                "preregistered_seeds": self.preregistered_seeds,
+                "feature_schema_id": self.feature_schema_id,
+                "runtime_id": self.runtime_id,
+                "code_provenance": self.code_provenance,
+                "execution_purpose": self.execution_purpose,
+                "historical_claims": [
+                    {"market": claim.market, "claim_id": claim.claim_id}
+                    for claim in self.historical_claims
+                ],
+            },
+        )
+
+    def with_content_id(self) -> TrainingIntentRef:
+        return replace(self, training_intent_id=self.content_id())
+
+    def is_content_addressed(self) -> bool:
+        return self.training_intent_id == self.content_id()
 
 
 @dataclass(frozen=True)
@@ -147,7 +177,26 @@ class ForecastLab:
             logistic_forecaster or RegularizedMultinomialLogisticTrendForecaster()
         )
 
+    def preregister(self, draft: TrainingIntentRef) -> TrainingIntentRef:
+        fold_manifest = self._build_fold_manifest(draft.feature_batch.rows)
+        if fold_manifest is None:
+            raise ValueError("insufficient_fold_history")
+        final_lineages = tuple(
+            replace(lineage, fold_manifest_id=fold_manifest.fold_manifest_id)
+            for lineage in draft.feature_batch.historical_lineage
+        )
+        feature_batch = replace(
+            draft.feature_batch,
+            fold_manifest_id=fold_manifest.fold_manifest_id,
+            historical_lineage=final_lineages,
+        ).with_content_id()
+        return replace(draft, feature_batch=feature_batch).with_content_id()
+
     def develop(self, intent: TrainingIntentRef) -> ForecastLabOutcome:
+        if len(intent.preregistered_seeds) != 3 or len(set(intent.preregistered_seeds)) != 3:
+            return self._blocked("invalid_preregistered_seeds")
+        if not intent.feature_schema_id or not intent.runtime_id or not intent.code_provenance:
+            return self._blocked("training_intent_provenance_missing")
         if not self._has_class_support(intent.feature_batch.rows):
             return self._blocked("insufficient_class_support")
         fold_manifest = self._build_fold_manifest(intent.feature_batch.rows)
@@ -158,20 +207,17 @@ class ForecastLab:
             and not self._has_statistical_fold_support(fold_manifest)
         ):
             return self._blocked("insufficient_statistical_support")
-        final_lineages = tuple(
-            replace(lineage, fold_manifest_id=fold_manifest.fold_manifest_id)
-            for lineage in intent.feature_batch.historical_lineage
-        )
-        feature_batch = replace(
-            intent.feature_batch,
-            fold_manifest_id=fold_manifest.fold_manifest_id,
-            historical_lineage=final_lineages,
-        ).with_content_id()
-        final_intent = replace(intent, feature_batch=feature_batch)
-        formal_source_basis = self._has_formal_source_basis(final_intent)
+        if (
+            fold_manifest.fold_manifest_id != intent.feature_batch.fold_manifest_id
+            or not intent.feature_batch.is_content_addressed()
+            or not intent.is_content_addressed()
+        ):
+            return self._blocked("training_intent_mismatch")
+        feature_batch = intent.feature_batch
+        formal_source_basis = self._has_formal_source_basis(intent)
         if intent.execution_purpose == "formal_candidate" and not formal_source_basis:
             return self._blocked("unverified_source_basis")
-        formal_cost_scenario = self._has_formal_cost_scenario(final_intent)
+        formal_cost_scenario = self._has_formal_cost_scenario(intent)
         if intent.execution_purpose == "formal_candidate" and not formal_cost_scenario:
             return self._blocked("unverified_cost_scenario")
         formal_qualification = formal_source_basis and formal_cost_scenario
@@ -180,6 +226,9 @@ class ForecastLab:
                 feature_batch,
                 fold_manifest,
                 intent.preregistered_seeds,
+                feature_schema_id=intent.feature_schema_id,
+                runtime_id=intent.runtime_id,
+                code_provenance=intent.code_provenance,
             )
             training_ids, validation_ids = self._latest_joint_split(fold_manifest)
             logistic_artifacts = tuple(
@@ -189,6 +238,9 @@ class ForecastLab:
                         training_row_ids=training_ids,
                         validation_row_ids=validation_ids,
                         seed=seed,
+                        feature_schema_id=intent.feature_schema_id,
+                        runtime_id=intent.runtime_id,
+                        code_provenance=intent.code_provenance,
                     )
                 )
                 for seed in intent.preregistered_seeds
@@ -201,6 +253,9 @@ class ForecastLab:
                         training_row_ids=training_ids,
                         validation_row_ids=validation_ids,
                         seed=seed,
+                        feature_schema_id=intent.feature_schema_id,
+                        runtime_id=intent.runtime_id,
+                        code_provenance=intent.code_provenance,
                     )
                 )
                 for seed in intent.preregistered_seeds
@@ -399,6 +454,10 @@ class ForecastLab:
         batch: FeatureBatch,
         fold_manifest: FoldManifest,
         seeds: tuple[int, int, int],
+        *,
+        feature_schema_id: str,
+        runtime_id: str,
+        code_provenance: str,
     ) -> EvaluationReport:
         rows_by_id = {row.row_id: row for row in batch.rows}
         folds_by_quarter: dict[str, list[WalkForwardFold]] = defaultdict(list)
@@ -414,7 +473,15 @@ class ForecastLab:
             test_ids = tuple(row_id for fold in folds for row_id in fold.test_row_ids)
             test_rows = tuple(rows_by_id[row_id] for row_id in test_ids)
             prior_artifact = self._class_prior_forecaster.train(
-                TrainingRequest(batch, training_ids, validation_ids, seeds[0])
+                TrainingRequest(
+                    batch,
+                    training_ids,
+                    validation_ids,
+                    seeds[0],
+                    feature_schema_id,
+                    runtime_id,
+                    code_provenance,
+                )
             )
             prior_forecast = self._class_prior_forecaster.predict(
                 PredictionRequest(prior_artifact, test_rows)
@@ -427,7 +494,15 @@ class ForecastLab:
             )
             for seed_index, seed in enumerate(seeds):
                 artifact = self._logistic_forecaster.train(
-                    TrainingRequest(batch, training_ids, validation_ids, seed)
+                    TrainingRequest(
+                        batch,
+                        training_ids,
+                        validation_ids,
+                        seed,
+                        feature_schema_id,
+                        runtime_id,
+                        code_provenance,
+                    )
                 )
                 forecast = self._logistic_forecaster.predict(PredictionRequest(artifact, test_rows))
                 self._collect_predictions(
