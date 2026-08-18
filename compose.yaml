@@ -1231,7 +1231,7 @@ services:
       PUBLIC_BIND_HOST: 127.0.0.1
       LOCAL_API_KEY_MODE: enabled
       LOCAL_API_KEY_FILE: /run/stock-forecasting/local-api-key.json
-      AUTHORIZATION_POLICY_SET_ID: ticket-09-owner-operator-v1
+      AUTHORIZATION_POLICY_SET_ID: ${OPERATOR_AUTHORIZATION_POLICY_SET_ID:-ticket-09-owner-operator-v1}
       SOURCE_SECRET_ROOT: /var/lib/stock-forecasting/source-secrets
       SOURCE_ADAPTER_API_KEY_FILE: /run/stock-forecasting-source-adapter/local-api-key.json
     volumes:

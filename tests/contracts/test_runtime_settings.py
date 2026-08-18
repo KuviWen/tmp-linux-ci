@@ -16,6 +16,8 @@ from stock_forecasting.authorization_repository import (
     fixture_authorization_policy_catalog,
 )
 from stock_forecasting.evaluation_report import EvaluationReport
+from stock_forecasting.forecast_lab import ForecastLab
+from stock_forecasting.formal_cost_scenario import load_conservative_cost_scenario
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     SEPARATED_DUTIES_APPROVAL_POLICY_V1,
@@ -113,6 +115,13 @@ def test_operator_runtime_does_not_require_fixture_timestamps(
     assert settings.fixture_collection_observed_at is None
     assert application.security_context.principal_id == owner.context.principal_id
     assert application.source_adapter_security_context == source_adapter.context
+    scenario = load_conservative_cost_scenario()
+    assert application.formal_cost_scenario_id == scenario.cost_manifest_id
+    assert isinstance(application.forecast_lab, ForecastLab)
+    assert (
+        application.governance_object_repository.open_by_id(scenario.cost_manifest_id).read()
+        == scenario.serialized
+    )
 
 
 def test_non_operator_runtime_keeps_separated_duties_approval_policy(
@@ -300,9 +309,17 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
     assert b"runtime-persistence-secret" not in persisted
 
 
+@pytest.mark.parametrize(
+    "policy_set_id",
+    [
+        TICKET_09_OWNER_OPERATOR_POLICY_SET,
+        "ticket-09-owner-operator-qualified-0123456789abcdef",
+    ],
+)
 def test_operator_runtime_designates_its_single_owner_for_model_approval(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    policy_set_id: str,
 ) -> None:
     now = datetime(2026, 8, 17, 2, 0, tzinfo=UTC)
     key_file = tmp_path / "run" / "owner-api-key.json"
@@ -317,7 +334,7 @@ def test_operator_runtime_designates_its_single_owner_for_model_approval(
     database_url = f"sqlite+pysqlite:///{tmp_path / 'owner-runtime.db'}"
     repository = AuthorizationPolicyRepository(StateStore(database_url, create_schema=True))
     repository.install(
-        TICKET_09_OWNER_OPERATOR_POLICY_SET,
+        policy_set_id,
         build_pending_rights_operator_authorization_policy(identity.context),
     )
     monkeypatch.setenv("DATABASE_URL", database_url)
@@ -329,7 +346,7 @@ def test_operator_runtime_designates_its_single_owner_for_model_approval(
     monkeypatch.setenv("PUBLIC_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("LOCAL_API_KEY_MODE", "enabled")
     monkeypatch.setenv("LOCAL_API_KEY_FILE", str(key_file))
-    monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", TICKET_09_OWNER_OPERATOR_POLICY_SET)
+    monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", policy_set_id)
     application = RuntimeSettings.from_environment().build_application()
     owner_id = identity.context.principal_id
     evaluation = EvaluationReport.create(

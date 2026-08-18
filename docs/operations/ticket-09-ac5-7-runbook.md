@@ -2,12 +2,20 @@
 
 本手冊只處理 Ticket 09 尚未完成的 AC 5–7：正式 hard gates、`owner_operated` 核准，以及五個不同 eligible EOD 日期的 shadow。工程 fixture、mock、同日重播或人工改資料庫都不能當作通過證據。
 
-## 目前判斷（2026-08-18）
+## 目前判斷（2026-08-19）
 
 | 來源 | 可存取狀態 | 正式資格狀態 | 目前缺口 |
 | --- | --- | --- | --- |
-| FinMind Free API | 使用者已有帳號；仍須在持久化 runtime 以 write-only UI 儲存並 live validate token | `not_qualified` | 公開文件沒有逐一明示五個必要資料集可長期保存、備份、轉換、訓練模型、保存衍生品；也沒有逐資料集不可變修訂／更正／生命週期證據 |
-| Alpaca Trading API Basic | 使用者已有帳號；仍須確認 Basic、individual/nonprofessional 與帳號所在地分類，再以 write-only UI 儲存並 live validate key pair | `not_qualified` | 公開條款支持個人非商業使用，但沒有足以滿足 ADR 0018 的逐 distribution 明示保存、備份、轉換、訓練與衍生權利；交易所／第三方資料限制和帳號分類仍須保存證據 |
+| FinMind Free API | 持久化 encrypted credential 為 `valid`；`finmind-ticket-06-live-v1` 已通過 10 listings／5 datasets／lifecycle probe | declared owner-only scope 的書面 rights 與 live contract 已 qualified | 尚缺平台簽發的正式 historical qualification artifacts |
+| Alpaca Trading API Basic | 輪替後 credential 為 `valid`；`alpaca-ticket-07-live-v1` 已通過 10 listings／3 distributions／pagination／lifecycle probe | Basic individual/nonprofessional Taiwan owner-only scope 的書面 rights 與 live contract 已 qualified | 尚缺平台簽發的正式 historical qualification artifacts |
+
+正式研究交易成本情境 `conservative_v1` 已由 `owner-local` 核准並內容定址為
+`sha256:6f70e94386c154dc4b5029d23a6d8a8ca3c6e7a7bcabe92199e66b7a1bd68cc7`。
+它明確標示為 research stress scenario，不是實際成交成本：XTAI 使用每邊 0.1425%
+commission、賣方 0.3% transaction tax、每邊 0.1% 含 spread 的 slippage（固定來回
+0.785%）；XNAS 使用此帳戶分類的零 commission、SEC／FINRA TAF／CAT 逐筆公式及每邊
+0.05% 含 spread 的 slippage。兩市場皆以
+`net_return=gross_return-(round_trip_cost*turnover_fraction)` 套用 turnover。
 
 帳號、token/key 可用只證明 authentication；它不等於來源使用資格。正式資格必須同時具備：
 
@@ -30,6 +38,9 @@
 - 真實憑證只能經應用的 `/operations/source-credentials` write-only 頁面交給持久化 `EncryptedFilesystemSecretProvider`。
 - 目前 GitHub Actions 沒有 provider `secrets.*` 參照，因此不要替 public repo 新增 Alpaca／FinMind secrets。
 - provider 回覆、帳號頁截圖與 plan receipt 應遮蔽 token、key、帳號號碼、住址及不必要個資；原始檔留在本機證據庫。
+- 成本情境的 TWSE 與 Alpaca 官方來源快照保存在
+  `.artifacts/ticket-09-ac5-7/evidence/cost-scenario-sources/`；manifest 記錄每份快照的
+  SHA-256，operator runtime 會將 exact manifest 安裝到持久化 governance object store。
 
 ## 10 個操作階段
 
@@ -85,7 +96,7 @@
 
 ### 5. 取得逐資料集書面權利證據
 
-公開條款目前不足以直接升格。最低成本做法是用既有免費帳號向 provider 取得書面確認，不需先升級付費方案。
+公開條款本身不足以直接升格。最低成本做法是用既有免費帳號向 provider 取得書面確認，不需先升級付費方案。
 
 寄給 FinMind（`finmind.tw@gmail.com`）的問題需逐一涵蓋五個 dataset，並請對方確認單一使用者的個人非商業本機研究是否可：
 
@@ -101,6 +112,11 @@
 Alpaca support request 同樣逐一詢問 bars、corporate actions／symbol changes、calendar／early close，並要求對方說明 Basic individual/nonprofessional 帳號是否准許上述本機保存、備份、建模與衍生用途，以及 SIP／IEX／exchange 或其他 third-party terms 是否另有限制。
 
 接受證據必須是 provider 官方 domain 的 ticket/email 或可下載 account agreement，能識別方案、帳號主體分類、資料範圍、用途與日期。模糊回答、社群貼文、客服口頭回答、auth success 或「personal use」推論都維持 `not_qualified`。
+
+本機 evidence repository 已保存並以 SHA-256 綁定兩家 provider 的正式回覆；
+`formal-source-rights.json` 產生 qualified policy set
+`ticket-09-owner-operator-qualified-ec94d3689260ed1f`。這個 qualification 只適用於
+已聲明的單一 owner、個人、非商業、本機用途，不可擴張為第三方服務或 raw data 分發。
 
 ### 6. 建立持久化正式 operator runtime
 
@@ -128,10 +144,13 @@ docker version
 docker compose version
 ```
 
-在 repo root 啟動獨立 project；`OPERATOR_OWNER_PRINCIPAL` 只存非秘密 owner label：
+在 repo root 啟動獨立 project；`OPERATOR_OWNER_PRINCIPAL` 只存非秘密 owner label。
+rights manifest 已核定後，每次建立或重建 API 都必須明確選取 qualified policy；若省略，
+Compose 會回到 fail-closed 的 pending-rights 預設：
 
 ```powershell
 $env:OPERATOR_OWNER_PRINCIPAL = "owner-local"
+$env:OPERATOR_AUTHORIZATION_POLICY_SET_ID = "ticket-09-owner-operator-qualified-ec94d3689260ed1f"
 docker compose -p stock-forecasting-ticket-09-operator --profile ticket-09-operator up -d --build --wait ticket-09-operator-cli
 ```
 
@@ -143,7 +162,13 @@ docker compose -p stock-forecasting-ticket-09-operator --profile ticket-09-opera
 docker compose -p stock-forecasting-ticket-09-operator --profile ticket-09-operator run --rm ticket-09-operator-cli python -m stock_forecasting.cli operator source-credentials configure --provider alpaca-market-data-basic
 ```
 
-在兩家 provider 的逐資料集書面權利回覆尚未審核通過前，validation 預期 fail closed，response 必須是 HTTP 403 `authorization_denied`，且不得呼叫 provider。Python CLI 直接執行時回傳 `3`；Compose wrapper 應回傳非零，但不同 Compose 版本可能將容器的非零結果正規化（Docker Compose v5.3.1 實測為 `1`），因此操作證據以「非零 + 403 problem body」為準：
+已存在的 credential 必須用 hidden-prompt rotation seam 更新；`configure` 不覆寫現有版本：
+
+```powershell
+docker compose -p stock-forecasting-ticket-09-operator --profile ticket-09-operator run --rm ticket-09-operator-cli python -m stock_forecasting.cli operator source-credentials rotate --provider alpaca-market-data-basic
+```
+
+在兩家 provider 的逐資料集書面權利回覆尚未審核通過前，validation 預期 fail closed，response 必須是 HTTP 403 `authorization_denied`，且不得呼叫 provider。Python CLI 直接執行時回傳 `3`；Compose wrapper 應回傳非零，但不同 Compose 版本可能將容器的非零結果正規化（Docker Compose v5.3.1 實測為 `1`），因此操作證據以「非零 + 403 problem body」為準。qualified policy 啟用後，相同命令才可建立 live contract evidence：
 
 ```powershell
 docker compose -p stock-forecasting-ticket-09-operator --profile ticket-09-operator run --rm ticket-09-operator-cli python -m stock_forecasting.cli operator source-credentials validate --provider finmind-free-api
@@ -151,6 +176,11 @@ $LASTEXITCODE
 docker compose -p stock-forecasting-ticket-09-operator --profile ticket-09-operator run --rm ticket-09-operator-cli python -m stock_forecasting.cli operator source-credentials validate --provider alpaca-market-data-basic
 $LASTEXITCODE
 ```
+
+2026-08-19 的正式結果已保存於忽略 Git 的本機 evidence repository：FinMind 與 Alpaca
+authentication、live contract、universe、schema、pagination／calendar 與 symbol lifecycle 均通過。
+Alpaca corporate-actions 現行 `corporate_actions` envelope 已由 public validator 與 decoder
+regression tests 綁定。live contract success 仍不會自行簽發 historical qualification。
 
 每日停機只停止 containers，不刪 volumes：
 
@@ -170,7 +200,10 @@ docker compose -p stock-forecasting-ticket-09-operator --profile ticket-09-opera
 - corrections/revisions 與 source-policy binding；
 - 每市場 exact feature-row digest 可用的 Ticket 08 claim chain。
 
-目前 repo 有 qualification domain classes，但沒有供 operator 使用的正式 CLI／REST command。這是軟體 prerequisite；不能用手動 DB insert 或直接呼叫 private class 繞過。
+目前 repo 有 qualification domain classes，但沒有供 operator 使用、能從上述 live materialization
+簽發正式 historical qualification 的 CLI／REST command。這是軟體 prerequisite；不能用手動 DB
+insert 或直接呼叫 private class 繞過。來源帳號、書面 rights、credential、live contract 與持久化
+runtime prerequisites 已完成，下一步是補齊這個 public seam 及其 fail-closed 驗證。
 
 ### 8. 訓練正式候選並執行 hard gates
 
@@ -188,6 +221,11 @@ docker compose -p stock-forecasting-ticket-09-operator --profile ticket-09-opera
 - reproducibility
 
 工程 `engineering_example` report 不能轉名成 `formal_evidence`。目前也缺 operator-facing command 來串起正式歷史 claims、訓練及完整 gate artifact issuance。
+
+版本化非零成本情境及其 fail-closed object verifier 已完成；operator runtime 只在
+owner-operated policy 下安裝上述核准 ID。未知、未安裝、checksum／schema 不符或任意工程用
+cost 字串都不能使 `ForecastLab` 的正式候選通過。此項只解除 AC 4 的成本 manifest 軟體缺口，
+不會替代正式歷史、實際 logistic improvement 或十類 hard-gate reports。
 
 ### 9. Owner 核准與五次 EOD shadow
 

@@ -427,7 +427,7 @@ class AlpacaLiveContractValidator:
         )
         if isinstance(actions, CredentialValidationResult):
             return self._after_authentication(actions)
-        dividends = cast(dict[str, object], actions).get("cash_dividends")
+        dividends = self._corporate_action_rows(actions, "cash_dividends")
         if not isinstance(dividends, list) or not any(
             isinstance(item, dict)
             and item.get("symbol") == self._company_action_symbol
@@ -454,7 +454,7 @@ class AlpacaLiveContractValidator:
         )
         if isinstance(name_changes, CredentialValidationResult):
             return self._after_authentication(name_changes)
-        name_change_rows = cast(dict[str, object], name_changes).get("name_changes")
+        name_change_rows = self._corporate_action_rows(name_changes, "name_changes")
         if not isinstance(name_change_rows, list) or not any(
             isinstance(item, dict)
             and item.get("old_symbol") == self._old_ticker_alias.security_code
@@ -552,6 +552,15 @@ class AlpacaLiveContractValidator:
             and isinstance(bars.get(symbol), list)
             and all(cls._valid_bar(item) for item in bars[symbol])
         )
+
+    @staticmethod
+    def _corporate_action_rows(payload: object, action_type: str) -> object:
+        if not isinstance(payload, dict):
+            return None
+        envelope = payload.get("corporate_actions", payload)
+        if not isinstance(envelope, dict):
+            return None
+        return envelope.get(action_type)
 
     @staticmethod
     def _failure(reason_code: str) -> CredentialValidationResult:
@@ -1310,6 +1319,9 @@ class AlpacaSourceDecoder:
     def _action_rows(payload: object) -> list[dict[str, object]]:
         if not isinstance(payload, dict):
             raise ValueError("source_provider_schema_invalid")
+        action_groups = payload.get("corporate_actions", payload)
+        if not isinstance(action_groups, dict):
+            raise ValueError("source_provider_schema_invalid")
         provider_types = {
             "cash_dividends": "cash_dividend",
             "forward_splits": "forward_split",
@@ -1317,7 +1329,7 @@ class AlpacaSourceDecoder:
             "reverse_splits": "reverse_split",
         }
         rows: list[dict[str, object]] = []
-        for provider_type, values in payload.items():
+        for provider_type, values in action_groups.items():
             if provider_type == "next_page_token":
                 continue
             if not isinstance(values, list) or not all(isinstance(item, dict) for item in values):

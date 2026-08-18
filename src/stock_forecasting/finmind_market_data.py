@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import cast
 
@@ -1200,15 +1200,20 @@ class FinMindLiveContractValidator:
         manifest = load_taiwan_stock_pool_manifest()
         authentication_confirmed = False
         for listing in manifest.listings:
-            probe_date = (
+            probe_end = (
                 listing.external_aliases[-1].valid_to or self._CURRENT_LISTING_PRICE_PROBE_DATE
+            )
+            probe_start = (
+                probe_end - timedelta(days=20)
+                if listing.external_aliases[-1].valid_to is not None
+                else probe_end
             )
             rows_or_failure = self._request_rows(
                 dataset=FINMIND_PRICE_DISTRIBUTION.distribution_id,
                 query={
                     "data_id": listing.external_security_code,
-                    "start_date": probe_date.isoformat(),
-                    "end_date": probe_date.isoformat(),
+                    "start_date": probe_start.isoformat(),
+                    "end_date": probe_end.isoformat(),
                 },
                 headers=headers,
                 token=token,
@@ -1220,7 +1225,8 @@ class FinMindLiveContractValidator:
             if not any(
                 FinMindCredentialValidator._valid_price_row(row)
                 and row.get("stock_id") == listing.external_security_code
-                and row.get("date") == probe_date.isoformat()
+                and isinstance(row.get("date"), str)
+                and probe_start.isoformat() <= cast(str, row["date"]) <= probe_end.isoformat()
                 for row in rows_or_failure
             ):
                 return self._contract_failure("source_contract_schema_invalid")

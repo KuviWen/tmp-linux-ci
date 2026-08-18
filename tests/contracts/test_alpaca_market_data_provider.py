@@ -273,7 +273,12 @@ def _collected_partition_for_reference_graph(
             "provider_id": "alpaca-market-data-basic",
             "schema_version": "alpaca-source-bundle-v1",
             "bars_pages": [{"bars": bars, "next_page_token": None}],
-            "corporate_action_pages": [{"next_page_token": None, **(corporate_actions or {})}],
+            "corporate_action_pages": [
+                {
+                    "corporate_actions": corporate_actions or {},
+                    "next_page_token": None,
+                }
+            ],
             "calendar": [],
             "reference_graph": reference_graph.partition_payload(
                 listing_ids=listing_ids,
@@ -620,11 +625,11 @@ def test_alpaca_live_contract_probes_pool_data_pagination_actions_and_calendar()
             ),
             ProviderHttpResponse(
                 200,
-                b'{"cash_dividends":[{"id":"live-ca-aapl","symbol":"AAPL","cusip":"037833100","rate":"0.24","special":false,"foreign":false,"process_date":"2024-02-08","ex_date":"2024-02-09"}],"next_page_token":null}',
+                b'{"corporate_actions":{"cash_dividends":[{"id":"live-ca-aapl","symbol":"AAPL","cusip":"037833100","rate":"0.24","special":false,"foreign":false,"process_date":"2024-02-08","ex_date":"2024-02-09"}]},"next_page_token":null}',
             ),
             ProviderHttpResponse(
                 200,
-                b'{"name_changes":[{"id":"live-name-meta","old_symbol":"FB","new_symbol":"META","process_date":"2022-06-09"}],"next_page_token":null}',
+                b'{"corporate_actions":{"name_changes":[{"id":"live-name-meta","old_symbol":"FB","new_symbol":"META","process_date":"2022-06-09"}]},"next_page_token":null}',
             ),
             ProviderHttpResponse(
                 200,

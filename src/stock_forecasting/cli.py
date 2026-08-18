@@ -39,6 +39,10 @@ from stock_forecasting.authorization_repository import (
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
 )
+from stock_forecasting.formal_source_rights import (
+    FormalSourceRightsManifest,
+    build_qualified_operator_authorization_policy,
+)
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.runtime import RuntimeSettings
 from stock_forecasting.ticket_06_acceptance import (
@@ -282,6 +286,19 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
     )
+    qualified_operator_authorization = authorization_commands.add_parser("init-qualified-operator")
+    qualified_operator_authorization.add_argument("--database-url", required=True)
+    qualified_operator_authorization.add_argument("--key-file", type=Path, required=True)
+    qualified_operator_authorization.add_argument(
+        "--source-adapter-key-file",
+        type=Path,
+        required=True,
+    )
+    qualified_operator_authorization.add_argument(
+        "--rights-manifest",
+        type=Path,
+        required=True,
+    )
     operator = commands.add_parser("operator")
     operator_commands = operator.add_subparsers(dest="operator_command", required=True)
     source_credentials = operator_commands.add_parser("source-credentials")
@@ -291,6 +308,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     configure_source_credential = source_credential_commands.add_parser("configure")
     configure_source_credential.add_argument("--provider", required=True)
+    rotate_source_credential = source_credential_commands.add_parser("rotate")
+    rotate_source_credential.add_argument("--provider", required=True)
     source_credential_commands.add_parser("status")
     validate_source_credential = source_credential_commands.add_parser("validate")
     validate_source_credential.add_argument("--provider", required=True)
@@ -370,7 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (
         arguments.command == "operator"
         and arguments.operator_command == "source-credentials"
-        and arguments.source_credential_command == "configure"
+        and arguments.source_credential_command in {"configure", "rotate"}
     ):
         listing = _operator_request(
             method="GET",
@@ -399,10 +418,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             for field_name in required_fields
         }
         try:
+            rotation_suffix = (
+                "/rotations" if arguments.source_credential_command == "rotate" else ""
+            )
             result = _operator_request(
-                method="PUT",
+                method=("POST" if arguments.source_credential_command == "rotate" else "PUT"),
                 path=(
                     f"/api/v1/operations/source-credentials/{quote(arguments.provider, safe='')}"
+                    f"{rotation_suffix}"
                 ),
                 payload={"credential_fields": credential_fields},
             )
@@ -737,6 +760,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_pending_rights_operator_authorization_policy(source_adapter_identity.context),
         )
         print(json.dumps({"status": "initialized", "policy_set_count": 2}, sort_keys=True))
+        return 0
+    if arguments.command == "authorization" and arguments.authorization_command == (
+        "init-qualified-operator"
+    ):
+        identity = LocalApiKeyIdentity.load(arguments.key_file)
+        source_adapter_identity = LocalApiKeyIdentity.load(arguments.source_adapter_key_file)
+        manifest = FormalSourceRightsManifest.load(
+            arguments.rights_manifest,
+            reviewer_owner=identity.context.owner,
+        )
+        repository = AuthorizationPolicyRepository(
+            StateStore(arguments.database_url, create_schema=False)
+        )
+        repository.install(
+            manifest.policy_set_id,
+            build_qualified_operator_authorization_policy(identity.context, manifest),
+        )
+        repository.install(
+            manifest.policy_set_id,
+            build_qualified_operator_authorization_policy(
+                source_adapter_identity.context,
+                manifest,
+            ),
+        )
+        print(
+            json.dumps(
+                {
+                    "status": "initialized",
+                    "policy_set_count": 2,
+                    "policy_set_id": manifest.policy_set_id,
+                    "manifest_sha256": manifest.sha256,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     return 2
 

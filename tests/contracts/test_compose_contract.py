@@ -581,7 +581,9 @@ def test_compose_declares_the_persistent_owner_operator_runtime() -> None:
 
     api = services["ticket-09-operator-api"]
     assert api["environment"]["RUNTIME_ENVIRONMENT"] == "local"
-    assert api["environment"]["AUTHORIZATION_POLICY_SET_ID"] == ("ticket-09-owner-operator-v1")
+    assert api["environment"]["AUTHORIZATION_POLICY_SET_ID"] == (
+        "${OPERATOR_AUTHORIZATION_POLICY_SET_ID:-ticket-09-owner-operator-v1}"
+    )
     assert api["environment"]["SOURCE_SECRET_ROOT"] == ("/var/lib/stock-forecasting/source-secrets")
     assert "FIXTURE_INFORMATION_CUTOFF" not in api["environment"]
     assert "FIXTURE_COLLECTION_OBSERVED_AT" not in api["environment"]

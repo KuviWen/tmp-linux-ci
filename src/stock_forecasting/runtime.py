@@ -17,9 +17,9 @@ from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
     RuntimeEnvironment,
 )
-from stock_forecasting.authorization_repository import TICKET_09_OWNER_OPERATOR_POLICY_SET
 from stock_forecasting.finmind_market_data import FinMindLiveContractValidator
 from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_ID
+from stock_forecasting.formal_source_rights import is_owner_operator_policy_set
 from stock_forecasting.model_governance import ModelApprovalPolicyVersion
 from stock_forecasting.outbox import RelayFault
 from stock_forecasting.provider_http import (
@@ -151,7 +151,7 @@ class RuntimeSettings:
                 approval_mode="owner_operated",
                 owner_principal_id=local_identity.context.principal_id,
             )
-            if self.authorization_policy_set_id == TICKET_09_OWNER_OPERATOR_POLICY_SET
+            if is_owner_operator_policy_set(self.authorization_policy_set_id)
             else None
         )
         return build_application(

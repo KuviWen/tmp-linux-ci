@@ -1,6 +1,8 @@
 import json
 from dataclasses import replace
 from datetime import UTC, date, datetime
+from io import BytesIO
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +19,11 @@ from stock_forecasting.forecasting import (
     PredictionRequest,
     RegularizedMultinomialLogisticTrendForecaster,
 )
+from stock_forecasting.formal_cost_scenario import (
+    ObjectFormalCostScenarioVerifier,
+    load_conservative_cost_scenario,
+)
+from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from tests.modeling_support import engineering_model_history
 
 
@@ -284,7 +291,7 @@ def test_formal_candidate_requires_verified_ticket_08_historical_claim_chain() -
     assert outcome.candidate_bundle is None
 
 
-def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> None:
+def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains(tmp_path: Path) -> None:
     verified_lineages: list[HistoricalTrainingLineage] = []
 
     class VerifiedClaimBoundary:
@@ -307,11 +314,19 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
                 and lineage.feature_rows_digest == feature_rows_digest
             )
 
-    class VerifiedCostScenario:
-        def verify_cost_scenario(self, cost_manifest_id: str) -> bool:
-            return cost_manifest_id == batch.cost_manifest_id
-
     batch = engineering_model_history()
+    scenario = load_conservative_cost_scenario()
+    cost_objects = FilesystemObjectRepository(tmp_path / "governance-objects")
+    cost_objects.put_verified(
+        BytesIO(scenario.serialized),
+        expected_checksum=scenario.cost_manifest_id.removeprefix("sha256:"),
+        metadata={"object_kind": "formal_cost_scenario"},
+    )
+    cost_verifier = ObjectFormalCostScenarioVerifier(
+        cost_objects,
+        approved_manifest_ids=frozenset({scenario.cost_manifest_id}),
+    )
+    batch = replace(batch, cost_manifest_id=scenario.cost_manifest_id)
 
     def lineage(market: Market) -> HistoricalTrainingLineage:
         return HistoricalTrainingLineage(
@@ -360,7 +375,7 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
 
     outcome = ForecastLab(
         historical_claim_verifier=VerifiedClaimBoundary(),
-        cost_scenario_verifier=VerifiedCostScenario(),
+        cost_scenario_verifier=cost_verifier,
     ).develop(intent)
 
     assert outcome.status == "developed"

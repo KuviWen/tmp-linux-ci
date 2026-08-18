@@ -158,6 +158,88 @@ def test_operator_cli_reports_credential_status_without_secret_input(
     assert json.loads(capsys.readouterr().out) == response_payload
 
 
+def test_operator_cli_rotates_write_only_fields_from_hidden_prompts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    now = datetime(2026, 8, 19, 2, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="owner-local",
+        environment="local",
+        scopes={"source_credential.read", "source_credential.manage"},
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(hours=23),
+        data_protection_classes={"restricted", "secret"},
+    )
+    key_file = tmp_path / "owner-api-key.json"
+    identity.save(key_file)
+    hidden_values = {
+        "alpaca-market-data-basic api_key_id: ": "replacement-key-id",
+        "alpaca-market-data-basic api_secret_key: ": "replacement-secret-key",
+    }
+    requests: list[Request] = []
+
+    def fake_urlopen(request: Request, *, timeout: float) -> JsonResponse:
+        assert timeout == 10.0
+        requests.append(request)
+        if request.get_method() == "GET":
+            return JsonResponse(
+                {
+                    "items": [
+                        {
+                            "provider_id": "alpaca-market-data-basic",
+                            "required_fields": ["api_key_id", "api_secret_key"],
+                            "readiness": "validation_failed",
+                        }
+                    ]
+                }
+            )
+        return JsonResponse(
+            {
+                "provider_id": "alpaca-market-data-basic",
+                "readiness": "configured",
+                "reason_code": "source_credential_not_validated",
+                "version": 3,
+            }
+        )
+
+    monkeypatch.setenv("OPERATOR_BASE_URL", "http://ticket-09-operator-api:8080")
+    monkeypatch.setenv("LOCAL_API_KEY_FILE", str(key_file))
+    monkeypatch.setattr("stock_forecasting.cli.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "stock_forecasting.cli.getpass",
+        lambda prompt: hidden_values[prompt],
+    )
+
+    exit_code = main(
+        [
+            "operator",
+            "source-credentials",
+            "rotate",
+            "--provider",
+            "alpaca-market-data-basic",
+        ]
+    )
+
+    assert exit_code == 0
+    assert [request.get_method() for request in requests] == ["GET", "POST"]
+    rotation_request = requests[1]
+    assert rotation_request.full_url.endswith(
+        "/api/v1/operations/source-credentials/alpaca-market-data-basic/rotations"
+    )
+    assert isinstance(rotation_request.data, bytes)
+    assert json.loads(rotation_request.data) == {
+        "credential_fields": {
+            "api_key_id": "replacement-key-id",
+            "api_secret_key": "replacement-secret-key",
+        }
+    }
+    output = capsys.readouterr().out
+    assert json.loads(output)["version"] == 3
+    assert all(secret not in output for secret in hidden_values.values())
+
+
 def test_operator_cli_surfaces_policy_blocked_validation_as_a_nonzero_result(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

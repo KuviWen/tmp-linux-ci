@@ -1081,6 +1081,52 @@ _FINMIND_SPLIT_PROBE = (
 )
 
 
+def test_finmind_live_contract_accepts_last_trade_before_delisting_date() -> None:
+    from stock_forecasting.data_supply import load_taiwan_stock_pool_manifest
+
+    manifest = load_taiwan_stock_pool_manifest()
+    delisted_index, delisted = next(
+        (index, listing)
+        for index, listing in enumerate(manifest.listings)
+        if listing.external_security_code == "2448"
+    )
+    responses = _finmind_live_price_responses()
+    responses[delisted_index] = ProviderHttpResponse(
+        200,
+        b'{"status":200,"msg":"success","data":[{"stock_id":"2448",'
+        b'"date":"2020-12-23","open":40,"max":41,"min":39,"close":40,'
+        b'"Trading_Volume":1000}]}',
+    )
+    responses.extend(
+        [
+            ProviderHttpResponse(
+                200,
+                b'{"status":200,"msg":"success","data":[{"date":"2024-01-03"}]}',
+            ),
+            ProviderHttpResponse(200, _FINMIND_DIVIDEND_PROBE),
+            ProviderHttpResponse(
+                200,
+                b'{"status":200,"msg":"success","data":[{"date":"2021-01-06",'
+                b'"stock_id":"2448","stock_name":"Epistar"}]}',
+            ),
+            ProviderHttpResponse(200, _FINMIND_SPLIT_PROBE),
+        ]
+    )
+    transport = SequenceTransport(responses)
+
+    result = FinMindLiveContractValidator(transport).validate(
+        {"token": "finmind-live-contract-secret"}
+    )
+
+    valid_to = delisted.external_aliases[-1].valid_to
+    assert valid_to is not None
+    request = transport.requests[delisted_index]
+    assert request.query["start_date"] == (valid_to - timedelta(days=20)).isoformat()
+    assert request.query["end_date"] == valid_to.isoformat()
+    assert result.source_contract_assessment is not None
+    assert result.source_contract_assessment.live_validation == "passed"
+
+
 @pytest.mark.parametrize(
     ("dividend_payload", "split_payload"),
     [
@@ -1129,6 +1175,14 @@ def test_finmind_live_contract_binds_all_ten_listings_and_required_datasets() ->
     price_probe_dates = {
         listing.external_security_code: (
             listing.external_aliases[-1].valid_to or date(2025, 12, 11)
+        )
+        for listing in manifest.listings
+    }
+    price_probe_starts = {
+        listing.external_security_code: (
+            price_probe_dates[listing.external_security_code] - timedelta(days=20)
+            if listing.external_aliases[-1].valid_to is not None
+            else price_probe_dates[listing.external_security_code]
         )
         for listing in manifest.listings
     }
@@ -1182,14 +1236,19 @@ def test_finmind_live_contract_binds_all_ten_listings_and_required_datasets() ->
     } == {
         (
             listing.external_security_code,
+            price_probe_starts[listing.external_security_code].isoformat(),
+        )
+        for listing in manifest.listings
+    }
+    assert {
+        (request.query["data_id"], request.query["end_date"]) for request in transport.requests[:10]
+    } == {
+        (
+            listing.external_security_code,
             price_probe_dates[listing.external_security_code].isoformat(),
         )
         for listing in manifest.listings
     }
-    assert all(
-        request.query["end_date"] == request.query["start_date"]
-        for request in transport.requests[:10]
-    )
     assert all(
         request.headers["Authorization"] == "Bearer finmind-live-contract-secret"
         for request in transport.requests

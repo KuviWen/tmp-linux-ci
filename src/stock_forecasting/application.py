@@ -44,6 +44,13 @@ from stock_forecasting.finmind_provider_contract import (
     FINMIND_PRICE_DISTRIBUTION,
     FINMIND_PROVIDER_ID,
 )
+from stock_forecasting.forecast_lab import ForecastLab
+from stock_forecasting.formal_cost_scenario import (
+    ObjectFormalCostScenarioVerifier,
+    load_conservative_cost_scenario,
+)
+from stock_forecasting.formal_source_rights import is_owner_operator_policy_set
+from stock_forecasting.historical_evidence import QualifiedHistoricalAvailabilityClaimVerifier
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     SEPARATED_DUTIES_APPROVAL_POLICY_V1,
@@ -125,6 +132,33 @@ class Application:
             approval_policy=self._model_approval_policy,
         )
         self.model_governance_query = ModelGovernanceQuery(self.model_lifecycle_store)
+        historical_claim_verifier = QualifiedHistoricalAvailabilityClaimVerifier(
+            self.state_store,
+            evaluated_at=fixed_security_time or datetime.now(UTC),
+        )
+        self.formal_cost_scenario_id: str | None = None
+        if is_owner_operator_policy_set(authorization_policy_set_id):
+            cost_scenario = load_conservative_cost_scenario()
+            self.governance_object_repository.put_verified(
+                BytesIO(cost_scenario.serialized),
+                expected_checksum=cost_scenario.cost_manifest_id.removeprefix("sha256:"),
+                metadata={
+                    "content_type": "application/json",
+                    "object_kind": "formal_cost_scenario",
+                },
+            )
+            self.formal_cost_scenario_id = cost_scenario.cost_manifest_id
+            self.forecast_lab = ForecastLab(
+                historical_claim_verifier=historical_claim_verifier,
+                cost_scenario_verifier=ObjectFormalCostScenarioVerifier(
+                    self.governance_object_repository,
+                    approved_manifest_ids=frozenset({cost_scenario.cost_manifest_id}),
+                ),
+            )
+        else:
+            self.forecast_lab = ForecastLab(
+                historical_claim_verifier=historical_claim_verifier,
+            )
         self.local_identity = local_identity
         self.security_context: SecurityContext = local_identity.context
         if source_adapter_security_context is not None:
