@@ -827,12 +827,7 @@ class InMemoryLifecycleStore:
         occurred_at: datetime,
     ) -> LifecycleEvent:
         family_events = self._events.setdefault(model_family_id, [])
-        payload_json = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        payload_json = canonical_json(payload)
         existing = next(
             (
                 event
@@ -993,12 +988,7 @@ class SqlAlchemyLifecycleStore:
                     model_family_id=model_family_id,
                     version=current_version + 1,
                     event_kind=event_kind,
-                    payload_json=json.dumps(
-                        payload,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
+                    payload_json=canonical_json(payload),
                     occurred_at=occurred_at,
                 )
         except IntegrityError as error:
@@ -1033,12 +1023,7 @@ class SqlAlchemyLifecycleStore:
             model_family_id=str(row["model_family_id"]),
             version=int(cast(int, row["aggregate_version"])),
             event_kind=str(row["event_kind"]),
-            payload_json=json.dumps(
-                payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
+            payload_json=canonical_json(payload),
             occurred_at=datetime.fromisoformat(str(row["occurred_at"])),
         )
 
