@@ -17,15 +17,20 @@ from stock_forecasting.forecast_lab import (
 )
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
+    ApprovalDecision,
     BootstrapGatePolicyVersion,
     DecideApproval,
     EvaluateBootstrapCandidate,
+    GateCategory,
     GateMeasurement,
+    GateThreshold,
     HardGateEvidence,
     HardGateReportArtifact,
     InMemoryEvaluationReportRepository,
     InMemoryLifecycleStore,
     LifecycleConflict,
+    LifecycleEvent,
+    LifecycleStore,
     ModelApprovalPolicyVersion,
     ModelGovernanceQuery,
     ModelLifecycle,
@@ -86,8 +91,53 @@ class _VerifiedFormalQualification:
         return evidence.is_content_addressed() and evidence.binds(intent, fold_manifest)
 
 
+class _CorruptingReadStore:
+    """Simulates post-write ledger corruption at the storage boundary."""
+
+    def __init__(self) -> None:
+        self._store = InMemoryLifecycleStore()
+        self.corruption: tuple[str, str, object] | None = None
+
+    def append(
+        self,
+        *,
+        command_id: str,
+        model_family_id: str,
+        expected_version: int,
+        event_kind: str,
+        payload: dict[str, object],
+        occurred_at: datetime,
+    ) -> LifecycleEvent:
+        return self._store.append(
+            command_id=command_id,
+            model_family_id=model_family_id,
+            expected_version=expected_version,
+            event_kind=event_kind,
+            payload=payload,
+            occurred_at=occurred_at,
+        )
+
+    def events(self, model_family_id: str) -> tuple[LifecycleEvent, ...]:
+        events = self._store.events(model_family_id)
+        if self.corruption is None:
+            return events
+        event_kind, field, value = self.corruption
+        corrupted = []
+        for event in events:
+            if event.event_kind != event_kind:
+                corrupted.append(event)
+                continue
+            payload = json.loads(event.payload_json)
+            payload[field] = value
+            corrupted.append(replace(event, payload_json=json.dumps(payload)))
+        return tuple(corrupted)
+
+    def production_assignments(self, model_family_id: str) -> tuple[str, ...]:
+        return self._store.production_assignments(model_family_id)
+
+
 def _verified_lifecycle(
-    store: InMemoryLifecycleStore | SqlAlchemyLifecycleStore,
+    store: LifecycleStore,
     *,
     shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
     shadow_run_verifier: ShadowRunVerifier | None = None,
@@ -236,6 +286,28 @@ def test_bootstrap_policy_parser_rejects_unknown_or_incomplete_thresholds(
 
     with pytest.raises(ValueError, match="gate_policy_schema_invalid"):
         BootstrapGatePolicyVersion.from_serialized(policy_id, serialized)
+
+
+def test_bootstrap_policy_rejects_invented_metrics_even_with_every_category() -> None:
+    categories: tuple[GateCategory, ...] = (
+        "qualification",
+        "point_in_time",
+        "leakage",
+        "calibration",
+        "economics",
+        "stability",
+        "coverage",
+        "operational",
+        "security",
+        "reproducibility",
+    )
+    invented = {category: GateThreshold(category, "at_least", 0.0) for category in categories}
+
+    with pytest.raises(ValueError, match="gate_policy_schema_invalid"):
+        BootstrapGatePolicyVersion.create(
+            policy_name="invented-bootstrap-gates",
+            thresholds={f"{category}.fake": threshold for category, threshold in invented.items()},
+        )
 
 
 def test_lifecycle_fails_closed_when_policy_uses_an_unknown_gate_category() -> None:
@@ -616,6 +688,51 @@ def test_approval_replay_rejects_a_corrupted_current_decision_event() -> None:
 
     with pytest.raises(LifecycleConflict, match="command_id_payload_conflict"):
         lifecycle.execute(command)
+
+
+def test_approval_rejects_a_gate_event_whose_status_was_changed_after_write() -> None:
+    store = _CorruptingReadStore()
+    lifecycle = _verified_lifecycle(store)
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-corrupted-gate",
+        model_family_id="family-corrupted-gate",
+        improvement=12.0,
+    )
+    failed = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="failed-gate-before-corruption",
+            model_family_id="family-corrupted-gate",
+            candidate_id=_candidate_id("candidate-corrupted-gate"),
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates(
+                "candidate-corrupted-gate",
+                overrides={"security.critical_finding_count": 1.0},
+            ),
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+    assert failed.status == "gate_failed"
+    store.corruption = ("GateDecisionRecorded", "status", "passed")
+
+    with pytest.raises(LifecycleConflict, match="gate_decision_evidence_invalid"):
+        lifecycle.execute(
+            DecideApproval(
+                command_id="approval-after-gate-corruption",
+                model_family_id="family-corrupted-gate",
+                candidate_id=_candidate_id("candidate-corrupted-gate"),
+                artifact_id=_artifact_id("candidate-corrupted-gate"),
+                evaluation_report_id=_evaluation_report_id("candidate-corrupted-gate"),
+                policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+                approver_id="model-approver-c",
+                decision="approved",
+                reason="should not trust changed status",
+                expected_assignment="unassigned",
+                expected_version=2,
+                occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+            )
+        )
 
 
 def _record_candidate(
@@ -1199,6 +1316,101 @@ def test_rejection_of_exact_evidence_cannot_be_reversed_by_a_later_approval() ->
     assert reversal.approval_decision.invalidated_reason == "prior_rejection_irreversible"
 
 
+def test_corrupted_irreversible_rejection_fails_closed() -> None:
+    store = _CorruptingReadStore()
+    lifecycle = _verified_lifecycle(store)
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-corrupted-rejection",
+        model_family_id="family-corrupted-rejection",
+        improvement=12.0,
+    )
+    lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-corrupted-rejection",
+            model_family_id="family-corrupted-rejection",
+            candidate_id=_candidate_id("candidate-corrupted-rejection"),
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates("candidate-corrupted-rejection"),
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+    lifecycle.execute(
+        DecideApproval(
+            command_id="reject-before-corruption",
+            model_family_id="family-corrupted-rejection",
+            candidate_id=_candidate_id("candidate-corrupted-rejection"),
+            artifact_id=_artifact_id("candidate-corrupted-rejection"),
+            evaluation_report_id=_evaluation_report_id("candidate-corrupted-rejection"),
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            approver_id="model-approver-c",
+            decision="rejected",
+            reason="evidence rejected",
+            expected_assignment="unassigned",
+            expected_version=2,
+            occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+        )
+    )
+    store.corruption = (
+        "ApprovalDecisionRecorded",
+        "approval_decision_id",
+        "sha256:corrupted-rejection",
+    )
+
+    with pytest.raises(LifecycleConflict, match="approval_decision_evidence_invalid"):
+        lifecycle.execute(
+            DecideApproval(
+                command_id="approve-after-rejection-corruption",
+                model_family_id="family-corrupted-rejection",
+                candidate_id=_candidate_id("candidate-corrupted-rejection"),
+                artifact_id=_artifact_id("candidate-corrupted-rejection"),
+                evaluation_report_id=_evaluation_report_id("candidate-corrupted-rejection"),
+                policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+                approver_id="model-approver-d",
+                decision="approved",
+                reason="must not erase rejection by corrupting it",
+                expected_assignment="unassigned",
+                expected_version=3,
+                occurred_at=datetime(2026, 8, 19, 2, 0, tzinfo=UTC),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("approval_mode", "owner_principal_id", "independent_review", "approver_id"),
+    [
+        ("owner_operated", "owner-a", False, "not-owner"),
+        ("separated_duties", None, False, "reviewer-a"),
+    ],
+)
+def test_approved_decision_rejects_impossible_approval_role_evidence(
+    approval_mode: Literal["owner_operated", "separated_duties"],
+    owner_principal_id: str | None,
+    independent_review: bool,
+    approver_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="approval_decision_schema_invalid"):
+        ApprovalDecision.create(
+            candidate_id="sha256:candidate",
+            artifact_id="sha256:artifact",
+            evaluation_report_id="sha256:evaluation",
+            policy_version_id="sha256:gate-policy",
+            gate_decision_id="sha256:gate-decision",
+            approval_policy_version_id="sha256:approval-policy",
+            approval_mode=approval_mode,
+            approval_policy_owner_principal_id=owner_principal_id,
+            independent_review=independent_review,
+            approver_id=approver_id,
+            requested_decision="approved",
+            decision="approved",
+            reason="impossible approved decision",
+            expected_assignment="unassigned",
+            expires_at=datetime(2026, 8, 25, 2, 0, tzinfo=UTC),
+            invalidated_reason=None,
+        )
+
+
 def _approved_lifecycle(
     *,
     shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
@@ -1378,6 +1590,49 @@ def test_shadow_evidence_rejects_invalid_cpu_latency(latency: float) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("shadow_run_id", ""),
+        ("eligible_eod_date", datetime(2026, 8, 18, tzinfo=UTC)),
+        ("markets", ("XTAI", "XTAI")),
+        ("cold_load_checksum_verified", "false"),
+        ("schema_compatible", 1),
+        ("probability_invariants_verified", None),
+        ("comparison_completed", "yes"),
+        ("source_policy_verified", 1.0),
+        ("cpu_prediction_seconds", True),
+    ],
+)
+def test_shadow_evidence_rejects_invalid_runtime_types_and_bindings(
+    field: str,
+    invalid_value: object,
+) -> None:
+    values: dict[str, object] = {
+        "shadow_run_id": "shadow-schema-check",
+        "candidate_id": "sha256:candidate",
+        "artifact_id": "sha256:artifact",
+        "evaluation_report_id": "sha256:evaluation",
+        "gate_decision_id": "sha256:gate-decision",
+        "approval_decision_id": "sha256:approval-decision",
+        "approval_policy_version_id": "sha256:approval-policy",
+        "expected_assignment": "unassigned",
+        "eligible_eod_date": date(2026, 8, 18),
+        "previous_shadow_run_id": None,
+        "markets": ("XTAI", "XNAS"),
+        "cold_load_checksum_verified": True,
+        "schema_compatible": True,
+        "probability_invariants_verified": True,
+        "comparison_completed": True,
+        "source_policy_verified": True,
+        "cpu_prediction_seconds": 420.0,
+    }
+    values[field] = invalid_value
+
+    with pytest.raises(ValueError, match="shadow_evidence_schema_invalid"):
+        ShadowRunEvidence.create(**values)  # type: ignore[arg-type]
+
+
 def test_five_joint_market_shadows_complete_without_production_assignment() -> None:
     lifecycle, store = _approved_lifecycle()
 
@@ -1520,6 +1775,91 @@ def test_later_passing_gate_with_different_evidence_invalidates_stale_approval()
     assert shadow.status == "shadow_blocked"
     assert shadow.shadow_evidence is not None
     assert shadow.shadow_evidence.blocked_reason == "gate_lineage_changed"
+
+
+def test_shadow_cycle_count_restarts_after_regating_and_reapproval() -> None:
+    lifecycle, store = _approved_lifecycle()
+    for cycle in range(1, 5):
+        result = lifecycle.execute(
+            RecordShadowEod(
+                command_id=f"shadow-before-regating-{cycle}",
+                model_family_id="family-shadow",
+                candidate_id=_candidate_id("candidate-shadow"),
+                evidence=_shadow_evidence(
+                    cycle,
+                    previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                ),
+                expected_version=cycle + 2,
+                occurred_at=datetime.combine(
+                    _shadow_evidence(
+                        cycle,
+                        previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                    ).eligible_eod_date,
+                    time(3, 0),
+                    tzinfo=UTC,
+                ),
+            )
+        )
+        assert result.status == "shadow_recorded"
+
+    gate = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-after-four-shadow-cycles",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates(
+                "candidate-shadow",
+                overrides={"economics.ic_information_ratio": 0.31},
+            ),
+            expected_version=7,
+            occurred_at=datetime(2026, 8, 22, 2, 0, tzinfo=UTC),
+        )
+    )
+    assert gate.status == "gate_passed"
+    approval = lifecycle.execute(
+        DecideApproval(
+            command_id="approval-after-four-shadow-cycles",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            artifact_id=_artifact_id("candidate-shadow"),
+            evaluation_report_id=_evaluation_report_id("candidate-shadow"),
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            approver_id="model-approver-c",
+            decision="approved",
+            reason="new gate lineage requires new shadow sequence",
+            expected_assignment="unassigned",
+            expected_version=8,
+            occurred_at=datetime(2026, 8, 22, 3, 0, tzinfo=UTC),
+        )
+    )
+    assert approval.approval_decision is not None
+    _SHADOW_BINDING.update(
+        {
+            "gate_decision_id": approval.approval_decision.gate_decision_id,
+            "approval_decision_id": approval.approval_decision.approval_decision_id,
+            "approval_policy_version_id": (approval.approval_decision.approval_policy_version_id),
+        }
+    )
+
+    restarted = lifecycle.execute(
+        RecordShadowEod(
+            command_id="first-shadow-after-new-approval",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            evidence=_shadow_evidence(5, previous_shadow_run_id=None),
+            expected_version=9,
+            occurred_at=datetime(2026, 8, 24, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert restarted.status == "shadow_recorded"
+    assert restarted.shadow_evidence is not None
+    assert restarted.shadow_evidence.eligible_cycle_count == 1
+    assert ModelGovernanceQuery(store).get_backtest("family-shadow")["shadow"] == {
+        "eligible_cycle_count": 1,
+        "required": 5,
+    }
 
 
 def test_bootstrap_policy_is_permanently_disabled_after_first_assignment() -> None:

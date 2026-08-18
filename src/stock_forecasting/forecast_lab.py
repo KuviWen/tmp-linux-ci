@@ -147,13 +147,14 @@ class FoldManifest:
             not folds
             or isinstance(purge_sessions, bool)
             or not isinstance(purge_sessions, int)
-            or purge_sessions < 0
+            or purge_sessions != 20
             or isinstance(embargo_sessions, bool)
             or not isinstance(embargo_sessions, int)
-            or embargo_sessions < 0
-            or not isinstance(actual_history_start, date)
-            or not isinstance(actual_history_end, date)
+            or embargo_sessions != 20
+            or type(actual_history_start) is not date
+            or type(actual_history_end) is not date
             or actual_history_start > actual_history_end
+            or len({(fold.market, fold.test_quarter) for fold in folds}) != len(folds)
         ):
             raise ValueError("fold_manifest_schema_invalid")
         payload = {
@@ -176,6 +177,53 @@ class FoldManifest:
             purge_sessions=purge_sessions,
             embargo_sessions=embargo_sessions,
             serialized=serialized,
+        )
+
+    @classmethod
+    def from_feature_rows(cls, rows: tuple[FeatureRow, ...]) -> FoldManifest | None:
+        all_dates = sorted({row.session_date for row in rows if row.session_date is not None})
+        if not all_dates:
+            return None
+        folds: list[WalkForwardFold] = []
+        for market in ("XTAI", "XNAS"):
+            market_rows = tuple(
+                row for row in rows if row.market == market and row.session_date is not None
+            )
+            dates_by_quarter: dict[str, list[date]] = defaultdict(list)
+            market_dates = sorted({cast(date, row.session_date) for row in market_rows})
+            for session_date in market_dates:
+                dates_by_quarter[cls._quarter(session_date)].append(session_date)
+            quarters = sorted(dates_by_quarter)
+            for test_quarter in quarters[4:]:
+                test_dates = tuple(dates_by_quarter[test_quarter])
+                prior_dates = [item for item in market_dates if item < test_dates[0]]
+                if len(prior_dates) < 62:
+                    continue
+                folds.append(
+                    WalkForwardFold(
+                        market=market,
+                        test_quarter=test_quarter,
+                        training_row_ids=cls._row_ids(market_rows, set(prior_dates[:-61])),
+                        validation_row_ids=cls._row_ids(market_rows, set(prior_dates[-41:-20])),
+                        test_row_ids=cls._row_ids(market_rows, set(test_dates)),
+                        purge_session_dates=tuple(prior_dates[-61:-41]),
+                        embargo_session_dates=tuple(prior_dates[-20:]),
+                    )
+                )
+        if not folds:
+            return None
+        return cls.create(
+            folds=tuple(folds),
+            actual_history_start=all_dates[0],
+            actual_history_end=all_dates[-1],
+        )
+
+    def matches_feature_batch(self, batch: FeatureBatch) -> bool:
+        expected = self.from_feature_rows(batch.rows)
+        return (
+            batch.fold_manifest_id == self.fold_manifest_id
+            and expected is not None
+            and expected == self
         )
 
     @classmethod
@@ -234,15 +282,34 @@ class FoldManifest:
 
     @staticmethod
     def _fold_payload(fold: WalkForwardFold) -> dict[str, object]:
+        row_groups = (
+            fold.training_row_ids,
+            fold.validation_row_ids,
+            fold.test_row_ids,
+        )
+        row_sets = tuple(set(group) for group in row_groups)
         if (
             fold.market not in {"XTAI", "XNAS"}
             or not isinstance(fold.test_quarter, str)
             or not fold.test_quarter
-            or any(not isinstance(item, str) or not item for item in fold.training_row_ids)
-            or any(not isinstance(item, str) or not item for item in fold.validation_row_ids)
-            or any(not isinstance(item, str) or not item for item in fold.test_row_ids)
-            or any(not isinstance(item, date) for item in fold.purge_session_dates)
-            or any(not isinstance(item, date) for item in fold.embargo_session_dates)
+            or any(not group for group in row_groups)
+            or any(
+                any(not isinstance(item, str) or not item for item in group) for group in row_groups
+            )
+            or any(
+                len(group) != len(group_set)
+                for group, group_set in zip(row_groups, row_sets, strict=True)
+            )
+            or not row_sets[0].isdisjoint(row_sets[1])
+            or not row_sets[0].isdisjoint(row_sets[2])
+            or not row_sets[1].isdisjoint(row_sets[2])
+            or any(type(item) is not date for item in fold.purge_session_dates)
+            or any(type(item) is not date for item in fold.embargo_session_dates)
+            or len(fold.purge_session_dates) != 20
+            or len(fold.embargo_session_dates) != 20
+            or tuple(sorted(set(fold.purge_session_dates))) != fold.purge_session_dates
+            or tuple(sorted(set(fold.embargo_session_dates))) != fold.embargo_session_dates
+            or fold.purge_session_dates[-1] >= fold.embargo_session_dates[0]
         ):
             raise ValueError("fold_manifest_schema_invalid")
         return {
@@ -296,6 +363,16 @@ class FoldManifest:
             embargo_session_dates=tuple(
                 date.fromisoformat(item) for item in raw["embargo_session_dates"]
             ),
+        )
+
+    @staticmethod
+    def _quarter(session_date: date) -> str:
+        return f"{session_date.year}-Q{((session_date.month - 1) // 3) + 1}"
+
+    @staticmethod
+    def _row_ids(rows: tuple[FeatureRow, ...], dates: set[date]) -> tuple[str, ...]:
+        return tuple(
+            row.row_id for row in rows if row.session_date is not None and row.session_date in dates
         )
 
 
@@ -784,62 +861,7 @@ class ForecastLab:
         return len(joint_quarters) >= BOOTSTRAP_MINIMUM_NONINFERIOR_QUARTERS
 
     def _build_fold_manifest(self, rows: tuple[FeatureRow, ...]) -> FoldManifest | None:
-        all_dates = sorted({row.session_date for row in rows if row.session_date is not None})
-        if not all_dates:
-            return None
-        folds: list[WalkForwardFold] = []
-        for market in self._markets:
-            market_rows = tuple(
-                row for row in rows if row.market == market and row.session_date is not None
-            )
-            dates_by_quarter: dict[str, list[date]] = defaultdict(list)
-            market_dates = sorted({cast(date, row.session_date) for row in market_rows})
-            for session_date in market_dates:
-                dates_by_quarter[self._quarter(session_date)].append(session_date)
-            quarters = sorted(dates_by_quarter)
-            for test_quarter in quarters[4:]:
-                test_dates = tuple(dates_by_quarter[test_quarter])
-                first_test_date = test_dates[0]
-                prior_dates = sorted(
-                    session_date
-                    for quarter in quarters
-                    for session_date in dates_by_quarter[quarter]
-                    if session_date < first_test_date
-                )
-                if len(prior_dates) < 62:
-                    continue
-                training_dates = set(prior_dates[:-61])
-                purge_dates = tuple(prior_dates[-61:-41])
-                validation_dates = set(prior_dates[-41:-20])
-                embargo_dates = tuple(prior_dates[-20:])
-                folds.append(
-                    WalkForwardFold(
-                        market=market,
-                        test_quarter=test_quarter,
-                        training_row_ids=self._row_ids(market_rows, training_dates),
-                        validation_row_ids=self._row_ids(market_rows, validation_dates),
-                        test_row_ids=self._row_ids(market_rows, set(test_dates)),
-                        purge_session_dates=purge_dates,
-                        embargo_session_dates=embargo_dates,
-                    )
-                )
-        if not folds:
-            return None
-        return FoldManifest.create(
-            folds=tuple(folds),
-            actual_history_start=all_dates[0],
-            actual_history_end=all_dates[-1],
-        )
-
-    @staticmethod
-    def _quarter(session_date: date) -> str:
-        return f"{session_date.year}-Q{((session_date.month - 1) // 3) + 1}"
-
-    @staticmethod
-    def _row_ids(rows: tuple[FeatureRow, ...], dates: set[date]) -> tuple[str, ...]:
-        return tuple(
-            row.row_id for row in rows if row.session_date is not None and row.session_date in dates
-        )
+        return FoldManifest.from_feature_rows(rows)
 
     def _evaluate(
         self,

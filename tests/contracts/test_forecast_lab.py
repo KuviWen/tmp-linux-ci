@@ -9,6 +9,7 @@ import pytest
 
 from stock_forecasting.contracts import HistoricalTrainingLineage
 from stock_forecasting.forecast_lab import (
+    FoldManifest,
     ForecastLab,
     HistoricalClaimRef,
     Market,
@@ -312,6 +313,83 @@ def test_forecast_lab_builds_reproducible_dual_market_bootstrap_evidence() -> No
     assert bundle.evaluation_report.logistic_equal_cell_macro_f1 >= 0.99
     assert bundle.evaluation_report.class_prior_equal_cell_macro_f1 < 0.50
     assert bundle.evaluation_report.improvement_percentage_points >= 1.0
+
+
+def test_fold_manifest_rejects_nonfixed_or_unordered_session_boundaries() -> None:
+    lab = ForecastLab()
+    intent = lab.preregister(
+        TrainingIntentRef(
+            training_intent_id="",
+            model_family_id="fold-boundary-validation",
+            initiated_by="model-operator-a",
+            executed_by="model-operator-b",
+            created_at=datetime(2026, 8, 17, tzinfo=UTC),
+            feature_batch=engineering_model_history(),
+            preregistered_seeds=(17, 29, 43),
+            provenance=_PROVENANCE,
+            execution_purpose="engineering_acceptance",
+        )
+    )
+    outcome = lab.develop(intent)
+    assert outcome.candidate_bundle is not None
+    manifest = outcome.candidate_bundle.fold_manifest
+
+    with pytest.raises(ValueError, match="fold_manifest_schema_invalid"):
+        FoldManifest.create(
+            folds=manifest.folds,
+            actual_history_start=manifest.actual_history_start,
+            actual_history_end=manifest.actual_history_end,
+            purge_sessions=19,
+            embargo_sessions=20,
+        )
+
+    with pytest.raises(ValueError, match="fold_manifest_schema_invalid"):
+        FoldManifest.create(
+            folds=(
+                replace(
+                    manifest.folds[0],
+                    purge_session_dates=tuple(reversed(manifest.folds[0].purge_session_dates)),
+                ),
+                *manifest.folds[1:],
+            ),
+            actual_history_start=manifest.actual_history_start,
+            actual_history_end=manifest.actual_history_end,
+        )
+
+
+def test_fold_manifest_membership_is_verified_against_the_feature_batch() -> None:
+    lab = ForecastLab()
+    intent = lab.preregister(
+        TrainingIntentRef(
+            training_intent_id="",
+            model_family_id="fold-membership-validation",
+            initiated_by="model-operator-a",
+            executed_by="model-operator-b",
+            created_at=datetime(2026, 8, 17, tzinfo=UTC),
+            feature_batch=engineering_model_history(),
+            preregistered_seeds=(17, 29, 43),
+            provenance=_PROVENANCE,
+            execution_purpose="engineering_acceptance",
+        )
+    )
+    outcome = lab.develop(intent)
+    assert outcome.candidate_bundle is not None
+    bundle = outcome.candidate_bundle
+    original = bundle.fold_manifest
+    tampered = FoldManifest.create(
+        folds=(
+            replace(
+                original.folds[0],
+                training_row_ids=original.folds[0].training_row_ids[1:],
+            ),
+            *original.folds[1:],
+        ),
+        actual_history_start=original.actual_history_start,
+        actual_history_end=original.actual_history_end,
+    )
+
+    assert tampered.is_content_addressed()
+    assert not tampered.matches_feature_batch(bundle.training_intent.feature_batch)
 
 
 def test_latest_test_quarter_cannot_influence_fitted_artifact_or_calibrators() -> None:

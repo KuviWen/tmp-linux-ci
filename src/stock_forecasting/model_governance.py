@@ -270,6 +270,8 @@ class BootstrapGatePolicyVersion:
                 or not isfinite(threshold.limit)
                 for name, threshold in ordered
             )
+            or policy_name != "bootstrap-gate-policy-v1"
+            or dict(ordered) != dict(_BOOTSTRAP_THRESHOLDS_V1)
         ):
             raise ValueError("gate_policy_schema_invalid")
         payload = {
@@ -701,9 +703,42 @@ class ShadowRunEvidence:
         source_policy_verified: bool,
         cpu_prediction_seconds: float,
     ) -> ShadowRunEvidence:
+        identifiers = (
+            shadow_run_id,
+            candidate_id,
+            artifact_id,
+            evaluation_report_id,
+            gate_decision_id,
+            approval_decision_id,
+            approval_policy_version_id,
+            expected_assignment,
+        )
+        verification_flags = (
+            cold_load_checksum_verified,
+            schema_compatible,
+            probability_invariants_verified,
+            comparison_completed,
+            source_policy_verified,
+        )
+        if (
+            any(not isinstance(value, str) or not value for value in identifiers)
+            or (
+                previous_shadow_run_id is not None
+                and (not isinstance(previous_shadow_run_id, str) or not previous_shadow_run_id)
+            )
+            or type(eligible_eod_date) is not date
+            or not isinstance(markets, tuple)
+            or len(markets) != 2
+            or set(markets) != {"XTAI", "XNAS"}
+            or any(not isinstance(value, bool) for value in verification_flags)
+            or isinstance(cpu_prediction_seconds, bool)
+            or not isinstance(cpu_prediction_seconds, (int, float))
+        ):
+            raise ValueError("shadow_evidence_schema_invalid")
         if not isfinite(cpu_prediction_seconds) or cpu_prediction_seconds < 0:
             raise ValueError("shadow_cpu_prediction_seconds_invalid")
         ordered_markets = tuple(sorted(markets))
+        normalized_cpu_seconds = float(cpu_prediction_seconds)
         payload = {
             "shadow_run_id": shadow_run_id,
             "candidate_id": candidate_id,
@@ -721,7 +756,7 @@ class ShadowRunEvidence:
             "probability_invariants_verified": probability_invariants_verified,
             "comparison_completed": comparison_completed,
             "source_policy_verified": source_policy_verified,
-            "cpu_prediction_seconds": cpu_prediction_seconds,
+            "cpu_prediction_seconds": normalized_cpu_seconds,
         }
         return cls(
             evidence_id=_content_id("shadow_run_evidence", payload),
@@ -741,29 +776,32 @@ class ShadowRunEvidence:
             probability_invariants_verified=probability_invariants_verified,
             comparison_completed=comparison_completed,
             source_policy_verified=source_policy_verified,
-            cpu_prediction_seconds=cpu_prediction_seconds,
+            cpu_prediction_seconds=normalized_cpu_seconds,
         )
 
     def is_content_addressed(self) -> bool:
-        rebuilt = self.create(
-            shadow_run_id=self.shadow_run_id,
-            candidate_id=self.candidate_id,
-            artifact_id=self.artifact_id,
-            evaluation_report_id=self.evaluation_report_id,
-            gate_decision_id=self.gate_decision_id,
-            approval_decision_id=self.approval_decision_id,
-            approval_policy_version_id=self.approval_policy_version_id,
-            expected_assignment=self.expected_assignment,
-            eligible_eod_date=self.eligible_eod_date,
-            previous_shadow_run_id=self.previous_shadow_run_id,
-            markets=self.markets,
-            cold_load_checksum_verified=self.cold_load_checksum_verified,
-            schema_compatible=self.schema_compatible,
-            probability_invariants_verified=self.probability_invariants_verified,
-            comparison_completed=self.comparison_completed,
-            source_policy_verified=self.source_policy_verified,
-            cpu_prediction_seconds=self.cpu_prediction_seconds,
-        )
+        try:
+            rebuilt = self.create(
+                shadow_run_id=self.shadow_run_id,
+                candidate_id=self.candidate_id,
+                artifact_id=self.artifact_id,
+                evaluation_report_id=self.evaluation_report_id,
+                gate_decision_id=self.gate_decision_id,
+                approval_decision_id=self.approval_decision_id,
+                approval_policy_version_id=self.approval_policy_version_id,
+                expected_assignment=self.expected_assignment,
+                eligible_eod_date=self.eligible_eod_date,
+                previous_shadow_run_id=self.previous_shadow_run_id,
+                markets=self.markets,
+                cold_load_checksum_verified=self.cold_load_checksum_verified,
+                schema_compatible=self.schema_compatible,
+                probability_invariants_verified=self.probability_invariants_verified,
+                comparison_completed=self.comparison_completed,
+                source_policy_verified=self.source_policy_verified,
+                cpu_prediction_seconds=self.cpu_prediction_seconds,
+            )
+        except (TypeError, ValueError):
+            return False
         return rebuilt == self
 
 
@@ -826,7 +864,267 @@ class GateDecision:
     failed_gates: tuple[str, ...]
     hard_gate_evidence_id: str | None = None
     hard_gate_evidence_refs: tuple[str, ...] = ()
+    hard_gate_report_id: str | None = None
+    submitted_hard_gate_measurements: tuple[GateMeasurement, ...] = ()
+    submitted_improvement_percentage_points: float | None = None
+    verified_improvement_percentage_points: float | None = None
+    verified_hard_gate_measurements: tuple[GateMeasurement, ...] = ()
     serving_status: Literal["blocked"] = "blocked"
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        candidate_id: str,
+        artifact_id: str,
+        evaluation_report_id: str,
+        policy_version_id: str,
+        status: Literal["passed", "failed"],
+        failed_gates: tuple[str, ...],
+        hard_gate_evidence_id: str | None = None,
+        hard_gate_evidence_refs: tuple[str, ...] = (),
+        hard_gate_report_id: str | None = None,
+        submitted_hard_gate_measurements: tuple[GateMeasurement, ...] = (),
+        submitted_improvement_percentage_points: float | None = None,
+        verified_improvement_percentage_points: float | None = None,
+        verified_hard_gate_measurements: tuple[GateMeasurement, ...] = (),
+    ) -> GateDecision:
+        identifiers = (candidate_id, artifact_id, evaluation_report_id, policy_version_id)
+        optional_identifiers = (hard_gate_evidence_id, hard_gate_report_id)
+        measurement_groups = (
+            submitted_hard_gate_measurements,
+            verified_hard_gate_measurements,
+        )
+        improvements = (
+            submitted_improvement_percentage_points,
+            verified_improvement_percentage_points,
+        )
+        if (
+            any(not isinstance(value, str) or not value for value in identifiers)
+            or status not in {"passed", "failed"}
+            or not isinstance(failed_gates, tuple)
+            or any(not isinstance(value, str) or not value for value in failed_gates)
+            or len(set(failed_gates)) != len(failed_gates)
+            or (status == "passed") != (not failed_gates)
+            or any(
+                value is not None and (not isinstance(value, str) or not value)
+                for value in optional_identifiers
+            )
+            or not isinstance(hard_gate_evidence_refs, tuple)
+            or any(not isinstance(value, str) or not value for value in hard_gate_evidence_refs)
+            or len(set(hard_gate_evidence_refs)) != len(hard_gate_evidence_refs)
+            or any(
+                not cls._measurements_are_valid(measurements) for measurements in measurement_groups
+            )
+            or any(
+                value is not None
+                and (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not isfinite(value)
+                )
+                for value in improvements
+            )
+        ):
+            raise ValueError("gate_decision_schema_invalid")
+        normalized_submitted_improvement = (
+            float(submitted_improvement_percentage_points)
+            if submitted_improvement_percentage_points is not None
+            else None
+        )
+        normalized_verified_improvement = (
+            float(verified_improvement_percentage_points)
+            if verified_improvement_percentage_points is not None
+            else None
+        )
+        payload = cls._payload_without_id(
+            candidate_id=candidate_id,
+            artifact_id=artifact_id,
+            evaluation_report_id=evaluation_report_id,
+            policy_version_id=policy_version_id,
+            status=status,
+            failed_gates=failed_gates,
+            hard_gate_evidence_id=hard_gate_evidence_id,
+            hard_gate_evidence_refs=hard_gate_evidence_refs,
+            hard_gate_report_id=hard_gate_report_id,
+            submitted_hard_gate_measurements=submitted_hard_gate_measurements,
+            submitted_improvement_percentage_points=normalized_submitted_improvement,
+            verified_improvement_percentage_points=normalized_verified_improvement,
+            verified_hard_gate_measurements=verified_hard_gate_measurements,
+        )
+        return cls(
+            gate_decision_id=_content_id("gate_decision", payload),
+            candidate_id=candidate_id,
+            artifact_id=artifact_id,
+            evaluation_report_id=evaluation_report_id,
+            policy_version_id=policy_version_id,
+            status=status,
+            failed_gates=failed_gates,
+            hard_gate_evidence_id=hard_gate_evidence_id,
+            hard_gate_evidence_refs=hard_gate_evidence_refs,
+            hard_gate_report_id=hard_gate_report_id,
+            submitted_hard_gate_measurements=submitted_hard_gate_measurements,
+            submitted_improvement_percentage_points=normalized_submitted_improvement,
+            verified_improvement_percentage_points=normalized_verified_improvement,
+            verified_hard_gate_measurements=verified_hard_gate_measurements,
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "gate_decision_id": self.gate_decision_id,
+            **self._payload_without_id(
+                candidate_id=self.candidate_id,
+                artifact_id=self.artifact_id,
+                evaluation_report_id=self.evaluation_report_id,
+                policy_version_id=self.policy_version_id,
+                status=self.status,
+                failed_gates=self.failed_gates,
+                hard_gate_evidence_id=self.hard_gate_evidence_id,
+                hard_gate_evidence_refs=self.hard_gate_evidence_refs,
+                hard_gate_report_id=self.hard_gate_report_id,
+                submitted_hard_gate_measurements=self.submitted_hard_gate_measurements,
+                submitted_improvement_percentage_points=(
+                    self.submitted_improvement_percentage_points
+                ),
+                verified_improvement_percentage_points=(
+                    self.verified_improvement_percentage_points
+                ),
+                verified_hard_gate_measurements=self.verified_hard_gate_measurements,
+            ),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> GateDecision:
+        expected = {
+            "gate_decision_id",
+            "candidate_id",
+            "artifact_id",
+            "evaluation_report_id",
+            "policy_version_id",
+            "status",
+            "failed_gates",
+            "hard_gate_evidence_id",
+            "hard_gate_evidence_refs",
+            "hard_gate_report_id",
+            "submitted_hard_gate_measurements",
+            "submitted_improvement_percentage_points",
+            "verified_improvement_percentage_points",
+            "verified_hard_gate_measurements",
+            "serving_status",
+        }
+        if not isinstance(payload, dict) or set(payload) != expected:
+            raise ValueError("gate_decision_schema_invalid")
+        try:
+            decision = cls.create(
+                candidate_id=payload["candidate_id"],
+                artifact_id=payload["artifact_id"],
+                evaluation_report_id=payload["evaluation_report_id"],
+                policy_version_id=payload["policy_version_id"],
+                status=payload["status"],
+                failed_gates=cls._string_tuple(payload["failed_gates"]),
+                hard_gate_evidence_id=payload["hard_gate_evidence_id"],
+                hard_gate_evidence_refs=cls._string_tuple(payload["hard_gate_evidence_refs"]),
+                hard_gate_report_id=payload["hard_gate_report_id"],
+                submitted_hard_gate_measurements=cls._measurements_from_payload(
+                    payload["submitted_hard_gate_measurements"]
+                ),
+                submitted_improvement_percentage_points=payload[
+                    "submitted_improvement_percentage_points"
+                ],
+                verified_improvement_percentage_points=payload[
+                    "verified_improvement_percentage_points"
+                ],
+                verified_hard_gate_measurements=cls._measurements_from_payload(
+                    payload["verified_hard_gate_measurements"]
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("gate_decision_schema_invalid") from error
+        if (
+            payload["serving_status"] != "blocked"
+            or not isinstance(payload["gate_decision_id"], str)
+            or decision.gate_decision_id != payload["gate_decision_id"]
+        ):
+            raise ValueError("gate_decision_checksum_mismatch")
+        return decision
+
+    @staticmethod
+    def _measurements_are_valid(measurements: object) -> bool:
+        return (
+            isinstance(measurements, tuple)
+            and all(
+                isinstance(item, GateMeasurement)
+                and isinstance(item.name, str)
+                and bool(item.name)
+                and not isinstance(item.value, bool)
+                and isinstance(item.value, (int, float))
+                and isfinite(item.value)
+                for item in measurements
+            )
+            and len({item.name for item in measurements}) == len(measurements)
+        )
+
+    @staticmethod
+    def _string_tuple(value: object) -> tuple[str, ...]:
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ValueError("gate_decision_schema_invalid")
+        return tuple(value)
+
+    @staticmethod
+    def _measurements_from_payload(value: object) -> tuple[GateMeasurement, ...]:
+        if not isinstance(value, list):
+            raise ValueError("gate_decision_schema_invalid")
+        measurements: list[GateMeasurement] = []
+        for item in value:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"name", "value"}
+                or not isinstance(item["name"], str)
+                or isinstance(item["value"], bool)
+                or not isinstance(item["value"], (int, float))
+            ):
+                raise ValueError("gate_decision_schema_invalid")
+            measurements.append(GateMeasurement(item["name"], float(item["value"])))
+        return tuple(measurements)
+
+    @staticmethod
+    def _payload_without_id(
+        *,
+        candidate_id: str,
+        artifact_id: str,
+        evaluation_report_id: str,
+        policy_version_id: str,
+        status: Literal["passed", "failed"],
+        failed_gates: tuple[str, ...],
+        hard_gate_evidence_id: str | None,
+        hard_gate_evidence_refs: tuple[str, ...],
+        hard_gate_report_id: str | None,
+        submitted_hard_gate_measurements: tuple[GateMeasurement, ...],
+        submitted_improvement_percentage_points: float | None,
+        verified_improvement_percentage_points: float | None,
+        verified_hard_gate_measurements: tuple[GateMeasurement, ...],
+    ) -> dict[str, object]:
+        return {
+            "candidate_id": candidate_id,
+            "artifact_id": artifact_id,
+            "evaluation_report_id": evaluation_report_id,
+            "policy_version_id": policy_version_id,
+            "status": status,
+            "failed_gates": list(failed_gates),
+            "hard_gate_evidence_id": hard_gate_evidence_id,
+            "hard_gate_evidence_refs": list(hard_gate_evidence_refs),
+            "hard_gate_report_id": hard_gate_report_id,
+            "submitted_hard_gate_measurements": [
+                {"name": item.name, "value": item.value}
+                for item in submitted_hard_gate_measurements
+            ],
+            "submitted_improvement_percentage_points": (submitted_improvement_percentage_points),
+            "verified_improvement_percentage_points": verified_improvement_percentage_points,
+            "verified_hard_gate_measurements": [
+                {"name": item.name, "value": item.value} for item in verified_hard_gate_measurements
+            ],
+            "serving_status": "blocked",
+        }
 
 
 @dataclass(frozen=True)
@@ -904,6 +1202,16 @@ class ApprovalDecision:
             or (invalidated_reason is not None and not isinstance(invalidated_reason, str))
             or (decision == "approved" and invalidated_reason is not None)
             or (decision == "rejected" and invalidated_reason is None)
+            or (
+                decision == "approved"
+                and approval_mode == "owner_operated"
+                and approver_id != approval_policy_owner_principal_id
+            )
+            or (
+                decision == "approved"
+                and approval_mode == "separated_duties"
+                and independent_review is not True
+            )
         ):
             raise ValueError("approval_decision_schema_invalid")
         payload = {
@@ -1458,6 +1766,7 @@ class ModelLifecycle:
                 or report.fold_manifest_id != bundle.fold_manifest.fold_manifest_id
                 or batch.fold_manifest_id != bundle.fold_manifest.fold_manifest_id
                 or not bundle.fold_manifest.is_content_addressed()
+                or not bundle.fold_manifest.matches_feature_batch(batch)
                 or bundle.fold_manifest.fold_count != len(bundle.fold_manifest.folds)
                 or bundle.calibrators != bundle.primary_artifact.calibrators
                 or tuple(item.calibrator_id for item in bundle.calibrators)
@@ -1624,29 +1933,7 @@ class ModelLifecycle:
             failed_gates.extend(
                 category for category in self._gate_names if category in failed_categories
             )
-        decision_payload = {
-            "candidate_id": command.candidate_id,
-            "artifact_id": candidate["artifact_id"],
-            "evaluation_report_id": candidate["evaluation_report_id"],
-            "policy_version_id": command.policy_version_id,
-            "status": "failed" if failed_gates else "passed",
-            "failed_gates": failed_gates,
-            "hard_gate_evidence_id": evidence.evidence_id,
-            "hard_gate_evidence_refs": evidence.evidence_refs,
-            "hard_gate_report_id": report.artifact_id if report is not None else None,
-            "submitted_hard_gate_measurements": [
-                {"name": item.name, "value": item.value} for item in evidence.measurements
-            ],
-            "submitted_improvement_percentage_points": submitted_improvement,
-            "verified_improvement_percentage_points": verified_improvement,
-            "verified_hard_gate_measurements": [
-                {"name": item.name, "value": item.value}
-                for item in (report.measurements if evidence_is_valid and report else ())
-            ],
-            "serving_status": "blocked",
-        }
-        decision = GateDecision(
-            gate_decision_id=_content_id("gate_decision", decision_payload),
+        decision = GateDecision.create(
             candidate_id=command.candidate_id,
             artifact_id=str(candidate["artifact_id"]),
             evaluation_report_id=str(candidate["evaluation_report_id"]),
@@ -1655,13 +1942,20 @@ class ModelLifecycle:
             failed_gates=tuple(failed_gates),
             hard_gate_evidence_id=evidence.evidence_id,
             hard_gate_evidence_refs=evidence.evidence_refs,
+            hard_gate_report_id=report.artifact_id if report is not None else None,
+            submitted_hard_gate_measurements=evidence.measurements,
+            submitted_improvement_percentage_points=submitted_improvement,
+            verified_improvement_percentage_points=verified_improvement,
+            verified_hard_gate_measurements=(
+                report.measurements if evidence_is_valid and report else ()
+            ),
         )
         event = self._store.append(
             command_id=command.command_id,
             model_family_id=command.model_family_id,
             expected_version=command.expected_version,
             event_kind="GateDecisionRecorded",
-            payload={**decision_payload, "gate_decision_id": decision.gate_decision_id},
+            payload=decision.to_payload(),
             occurred_at=command.occurred_at,
         )
         return LifecycleResult(
@@ -1704,9 +1998,9 @@ class ModelLifecycle:
         elif self._approval_policy.approval_mode == "separated_duties" and not independent_review:
             invalidated_reason = "duty_separation_violation"
         elif (
-            command.artifact_id != gate["artifact_id"]
-            or command.evaluation_report_id != gate["evaluation_report_id"]
-            or command.policy_version_id != gate["policy_version_id"]
+            command.artifact_id != gate.artifact_id
+            or command.evaluation_report_id != gate.evaluation_report_id
+            or command.policy_version_id != gate.policy_version_id
         ):
             invalidated_reason = "evidence_reference_mismatch"
         elif command.expected_assignment != self._current_assignment(command.model_family_id):
@@ -1725,7 +2019,7 @@ class ModelLifecycle:
             artifact_id=command.artifact_id,
             evaluation_report_id=command.evaluation_report_id,
             policy_version_id=command.policy_version_id,
-            gate_decision_id=cast(str, gate["gate_decision_id"]),
+            gate_decision_id=gate.gate_decision_id,
             approval_policy_version_id=self._approval_policy.policy_version_id,
             approval_mode=self._approval_policy.approval_mode,
             approval_policy_owner_principal_id=self._approval_policy.owner_principal_id,
@@ -1795,8 +2089,8 @@ class ModelLifecycle:
             if isinstance(payload, dict) and "approval_decision_id" in payload:
                 try:
                     decision = ApprovalDecision.from_payload(payload)
-                except (TypeError, ValueError):
-                    continue
+                except (KeyError, TypeError, ValueError) as error:
+                    raise LifecycleConflict("approval_decision_evidence_invalid") from error
                 if (
                     decision.candidate_id == command.candidate_id
                     and decision.artifact_id == command.artifact_id
@@ -1824,16 +2118,19 @@ class ModelLifecycle:
 
     def _passed_gate(
         self, model_family_id: str, candidate_id: str
-    ) -> tuple[LifecycleEvent, dict[str, object]]:
+    ) -> tuple[LifecycleEvent, GateDecision]:
         for event in reversed(self._store.events(model_family_id)):
             if event.event_kind != "GateDecisionRecorded":
                 continue
-            payload = json.loads(event.payload_json)
-            if payload["candidate_id"] != candidate_id:
+            try:
+                decision = GateDecision.from_payload(json.loads(event.payload_json))
+            except (KeyError, TypeError, ValueError) as error:
+                raise LifecycleConflict("gate_decision_evidence_invalid") from error
+            if decision.candidate_id != candidate_id:
                 continue
-            if payload["status"] != "passed":
+            if decision.status != "passed":
                 raise LifecycleConflict("candidate_gate_not_passed")
-            return event, dict(payload)
+            return event, decision
         raise LifecycleConflict("candidate_gate_not_evaluated")
 
     def _record_shadow(self, command: RecordShadowEod) -> LifecycleResult:
@@ -1853,13 +2150,18 @@ class ModelLifecycle:
             current_gate = None
             current_gate_passed = False
         evidence = command.evidence
-        prior_shadow_events = tuple(
-            event
+        prior_payloads = tuple(
+            payload
             for event in self._store.events(command.model_family_id)
             if event.event_kind == "ShadowEodRecorded"
-            and json.loads(event.payload_json)["candidate_id"] == command.candidate_id
+            and (payload := json.loads(event.payload_json))["candidate_id"] == command.candidate_id
+            and payload.get("artifact_id") == evidence.artifact_id
+            and payload.get("evaluation_report_id") == evidence.evaluation_report_id
+            and payload.get("gate_decision_id") == evidence.gate_decision_id
+            and payload.get("approval_decision_id") == evidence.approval_decision_id
+            and payload.get("approval_policy_version_id") == evidence.approval_policy_version_id
+            and payload.get("expected_assignment") == evidence.expected_assignment
         )
-        prior_payloads = tuple(json.loads(event.payload_json) for event in prior_shadow_events)
         previous = prior_payloads[-1] if prior_payloads else None
         blocked_reason: str | None = None
         if approval_evidence_invalid:
@@ -1869,8 +2171,8 @@ class ModelLifecycle:
         elif not current_gate_passed:
             blocked_reason = "hard_gate_vetoed"
         elif current_gate is None or (
-            approval.gate_decision_id != current_gate.get("gate_decision_id")
-            or approval.policy_version_id != current_gate.get("policy_version_id")
+            approval.gate_decision_id != current_gate.gate_decision_id
+            or approval.policy_version_id != current_gate.policy_version_id
         ):
             blocked_reason = "gate_lineage_changed"
         elif approval.decision != "approved" or approval.invalidated_reason is not None:
@@ -1924,7 +2226,7 @@ class ModelLifecycle:
             str(previous["eligible_eod_date"])
         ):
             blocked_reason = "shadow_date_not_increasing"
-        completed_cycles = len(prior_shadow_events)
+        completed_cycles = len(prior_payloads)
         eligible_cycle_count = completed_cycles + (0 if blocked_reason else 1)
         outcome_evidence = ShadowEvidence(
             shadow_run_id=evidence.shadow_run_id,
@@ -1996,17 +2298,7 @@ class ModelLifecycle:
         raise LifecycleConflict("candidate_not_approved")
 
     def _record_development_failure(self, command: RecordDevelopmentGateFailure) -> LifecycleResult:
-        decision_payload = {
-            "candidate_id": command.candidate_id,
-            "artifact_id": "unavailable:not-produced",
-            "evaluation_report_id": "unavailable:not-produced",
-            "policy_version_id": command.policy_version_id,
-            "status": "failed",
-            "failed_gates": command.failed_gates,
-            "serving_status": "blocked",
-        }
-        decision = GateDecision(
-            gate_decision_id=_content_id("gate_decision", decision_payload),
+        decision = GateDecision.create(
             candidate_id=command.candidate_id,
             artifact_id="unavailable:not-produced",
             evaluation_report_id="unavailable:not-produced",
@@ -2019,7 +2311,7 @@ class ModelLifecycle:
             model_family_id=command.model_family_id,
             expected_version=command.expected_version,
             event_kind="GateDecisionRecorded",
-            payload={**decision_payload, "gate_decision_id": decision.gate_decision_id},
+            payload=decision.to_payload(),
             occurred_at=command.occurred_at,
         )
         return LifecycleResult(
@@ -2043,12 +2335,30 @@ class ModelGovernanceQuery:
             raise KeyError(model_family_id)
         candidate = cast(dict[str, object], json.loads(candidate_event.payload_json))
         candidate_id = str(candidate["candidate_id"])
-        gate = self._latest_payload(events, "GateDecisionRecorded", candidate_id)
+        gate_payload = self._latest_payload(events, "GateDecisionRecorded", candidate_id)
+        gate: GateDecision | None = None
+        gate_projection: dict[str, object]
+        if gate_payload is None:
+            gate_projection = {"status": "not_evaluated"}
+        else:
+            try:
+                gate = GateDecision.from_payload(gate_payload)
+            except (KeyError, TypeError, ValueError):
+                gate_projection = {"status": "gate_evidence_invalid"}
+            else:
+                gate_projection = {
+                    "status": gate.status,
+                    "policy_version_id": gate.policy_version_id,
+                    "failed_gates": gate.failed_gates,
+                    "hard_gate_evidence_id": gate.hard_gate_evidence_id,
+                    "hard_gate_evidence_refs": gate.hard_gate_evidence_refs,
+                }
         approval = self._latest_payload(events, "ApprovalDecisionRecorded", candidate_id)
-        shadow_count = sum(
-            event.event_kind == "ShadowEodRecorded"
-            and json.loads(event.payload_json)["candidate_id"] == candidate_id
-            for event in events
+        shadow_count = self._current_lineage_shadow_count(
+            events,
+            candidate_id,
+            gate,
+            approval,
         )
         assignments = self._store.production_assignments(model_family_id)
         calibrator_statuses = cast(list[str], candidate["calibrator_statuses"])
@@ -2074,18 +2384,8 @@ class ModelGovernanceQuery:
                 "required": 6,
             },
             "support": {"fold_count": candidate["fold_count"]},
-            "gate": (
-                {
-                    "status": gate["status"],
-                    "policy_version_id": gate["policy_version_id"],
-                    "failed_gates": gate["failed_gates"],
-                    "hard_gate_evidence_id": gate.get("hard_gate_evidence_id"),
-                    "hard_gate_evidence_refs": gate.get("hard_gate_evidence_refs", []),
-                }
-                if gate is not None
-                else {"status": "not_evaluated"}
-            ),
-            "approval": self._approval_projection(approval, candidate, gate),
+            "gate": gate_projection,
+            "approval": self._approval_projection(approval, candidate, gate_projection),
             "shadow": {"eligible_cycle_count": shadow_count, "required": 5},
             "serving": {
                 "status": "assigned" if assignments else "blocked",
@@ -2117,7 +2417,7 @@ class ModelGovernanceQuery:
             return {
                 "status": (
                     "blocked_by_gate"
-                    if gate is not None and gate["status"] == "failed"
+                    if gate is not None and gate["status"] in {"failed", "gate_evidence_invalid"}
                     else "awaiting_approval"
                 )
             }
@@ -2141,3 +2441,36 @@ class ModelGovernanceQuery:
             "independent_review": approval.get("approver_id")
             not in {candidate["intent_initiator"], candidate["training_executor"]},
         }
+
+    @staticmethod
+    def _current_lineage_shadow_count(
+        events: tuple[LifecycleEvent, ...],
+        candidate_id: str,
+        gate: GateDecision | None,
+        approval_payload: dict[str, object] | None,
+    ) -> int:
+        if (
+            gate is None
+            or approval_payload is None
+            or "approval_decision_id" not in approval_payload
+        ):
+            return 0
+        try:
+            approval = ApprovalDecision.from_payload(approval_payload)
+        except (KeyError, TypeError, ValueError):
+            return 0
+        if approval.gate_decision_id != gate.gate_decision_id:
+            return 0
+        count = 0
+        for event in events:
+            if event.event_kind != "ShadowEodRecorded":
+                continue
+            payload = json.loads(event.payload_json)
+            if (
+                payload.get("candidate_id") == candidate_id
+                and payload.get("gate_decision_id") == gate.gate_decision_id
+                and payload.get("approval_decision_id") == approval.approval_decision_id
+                and payload.get("approval_policy_version_id") == approval.approval_policy_version_id
+            ):
+                count += 1
+        return count
