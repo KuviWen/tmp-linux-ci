@@ -15,6 +15,7 @@ from stock_forecasting.authorization_repository import (
     AuthorizationPolicyRepository,
     fixture_authorization_policy_catalog,
 )
+from stock_forecasting.evaluation_report import EvaluationReport
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     SEPARATED_DUTIES_APPROVAL_POLICY_V1,
@@ -331,7 +332,14 @@ def test_operator_runtime_designates_its_single_owner_for_model_approval(
     monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", TICKET_09_OWNER_OPERATOR_POLICY_SET)
     application = RuntimeSettings.from_environment().build_application()
     owner_id = identity.context.principal_id
-    evaluation_id = "sha256:owner-runtime-evaluation"
+    evaluation = EvaluationReport.create(
+        class_prior_equal_cell_macro_f1=0.40,
+        logistic_equal_cell_macro_f1=0.52,
+        seed_macro_f1=(0.50, 0.52, 0.54),
+        cost_manifest_id="cost-v1",
+        fold_manifest_id="fold-v1",
+    )
+    evaluation_id = evaluation.evaluation_report_id
     report = passing_hard_gate_report(evaluation_id)
     application.governance_object_repository.put_verified(
         BytesIO(report.serialized),
@@ -345,13 +353,10 @@ def test_operator_runtime_designates_its_single_owner_for_model_approval(
             candidate_id="owner-runtime-candidate",
             model_family="regularized_multinomial_logistic",
             artifact_id="sha256:owner-runtime-artifact",
-            evaluation_report_id=evaluation_id,
+            evaluation_report=evaluation,
             training_intent_id="owner-runtime-intent",
             intent_initiator=owner_id,
             training_executor=owner_id,
-            improvement_percentage_points=12.0,
-            class_prior_equal_cell_macro_f1=0.40,
-            logistic_equal_cell_macro_f1=0.52,
             calibrator_statuses=("sufficient_data",) * 6,
             expected_version=0,
             occurred_at=now,

@@ -1030,18 +1030,15 @@ def _quantile(values: list[float], probability: float) -> float:
 
 
 def _training_selection_id(request: TrainingRequest) -> str:
-    serialized = json.dumps(
+    return _content_id(
+        "training-selection",
         {
             "feature_batch_id": request.feature_batch.feature_batch_id,
             "fold_manifest_id": request.feature_batch.fold_manifest_id,
             "training_row_ids": request.training_row_ids,
             "validation_row_ids": request.validation_row_ids,
         },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(b'training-selection' + serialized).hexdigest()}"
+    )
 
 
 def _confidence(probabilities: ProbabilityVector) -> float:

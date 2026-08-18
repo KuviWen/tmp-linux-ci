@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from io import BytesIO
 from math import isfinite
 from types import MappingProxyType
 from typing import BinaryIO, Literal, Protocol, cast
@@ -14,7 +15,9 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
+from stock_forecasting.content_address import canonical_json
 from stock_forecasting.content_address import content_id as _content_id
+from stock_forecasting.evaluation_report import EvaluationReport
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import model_lifecycle_events
 
@@ -420,6 +423,22 @@ class ContentAddressedObjectRepository(Protocol):
     def open_by_id(self, object_id: str) -> BinaryIO: ...
 
 
+class EvaluationReportObjectRepository(ContentAddressedObjectRepository, Protocol):
+    def put_verified(
+        self,
+        stream: BinaryIO,
+        *,
+        expected_checksum: str,
+        metadata: Mapping[str, str],
+    ) -> object: ...
+
+
+class EvaluationReportRepository(Protocol):
+    def put(self, report: EvaluationReport) -> None: ...
+
+    def resolve(self, evaluation_report_id: str) -> EvaluationReport | None: ...
+
+
 class InMemoryGatePolicyRepository:
     def __init__(self, policies: tuple[BootstrapGatePolicyVersion, ...]) -> None:
         self._policies = {policy.policy_version_id: policy for policy in policies}
@@ -471,6 +490,47 @@ class UnavailableGateEvidenceRepository:
         return None
 
 
+class InMemoryEvaluationReportRepository:
+    def __init__(self) -> None:
+        self._reports: dict[str, EvaluationReport] = {}
+
+    def put(self, report: EvaluationReport) -> None:
+        existing = self._reports.get(report.evaluation_report_id)
+        if existing is not None and existing != report:
+            raise ValueError("evaluation_report_id_conflict")
+        self._reports[report.evaluation_report_id] = report
+
+    def resolve(self, evaluation_report_id: str) -> EvaluationReport | None:
+        return self._reports.get(evaluation_report_id)
+
+
+class ObjectEvaluationReportRepository:
+    def __init__(
+        self,
+        objects: EvaluationReportObjectRepository | Callable[[], EvaluationReportObjectRepository],
+    ) -> None:
+        self._objects = objects
+
+    def put(self, report: EvaluationReport) -> None:
+        objects = self._objects() if callable(self._objects) else self._objects
+        objects.put_verified(
+            BytesIO(report.serialized),
+            expected_checksum=report.evaluation_report_id.removeprefix("sha256:"),
+            metadata={
+                "content_type": "application/json",
+                "object_kind": "bootstrap_evaluation_report",
+            },
+        )
+
+    def resolve(self, evaluation_report_id: str) -> EvaluationReport | None:
+        try:
+            objects = self._objects() if callable(self._objects) else self._objects
+            serialized = objects.open_by_id(evaluation_report_id).read()
+            return EvaluationReport.from_serialized(evaluation_report_id, serialized)
+        except (FileNotFoundError, KeyError, OSError, TypeError, ValueError):
+            return None
+
+
 @dataclass(frozen=True)
 class RecordCandidate:
     command_id: str
@@ -478,16 +538,13 @@ class RecordCandidate:
     candidate_id: str
     model_family: str
     artifact_id: str
-    evaluation_report_id: str
+    evaluation_report: EvaluationReport
     training_intent_id: str
     intent_initiator: str
     training_executor: str
-    improvement_percentage_points: float
     calibrator_statuses: tuple[str, ...]
     expected_version: int
     occurred_at: datetime
-    class_prior_equal_cell_macro_f1: float = 0.0
-    logistic_equal_cell_macro_f1: float = 0.0
     fold_count: int = 0
     formal_qualification: bool = False
 
@@ -523,6 +580,12 @@ class DecideApproval:
 class ShadowRunEvidence:
     evidence_id: str
     shadow_run_id: str
+    candidate_id: str
+    artifact_id: str
+    evaluation_report_id: str
+    approval_decision_id: str
+    approval_policy_version_id: str
+    expected_assignment: str
     eligible_eod_date: date
     previous_shadow_run_id: str | None
     markets: tuple[str, ...]
@@ -538,6 +601,12 @@ class ShadowRunEvidence:
         cls,
         *,
         shadow_run_id: str,
+        candidate_id: str,
+        artifact_id: str,
+        evaluation_report_id: str,
+        approval_decision_id: str,
+        approval_policy_version_id: str,
+        expected_assignment: str,
         eligible_eod_date: date,
         previous_shadow_run_id: str | None,
         markets: tuple[str, ...],
@@ -548,9 +617,17 @@ class ShadowRunEvidence:
         source_policy_verified: bool,
         cpu_prediction_seconds: float,
     ) -> ShadowRunEvidence:
+        if not isfinite(cpu_prediction_seconds) or cpu_prediction_seconds < 0:
+            raise ValueError("shadow_cpu_prediction_seconds_invalid")
         ordered_markets = tuple(sorted(markets))
         payload = {
             "shadow_run_id": shadow_run_id,
+            "candidate_id": candidate_id,
+            "artifact_id": artifact_id,
+            "evaluation_report_id": evaluation_report_id,
+            "approval_decision_id": approval_decision_id,
+            "approval_policy_version_id": approval_policy_version_id,
+            "expected_assignment": expected_assignment,
             "eligible_eod_date": eligible_eod_date.isoformat(),
             "previous_shadow_run_id": previous_shadow_run_id,
             "markets": ordered_markets,
@@ -564,6 +641,12 @@ class ShadowRunEvidence:
         return cls(
             evidence_id=_content_id("shadow_run_evidence", payload),
             shadow_run_id=shadow_run_id,
+            candidate_id=candidate_id,
+            artifact_id=artifact_id,
+            evaluation_report_id=evaluation_report_id,
+            approval_decision_id=approval_decision_id,
+            approval_policy_version_id=approval_policy_version_id,
+            expected_assignment=expected_assignment,
             eligible_eod_date=eligible_eod_date,
             previous_shadow_run_id=previous_shadow_run_id,
             markets=ordered_markets,
@@ -578,6 +661,12 @@ class ShadowRunEvidence:
     def is_content_addressed(self) -> bool:
         rebuilt = self.create(
             shadow_run_id=self.shadow_run_id,
+            candidate_id=self.candidate_id,
+            artifact_id=self.artifact_id,
+            evaluation_report_id=self.evaluation_report_id,
+            approval_decision_id=self.approval_decision_id,
+            approval_policy_version_id=self.approval_policy_version_id,
+            expected_assignment=self.expected_assignment,
             eligible_eod_date=self.eligible_eod_date,
             previous_shadow_run_id=self.previous_shadow_run_id,
             markets=self.markets,
@@ -597,6 +686,15 @@ class ShadowEligibilityVerifier(Protocol):
 
 class UnavailableShadowEligibilityVerifier:
     def verify_eligible_eod(self, evidence: ShadowRunEvidence) -> bool:
+        return False
+
+
+class ShadowRunVerifier(Protocol):
+    def verify_shadow_run(self, evidence: ShadowRunEvidence) -> bool: ...
+
+
+class UnavailableShadowRunVerifier:
+    def verify_shadow_run(self, evidence: ShadowRunEvidence) -> bool:
         return False
 
 
@@ -821,7 +919,7 @@ class SqlAlchemyLifecycleStore:
                     if (
                         existing["model_family_id"] != model_family_id
                         or existing["event_kind"] != event_kind
-                        or existing["payload"] != payload
+                        or canonical_json(existing["payload"]) != canonical_json(payload)
                     ):
                         raise LifecycleConflict("command_id_payload_conflict")
                     return self._event_from_row(dict(existing))
@@ -954,18 +1052,24 @@ class ModelLifecycle:
         *,
         policy_repository: GatePolicyRepository | None = None,
         evidence_repository: GateEvidenceRepository | None = None,
+        evaluation_report_repository: EvaluationReportRepository | None = None,
         approval_policy: ModelApprovalPolicyVersion | None = None,
         shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
+        shadow_run_verifier: ShadowRunVerifier | None = None,
     ) -> None:
         self._store = store
         self._policy_repository = policy_repository or InMemoryGatePolicyRepository(
             (BOOTSTRAP_GATE_POLICY_V1,)
         )
         self._evidence_repository = evidence_repository or UnavailableGateEvidenceRepository()
+        self._evaluation_report_repository = (
+            evaluation_report_repository or InMemoryEvaluationReportRepository()
+        )
         self._approval_policy = approval_policy or SEPARATED_DUTIES_APPROVAL_POLICY_V1
         self._shadow_eligibility_verifier = (
             shadow_eligibility_verifier or UnavailableShadowEligibilityVerifier()
         )
+        self._shadow_run_verifier = shadow_run_verifier or UnavailableShadowRunVerifier()
 
     def execute(self, command: LifecycleCommand) -> LifecycleResult:
         if isinstance(command, RecordCandidate):
@@ -979,6 +1083,13 @@ class ModelLifecycle:
         return self._record_development_failure(command)
 
     def _record_candidate(self, command: RecordCandidate) -> LifecycleResult:
+        report = EvaluationReport.from_serialized(
+            command.evaluation_report.evaluation_report_id,
+            command.evaluation_report.serialized,
+        )
+        if report != command.evaluation_report:
+            raise LifecycleConflict("evaluation_report_invalid")
+        self._evaluation_report_repository.put(report)
         event = self._store.append(
             command_id=command.command_id,
             model_family_id=command.model_family_id,
@@ -988,14 +1099,14 @@ class ModelLifecycle:
                 "candidate_id": command.candidate_id,
                 "model_family": command.model_family,
                 "artifact_id": command.artifact_id,
-                "evaluation_report_id": command.evaluation_report_id,
+                "evaluation_report_id": report.evaluation_report_id,
                 "training_intent_id": command.training_intent_id,
                 "intent_initiator": command.intent_initiator,
                 "training_executor": command.training_executor,
-                "improvement_percentage_points": (command.improvement_percentage_points),
+                "improvement_percentage_points": report.improvement_percentage_points,
                 "calibrator_statuses": command.calibrator_statuses,
-                "class_prior_equal_cell_macro_f1": (command.class_prior_equal_cell_macro_f1),
-                "logistic_equal_cell_macro_f1": (command.logistic_equal_cell_macro_f1),
+                "class_prior_equal_cell_macro_f1": (report.class_prior_equal_cell_macro_f1),
+                "logistic_equal_cell_macro_f1": report.logistic_equal_cell_macro_f1,
                 "fold_count": command.fold_count,
                 "formal_qualification": command.formal_qualification,
             },
@@ -1012,23 +1123,30 @@ class ModelLifecycle:
             failed_gates.append("model_family")
         if candidate["formal_qualification"] is not True:
             failed_gates.append("qualification")
-        class_prior_score = cast(float, candidate["class_prior_equal_cell_macro_f1"])
-        logistic_score = cast(float, candidate["logistic_equal_cell_macro_f1"])
+        evaluation_report = self._evaluation_report_repository.resolve(
+            str(candidate["evaluation_report_id"])
+        )
+        submitted_prior_score = cast(float, candidate["class_prior_equal_cell_macro_f1"])
+        submitted_logistic_score = cast(float, candidate["logistic_equal_cell_macro_f1"])
         submitted_improvement = cast(float, candidate["improvement_percentage_points"])
-        verified_improvement = (logistic_score - class_prior_score) * 100
-        if (
-            not all(
-                isfinite(value)
-                for value in (
-                    class_prior_score,
-                    logistic_score,
-                    submitted_improvement,
-                    verified_improvement,
-                )
-            )
-            or abs(submitted_improvement - verified_improvement) > 1e-12
-            or verified_improvement < 1.0
-        ):
+        evaluation_report_is_valid = (
+            evaluation_report is not None
+            and evaluation_report.evaluation_report_id == candidate["evaluation_report_id"]
+            and abs(submitted_prior_score - evaluation_report.class_prior_equal_cell_macro_f1)
+            <= 1e-12
+            and abs(submitted_logistic_score - evaluation_report.logistic_equal_cell_macro_f1)
+            <= 1e-12
+            and abs(submitted_improvement - evaluation_report.improvement_percentage_points)
+            <= 1e-12
+        )
+        verified_improvement = (
+            evaluation_report.improvement_percentage_points
+            if evaluation_report_is_valid and evaluation_report is not None
+            else None
+        )
+        if not evaluation_report_is_valid:
+            failed_gates.append("evaluation_report")
+        if verified_improvement is None or verified_improvement < 1.0:
             failed_gates.append("minimum_improvement")
         calibrator_statuses = tuple(cast(list[str], candidate["calibrator_statuses"]))
         if len(calibrator_statuses) != 6 or any(
@@ -1245,6 +1363,7 @@ class ModelLifecycle:
         raise LifecycleConflict("candidate_gate_not_evaluated")
 
     def _record_shadow(self, command: RecordShadowEod) -> LifecycleResult:
+        candidate = self._candidate(command.model_family_id, command.candidate_id)
         approval = self._current_approval(command.model_family_id, command.candidate_id)
         expires_at = datetime.fromisoformat(str(approval["expires_at"]))
         evidence = command.evidence
@@ -1272,10 +1391,21 @@ class ModelLifecycle:
             blocked_reason = "expected_assignment_changed"
         elif not evidence.is_content_addressed():
             blocked_reason = "shadow_evidence_checksum_mismatch"
+        elif (
+            evidence.candidate_id != command.candidate_id
+            or evidence.artifact_id != candidate["artifact_id"]
+            or evidence.evaluation_report_id != candidate["evaluation_report_id"]
+            or evidence.approval_decision_id != approval["approval_decision_id"]
+            or evidence.approval_policy_version_id != approval_policy_version_id
+            or evidence.expected_assignment != approval["expected_assignment"]
+        ):
+            blocked_reason = "shadow_evidence_binding_mismatch"
         elif set(evidence.markets) != {"XTAI", "XNAS"}:
             blocked_reason = "incomplete_market_shadow"
         elif not self._is_eligible_shadow_eod(evidence):
             blocked_reason = "shadow_eod_not_eligible"
+        elif not self._is_verified_shadow_run(evidence):
+            blocked_reason = "shadow_run_not_verified"
         elif (
             not all(
                 (
@@ -1322,6 +1452,11 @@ class ModelLifecycle:
                 "eligible_eod_date": evidence.eligible_eod_date.isoformat(),
                 "previous_shadow_run_id": evidence.previous_shadow_run_id,
                 "candidate_id": command.candidate_id,
+                "artifact_id": evidence.artifact_id,
+                "evaluation_report_id": evidence.evaluation_report_id,
+                "approval_decision_id": evidence.approval_decision_id,
+                "approval_policy_version_id": evidence.approval_policy_version_id,
+                "expected_assignment": evidence.expected_assignment,
                 "market_eligibility": evidence.markets,
                 "cold_load_checksum_verified": evidence.cold_load_checksum_verified,
                 "schema_compatible": evidence.schema_compatible,
@@ -1350,6 +1485,12 @@ class ModelLifecycle:
     def _is_eligible_shadow_eod(self, evidence: ShadowRunEvidence) -> bool:
         try:
             return self._shadow_eligibility_verifier.verify_eligible_eod(evidence)
+        except Exception:
+            return False
+
+    def _is_verified_shadow_run(self, evidence: ShadowRunEvidence) -> bool:
+        try:
+            return self._shadow_run_verifier.verify_shadow_run(evidence)
         except Exception:
             return False
 

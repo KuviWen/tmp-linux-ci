@@ -7,6 +7,7 @@ from typing import Literal, Protocol, cast
 
 from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.contracts import HistoricalTrainingLineage
+from stock_forecasting.evaluation_report import EvaluationReport
 from stock_forecasting.forecasting import (
     CalibrationEvidence,
     ClassPriorTrendForecaster,
@@ -100,17 +101,6 @@ class FoldManifest:
     actual_history_end: date
     purge_sessions: int = 20
     embargo_sessions: int = 20
-
-
-@dataclass(frozen=True)
-class EvaluationReport:
-    evaluation_report_id: str
-    class_prior_equal_cell_macro_f1: float
-    logistic_equal_cell_macro_f1: float
-    improvement_percentage_points: float
-    seed_macro_f1: tuple[float, ...]
-    cost_manifest_id: str
-    fold_manifest_id: str
 
 
 @dataclass(frozen=True)
@@ -438,18 +428,9 @@ class ForecastLab:
             for truth, predictions in zip(seed_truth, seed_predictions, strict=True)
         )
         logistic_score = sum(seed_scores) / len(seed_scores)
-        report_payload = {
-            "prior": prior_score,
-            "logistic": logistic_score,
-            "seed_scores": seed_scores,
-            "cost_manifest_id": batch.cost_manifest_id,
-            "fold_manifest_id": fold_manifest.fold_manifest_id,
-        }
-        return EvaluationReport(
-            evaluation_report_id=_content_id("evaluation_report", report_payload),
+        return EvaluationReport.create(
             class_prior_equal_cell_macro_f1=prior_score,
             logistic_equal_cell_macro_f1=logistic_score,
-            improvement_percentage_points=(logistic_score - prior_score) * 100,
             seed_macro_f1=seed_scores,
             cost_manifest_id=batch.cost_manifest_id,
             fold_manifest_id=fold_manifest.fold_manifest_id,

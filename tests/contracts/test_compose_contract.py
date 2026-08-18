@@ -324,6 +324,7 @@ def test_compose_declares_the_deployable_ticket_05_runtime() -> None:
     assert "REVOKE INSERT, UPDATE, DELETE ON authorization_policy_sets FROM stock" in (
         role_grant_sql
     )
+    assert "REVOKE UPDATE, DELETE ON model_lifecycle_events FROM stock" in role_grant_sql
     assert "proxy_pass http://127.0.0.1:8000" in (
         REPOSITORY_ROOT / "docker" / "nginx" / "api-loopback.conf"
     ).read_text(encoding="utf-8")

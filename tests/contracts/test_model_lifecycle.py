@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, date, datetime, time
 from io import BytesIO
 from typing import Literal
@@ -7,6 +8,7 @@ from typing import Literal
 import pytest
 from sqlalchemy import create_engine, func, select
 
+from stock_forecasting.evaluation_report import EvaluationReport
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     BootstrapGatePolicyVersion,
@@ -15,6 +17,7 @@ from stock_forecasting.model_governance import (
     GateMeasurement,
     HardGateEvidence,
     HardGateReportArtifact,
+    InMemoryEvaluationReportRepository,
     InMemoryLifecycleStore,
     LifecycleConflict,
     ModelApprovalPolicyVersion,
@@ -25,11 +28,15 @@ from stock_forecasting.model_governance import (
     RecordShadowEod,
     ShadowEligibilityVerifier,
     ShadowRunEvidence,
+    ShadowRunVerifier,
     SqlAlchemyLifecycleStore,
 )
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import metadata
 from tests.modeling_support import passing_hard_gate_evidence
+
+_RECORDED_EVALUATION_REPORTS: dict[str, EvaluationReport] = {}
+_SHADOW_BINDING: dict[str, str] = {}
 
 
 class _VerifiedEvidenceRepository:
@@ -53,17 +60,24 @@ class _JointMarketEodVerifier:
         }
 
 
+class _VerifiedShadowRunVerifier:
+    def verify_shadow_run(self, evidence: ShadowRunEvidence) -> bool:
+        return True
+
+
 def _verified_lifecycle(
     store: InMemoryLifecycleStore | SqlAlchemyLifecycleStore,
     *,
     shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
+    shadow_run_verifier: ShadowRunVerifier | None = None,
+    evaluation_report_repository: InMemoryEvaluationReportRepository | None = None,
 ) -> ModelLifecycle:
-    if shadow_eligibility_verifier is None:
-        return ModelLifecycle(store, evidence_repository=_VerifiedEvidenceRepository())
     return ModelLifecycle(
         store,
         evidence_repository=_VerifiedEvidenceRepository(),
+        evaluation_report_repository=evaluation_report_repository,
         shadow_eligibility_verifier=shadow_eligibility_verifier,
+        shadow_run_verifier=shadow_run_verifier,
     )
 
 
@@ -73,9 +87,13 @@ def _hard_gates(
     overrides: dict[str, float] | None = None,
 ) -> HardGateEvidence:
     return passing_hard_gate_evidence(
-        f"sha256:evaluation-{candidate_id}",
+        _RECORDED_EVALUATION_REPORTS[candidate_id].evaluation_report_id,
         overrides=overrides,
     )
+
+
+def _evaluation_report_id(candidate_id: str) -> str:
+    return _RECORDED_EVALUATION_REPORTS[candidate_id].evaluation_report_id
 
 
 def _shadow_evidence(
@@ -90,9 +108,30 @@ def _shadow_evidence(
         date(2026, 8, 21),
         date(2026, 8, 24),
     )
-    return ShadowRunEvidence.create(
+    return _bound_shadow_evidence(
         shadow_run_id=f"shadow-run-{cycle}",
         eligible_eod_date=eligible_dates[cycle - 1],
+        previous_shadow_run_id=previous_shadow_run_id,
+    )
+
+
+def _bound_shadow_evidence(
+    *,
+    shadow_run_id: str,
+    eligible_eod_date: date,
+    previous_shadow_run_id: str | None,
+    cpu_prediction_seconds: float = 420.0,
+    candidate_id: str | None = None,
+) -> ShadowRunEvidence:
+    return ShadowRunEvidence.create(
+        shadow_run_id=shadow_run_id,
+        candidate_id=candidate_id or _SHADOW_BINDING["candidate_id"],
+        artifact_id=_SHADOW_BINDING["artifact_id"],
+        evaluation_report_id=_SHADOW_BINDING["evaluation_report_id"],
+        approval_decision_id=_SHADOW_BINDING["approval_decision_id"],
+        approval_policy_version_id=_SHADOW_BINDING["approval_policy_version_id"],
+        expected_assignment=_SHADOW_BINDING["expected_assignment"],
+        eligible_eod_date=eligible_eod_date,
         previous_shadow_run_id=previous_shadow_run_id,
         markets=("XTAI", "XNAS"),
         cold_load_checksum_verified=True,
@@ -100,7 +139,7 @@ def _shadow_evidence(
         probability_invariants_verified=True,
         comparison_completed=True,
         source_policy_verified=True,
-        cpu_prediction_seconds=420.0,
+        cpu_prediction_seconds=cpu_prediction_seconds,
     )
 
 
@@ -116,7 +155,7 @@ def test_bootstrap_gate_rejects_unqualified_candidate_and_tampered_metric_eviden
     evidence = HardGateEvidence.create(
         evidence_kind="formal_evidence",
         policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
-        evaluation_report_id="sha256:evaluation-candidate-unqualified-evidence",
+        evaluation_report_id=_evaluation_report_id("candidate-unqualified-evidence"),
         evidence_refs=("sha256:gate-report",),
         measurements=(GateMeasurement("qualification.manifest_fraction", 1.0),),
     )
@@ -207,7 +246,7 @@ def test_lifecycle_fails_closed_when_policy_uses_an_unknown_gate_category() -> N
     )
     report = HardGateReportArtifact.create(
         policy_version_id=policy_id,
-        evaluation_report_id=f"sha256:evaluation-{candidate_id}",
+        evaluation_report_id=_evaluation_report_id(candidate_id),
         measurements=(GateMeasurement("unknown.metric", 1.0),),
     )
     evidence = HardGateEvidence.create(
@@ -329,6 +368,71 @@ def test_in_memory_store_matches_sql_command_replay_and_conflict_contract() -> N
         )
 
 
+def test_sql_store_replays_canonical_tuple_payload_without_conflict() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    metadata.create_all(engine)
+    store = SqlAlchemyLifecycleStore(engine)
+    payload: dict[str, object] = {
+        "candidate_id": "candidate-sql-replay",
+        "calibrator_statuses": ("sufficient_data",) * 6,
+        "markets": ("XNAS", "XTAI"),
+    }
+    occurred_at = datetime(2026, 8, 17, 1, 0, tzinfo=UTC)
+
+    first = store.append(
+        command_id="sql-replay",
+        model_family_id="family-sql-replay",
+        expected_version=0,
+        event_kind="CandidateRecorded",
+        payload=payload,
+        occurred_at=occurred_at,
+    )
+    replay = store.append(
+        command_id="sql-replay",
+        model_family_id="family-sql-replay",
+        expected_version=0,
+        event_kind="CandidateRecorded",
+        payload=payload,
+        occurred_at=occurred_at,
+    )
+
+    assert replay == first
+    assert len(store.events("family-sql-replay")) == 1
+
+
+def test_candidate_recording_rejects_a_tampered_evaluation_report() -> None:
+    lifecycle = _verified_lifecycle(InMemoryLifecycleStore())
+    report = EvaluationReport.create(
+        class_prior_equal_cell_macro_f1=0.4,
+        logistic_equal_cell_macro_f1=0.52,
+        seed_macro_f1=(0.50, 0.52, 0.54),
+        cost_manifest_id="cost-v1",
+        fold_manifest_id="fold-v1",
+    )
+
+    with pytest.raises(LifecycleConflict, match="evaluation_report_invalid"):
+        lifecycle.execute(
+            RecordCandidate(
+                command_id="record-tampered-report",
+                model_family_id="family-tampered-report",
+                candidate_id="candidate-tampered-report",
+                model_family="regularized_multinomial_logistic",
+                artifact_id="sha256:artifact-tampered-report",
+                evaluation_report=replace(
+                    report,
+                    logistic_equal_cell_macro_f1=0.99,
+                ),
+                training_intent_id="intent-tampered-report",
+                intent_initiator="model-operator-a",
+                training_executor="model-operator-b",
+                calibrator_statuses=("sufficient_data",) * 6,
+                expected_version=0,
+                occurred_at=datetime(2026, 8, 17, 1, 0, tzinfo=UTC),
+                formal_qualification=True,
+            )
+        )
+
+
 def _record_candidate(
     lifecycle: ModelLifecycle,
     *,
@@ -341,6 +445,14 @@ def _record_candidate(
     training_executor: str = "model-operator-b",
 ) -> None:
     verified_improvement = improvement if actual_improvement is None else actual_improvement
+    evaluation_report = EvaluationReport.create(
+        class_prior_equal_cell_macro_f1=0.4,
+        logistic_equal_cell_macro_f1=0.4 + verified_improvement / 100,
+        seed_macro_f1=(0.4 + verified_improvement / 100,) * 3,
+        cost_manifest_id="cost-v1",
+        fold_manifest_id="fold-v1",
+    )
+    _RECORDED_EVALUATION_REPORTS[candidate_id] = evaluation_report
     result = lifecycle.execute(
         RecordCandidate(
             command_id=f"record-{candidate_id}",
@@ -348,13 +460,10 @@ def _record_candidate(
             candidate_id=candidate_id,
             model_family="regularized_multinomial_logistic",
             artifact_id=f"sha256:artifact-{candidate_id}",
-            evaluation_report_id=f"sha256:evaluation-{candidate_id}",
+            evaluation_report=evaluation_report,
             training_intent_id=f"intent-{candidate_id}",
             intent_initiator=intent_initiator,
             training_executor=training_executor,
-            improvement_percentage_points=improvement,
-            class_prior_equal_cell_macro_f1=0.4,
-            logistic_equal_cell_macro_f1=0.4 + verified_improvement / 100,
             calibrator_statuses=("sufficient_data",) * 6,
             formal_qualification=formal_qualification,
             expected_version=0,
@@ -486,7 +595,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             model_family_id="family-approval-conflict",
             candidate_id="candidate-approval-conflict",
             artifact_id="sha256:artifact-candidate-approval-conflict",
-            evaluation_report_id="sha256:evaluation-candidate-approval-conflict",
+            evaluation_report_id=_evaluation_report_id("candidate-approval-conflict"),
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-operator-a",
             decision="approved",
@@ -525,7 +634,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             model_family_id="family-approved",
             candidate_id="candidate-approved",
             artifact_id="sha256:artifact-candidate-approved",
-            evaluation_report_id="sha256:evaluation-candidate-approved",
+            evaluation_report_id=_evaluation_report_id("candidate-approved"),
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-approver-c",
             decision="approved",
@@ -549,7 +658,7 @@ def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
             model_family_id="family-approved",
             candidate_id="candidate-approved",
             artifact_id="sha256:artifact-candidate-approved",
-            evaluation_report_id="sha256:evaluation-candidate-approved",
+            evaluation_report_id=_evaluation_report_id("candidate-approved"),
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-approver-d",
             decision="approved",
@@ -613,7 +722,7 @@ def test_owner_operated_approval_binds_the_designated_owner_policy() -> None:
             model_family_id="family-owner-operated",
             candidate_id="candidate-owner-operated",
             artifact_id="sha256:artifact-candidate-owner-operated",
-            evaluation_report_id="sha256:evaluation-candidate-owner-operated",
+            evaluation_report_id=_evaluation_report_id("candidate-owner-operated"),
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id=owner_id,
             decision="approved",
@@ -639,7 +748,7 @@ def test_owner_operated_approval_binds_the_designated_owner_policy() -> None:
             model_family_id="family-owner-operated",
             candidate_id="candidate-owner-operated",
             artifact_id="sha256:artifact-candidate-owner-operated",
-            evaluation_report_id="sha256:evaluation-candidate-owner-operated",
+            evaluation_report_id=_evaluation_report_id("candidate-owner-operated"),
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="different-principal",
             decision="approved",
@@ -692,7 +801,7 @@ def test_owner_operated_approval_requires_owner_training_participation() -> None
             model_family_id="family-trained-by-others",
             candidate_id="candidate-trained-by-others",
             artifact_id="sha256:artifact-candidate-trained-by-others",
-            evaluation_report_id="sha256:evaluation-candidate-trained-by-others",
+            evaluation_report_id=_evaluation_report_id("candidate-trained-by-others"),
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id=owner_id,
             decision="approved",
@@ -785,6 +894,18 @@ def test_governance_query_preserves_honest_disclosure_for_legacy_approvals() -> 
         "independent_review": True,
     }
 
+    _SHADOW_BINDING.clear()
+    _SHADOW_BINDING.update(
+        {
+            "candidate_id": "legacy-approved-candidate",
+            "artifact_id": "sha256:artifact-legacy-approved-candidate",
+            "evaluation_report_id": _evaluation_report_id("legacy-approved-candidate"),
+            "approval_decision_id": "unavailable:legacy-approval-decision",
+            "approval_policy_version_id": "unavailable:legacy-approval-policy",
+            "expected_assignment": "unassigned",
+        }
+    )
+
     shadow = lifecycle.execute(
         RecordShadowEod(
             command_id="shadow-after-legacy-approval",
@@ -826,7 +947,7 @@ def test_rejection_of_exact_evidence_cannot_be_reversed_by_a_later_approval() ->
             model_family_id="family-rejected",
             candidate_id="candidate-rejected",
             artifact_id="sha256:artifact-candidate-rejected",
-            evaluation_report_id="sha256:evaluation-candidate-rejected",
+            evaluation_report_id=_evaluation_report_id("candidate-rejected"),
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-approver-c",
             decision="rejected",
@@ -842,7 +963,7 @@ def test_rejection_of_exact_evidence_cannot_be_reversed_by_a_later_approval() ->
             model_family_id="family-rejected",
             candidate_id="candidate-rejected",
             artifact_id="sha256:artifact-candidate-rejected",
-            evaluation_report_id="sha256:evaluation-candidate-rejected",
+            evaluation_report_id=_evaluation_report_id("candidate-rejected"),
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-approver-d",
             decision="approved",
@@ -864,6 +985,7 @@ def test_rejection_of_exact_evidence_cannot_be_reversed_by_a_later_approval() ->
 def _approved_lifecycle(
     *,
     shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
+    shadow_run_verifier: ShadowRunVerifier | None = None,
 ) -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
     store = InMemoryLifecycleStore()
     verifier = shadow_eligibility_verifier or _JointMarketEodVerifier(
@@ -880,6 +1002,7 @@ def _approved_lifecycle(
     lifecycle = _verified_lifecycle(
         store,
         shadow_eligibility_verifier=verifier,
+        shadow_run_verifier=shadow_run_verifier or _VerifiedShadowRunVerifier(),
     )
     _record_candidate(
         lifecycle,
@@ -898,13 +1021,13 @@ def _approved_lifecycle(
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
         )
     )
-    lifecycle.execute(
+    approval = lifecycle.execute(
         DecideApproval(
             command_id="approval-shadow",
             model_family_id="family-shadow",
             candidate_id="candidate-shadow",
             artifact_id="sha256:artifact-candidate-shadow",
-            evaluation_report_id="sha256:evaluation-candidate-shadow",
+            evaluation_report_id=_evaluation_report_id("candidate-shadow"),
             policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
             approver_id="model-approver-c",
             decision="approved",
@@ -913,6 +1036,18 @@ def _approved_lifecycle(
             expected_version=2,
             occurred_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
         )
+    )
+    assert approval.approval_decision is not None
+    _SHADOW_BINDING.clear()
+    _SHADOW_BINDING.update(
+        {
+            "candidate_id": "candidate-shadow",
+            "artifact_id": "sha256:artifact-candidate-shadow",
+            "evaluation_report_id": _evaluation_report_id("candidate-shadow"),
+            "approval_decision_id": approval.approval_decision.approval_decision_id,
+            "approval_policy_version_id": (approval.approval_decision.approval_policy_version_id),
+            "expected_assignment": "unassigned",
+        }
     )
     return lifecycle, store
 
@@ -927,17 +1062,10 @@ def test_closed_market_date_cannot_count_as_an_eligible_shadow_eod() -> None:
             command_id="shadow-closed-market-date",
             model_family_id="family-shadow",
             candidate_id="candidate-shadow",
-            evidence=ShadowRunEvidence.create(
+            evidence=_bound_shadow_evidence(
                 shadow_run_id="shadow-run-closed-market",
                 eligible_eod_date=date(2026, 8, 22),
                 previous_shadow_run_id=None,
-                markets=("XTAI", "XNAS"),
-                cold_load_checksum_verified=True,
-                schema_compatible=True,
-                probability_invariants_verified=True,
-                comparison_completed=True,
-                source_policy_verified=True,
-                cpu_prediction_seconds=420.0,
             ),
             expected_version=3,
             occurred_at=datetime(2026, 8, 22, 2, 0, tzinfo=UTC),
@@ -970,6 +1098,66 @@ def test_shadow_calendar_verification_failure_is_fail_closed() -> None:
     assert result.status == "shadow_blocked"
     assert result.shadow_evidence is not None
     assert result.shadow_evidence.blocked_reason == "shadow_eod_not_eligible"
+
+
+def test_shadow_run_cannot_be_credited_to_a_different_candidate() -> None:
+    lifecycle, _ = _approved_lifecycle()
+
+    result = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-wrong-candidate-binding",
+            model_family_id="family-shadow",
+            candidate_id="candidate-shadow",
+            evidence=_bound_shadow_evidence(
+                shadow_run_id="shadow-run-wrong-candidate",
+                eligible_eod_date=date(2026, 8, 18),
+                previous_shadow_run_id=None,
+                candidate_id="candidate-other",
+            ),
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "shadow_blocked"
+    assert result.shadow_evidence is not None
+    assert result.shadow_evidence.blocked_reason == "shadow_evidence_binding_mismatch"
+
+
+def test_shadow_run_requires_independent_verification() -> None:
+    class UnverifiedRun:
+        def verify_shadow_run(self, evidence: ShadowRunEvidence) -> bool:
+            return False
+
+    lifecycle, _ = _approved_lifecycle(shadow_run_verifier=UnverifiedRun())
+
+    result = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-unverified-run",
+            model_family_id="family-shadow",
+            candidate_id="candidate-shadow",
+            evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "shadow_blocked"
+    assert result.shadow_evidence is not None
+    assert result.shadow_evidence.blocked_reason == "shadow_run_not_verified"
+
+
+@pytest.mark.parametrize("latency", [-1.0, float("nan")])
+def test_shadow_evidence_rejects_invalid_cpu_latency(latency: float) -> None:
+    _approved_lifecycle()
+
+    with pytest.raises(ValueError, match="shadow_cpu_prediction_seconds_invalid"):
+        _bound_shadow_evidence(
+            shadow_run_id="shadow-invalid-latency",
+            eligible_eod_date=date(2026, 8, 18),
+            previous_shadow_run_id=None,
+            cpu_prediction_seconds=latency,
+        )
 
 
 def test_five_joint_market_shadows_complete_without_production_assignment() -> None:
@@ -1030,17 +1218,10 @@ def test_expired_approval_blocks_shadow_and_preserves_failure_evidence() -> None
             command_id="shadow-after-expiry",
             model_family_id="family-shadow",
             candidate_id="candidate-shadow",
-            evidence=ShadowRunEvidence.create(
+            evidence=_bound_shadow_evidence(
                 shadow_run_id="shadow-run-expired",
                 eligible_eod_date=date(2026, 8, 25),
                 previous_shadow_run_id=None,
-                markets=("XTAI", "XNAS"),
-                cold_load_checksum_verified=True,
-                schema_compatible=True,
-                probability_invariants_verified=True,
-                comparison_completed=True,
-                source_policy_verified=True,
-                cpu_prediction_seconds=420.0,
             ),
             expected_version=3,
             occurred_at=datetime(2026, 8, 25, 2, 0, tzinfo=UTC),
@@ -1089,7 +1270,11 @@ def test_bootstrap_policy_is_permanently_disabled_after_first_assignment() -> No
 def test_sql_lifecycle_store_preserves_append_only_state_across_instances() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     metadata.create_all(engine)
-    first_lifecycle = _verified_lifecycle(SqlAlchemyLifecycleStore(engine))
+    evaluation_reports = InMemoryEvaluationReportRepository()
+    first_lifecycle = _verified_lifecycle(
+        SqlAlchemyLifecycleStore(engine),
+        evaluation_report_repository=evaluation_reports,
+    )
     _record_candidate(
         first_lifecycle,
         candidate_id="candidate-sql",
@@ -1098,7 +1283,10 @@ def test_sql_lifecycle_store_preserves_append_only_state_across_instances() -> N
     )
 
     second_store = SqlAlchemyLifecycleStore(engine)
-    second_lifecycle = _verified_lifecycle(second_store)
+    second_lifecycle = _verified_lifecycle(
+        second_store,
+        evaluation_report_repository=evaluation_reports,
+    )
     result = second_lifecycle.execute(
         EvaluateBootstrapCandidate(
             command_id="gate-sql",

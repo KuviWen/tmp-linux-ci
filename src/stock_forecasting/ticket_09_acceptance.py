@@ -19,6 +19,7 @@ from stock_forecasting.model_governance import (
     GateMeasurement,
     HardGateEvidence,
     ModelLifecycle,
+    ObjectEvaluationReportRepository,
     ObjectGateEvidenceRepository,
     ObjectGatePolicyRepository,
     SqlAlchemyLifecycleStore,
@@ -157,6 +158,7 @@ def run_ticket_09_acceptance(
         lifecycle_store,
         policy_repository=ObjectGatePolicyRepository(governance_object_repository),
         evidence_repository=ObjectGateEvidenceRepository(governance_object_repository),
+        evaluation_report_repository=ObjectEvaluationReportRepository(governance_object_repository),
     )
     workflow = BootstrapGovernanceWorkflow(ForecastLab(), lifecycle)
     governance_time = datetime.now(UTC)
@@ -221,6 +223,9 @@ def run_ticket_09_acceptance(
         )
     )
     checks = {
+        "lifecycle_ledger_append_only": (
+            store.model_lifecycle_events_are_append_only_for_current_role()
+        ),
         "shared_forecaster_evidence": (
             len(bundle.logistic_artifacts) == 3
             and len(bundle.class_prior_artifacts) == 3

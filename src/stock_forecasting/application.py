@@ -50,6 +50,7 @@ from stock_forecasting.model_governance import (
     ModelApprovalPolicyVersion,
     ModelGovernanceQuery,
     ModelLifecycle,
+    ObjectEvaluationReportRepository,
     ObjectGateEvidenceRepository,
     ObjectGatePolicyRepository,
     SqlAlchemyLifecycleStore,
@@ -116,6 +117,9 @@ class Application:
             self.model_lifecycle_store,
             policy_repository=ObjectGatePolicyRepository(lambda: self.governance_object_repository),
             evidence_repository=ObjectGateEvidenceRepository(
+                lambda: self.governance_object_repository
+            ),
+            evaluation_report_repository=ObjectEvaluationReportRepository(
                 lambda: self.governance_object_repository
             ),
             approval_policy=self._model_approval_policy,

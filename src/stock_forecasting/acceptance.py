@@ -1389,8 +1389,10 @@ def run_ticket_04(
         ),
     }
     if deployed:
+        state_store = active_application.state_store
         checks["application_database_role_least_privilege"] = (
-            active_application.state_store.authorization_policy_sets_are_read_only_for_current_role()
+            state_store.authorization_policy_sets_are_read_only_for_current_role()
+            and state_store.model_lifecycle_events_are_append_only_for_current_role()
         )
     if dagster_url is not None:
         deployed_dagster_trace = "trace-p1-trace-auth-01-deployed-dagster-denied"

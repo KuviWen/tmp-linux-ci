@@ -118,6 +118,37 @@ class StateStore:
                 ).scalar_one()
             )
 
+    def model_lifecycle_events_are_append_only_for_current_role(self) -> bool:
+        if self.engine.dialect.name != "postgresql":
+            return False
+        with self.engine.connect() as connection:
+            return bool(
+                connection.execute(
+                    text(
+                        """
+                        SELECT NOT role.rolsuper
+                           AND has_table_privilege(
+                               current_user,
+                               'public.model_lifecycle_events',
+                               'SELECT, INSERT'
+                           )
+                           AND NOT has_table_privilege(
+                               current_user,
+                               'public.model_lifecycle_events',
+                               'UPDATE'
+                           )
+                           AND NOT has_table_privilege(
+                               current_user,
+                               'public.model_lifecycle_events',
+                               'DELETE'
+                           )
+                        FROM pg_roles AS role
+                        WHERE role.rolname = current_user
+                        """
+                    )
+                ).scalar_one()
+            )
+
     def install_authorization_policy_set(
         self,
         *,
