@@ -17,6 +17,7 @@ from stock_forecasting.authorization import (
     LocalApiKeyIdentity,
     RuntimeEnvironment,
 )
+from stock_forecasting.authorization_repository import TICKET_09_OWNER_OPERATOR_POLICY_SET
 from stock_forecasting.finmind_market_data import FinMindLiveContractValidator
 from stock_forecasting.finmind_provider_contract import FINMIND_PROVIDER_ID
 from stock_forecasting.model_governance import ModelApprovalPolicyVersion
@@ -144,6 +145,15 @@ class RuntimeSettings:
             if source_adapter_identity.context.scopes != frozenset({"market_data.collect"}):
                 raise RuntimeError("source_adapter_identity_scope_invalid")
             source_adapter_security_context = source_adapter_identity.context
+        model_approval_policy = (
+            ModelApprovalPolicyVersion.create(
+                policy_name="owner-operated-model-approval-v1",
+                approval_mode="owner_operated",
+                owner_principal_id=local_identity.context.principal_id,
+            )
+            if self.authorization_policy_set_id == TICKET_09_OWNER_OPERATOR_POLICY_SET
+            else None
+        )
         return build_application(
             database_url=self.database_url,
             object_root=self.object_root,
@@ -152,11 +162,7 @@ class RuntimeSettings:
             local_identity=local_identity,
             authorization_policy_set_id=self.authorization_policy_set_id,
             source_adapter_security_context=source_adapter_security_context,
-            model_approval_policy=ModelApprovalPolicyVersion.create(
-                policy_name="owner-operated-model-approval-v1",
-                approval_mode="owner_operated",
-                owner_principal_id=local_identity.context.principal_id,
-            ),
+            model_approval_policy=model_approval_policy,
             secret_provider=EncryptedFilesystemSecretProvider(self.source_secret_root),
             source_credential_validators={
                 ALPACA_PROVIDER_ID: AlpacaLiveContractValidator(UrllibProviderHttpTransport()),

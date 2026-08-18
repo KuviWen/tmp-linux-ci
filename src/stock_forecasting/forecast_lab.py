@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Literal, Protocol, cast
 
+from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.contracts import HistoricalTrainingLineage
 from stock_forecasting.forecasting import (
     CalibrationEvidence,
@@ -24,16 +23,6 @@ from stock_forecasting.forecasting import (
 
 Market = Literal["XTAI", "XNAS"]
 Horizon = Literal[1, 5, 20]
-
-
-def _content_id(kind: str, payload: object) -> str:
-    serialized = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(kind.encode() + serialized).hexdigest()}"
 
 
 @dataclass(frozen=True)
@@ -55,6 +44,10 @@ class FormalHistoricalClaimVerifier(Protocol):
     ) -> bool: ...
 
 
+class FormalCostScenarioVerifier(Protocol):
+    def verify_cost_scenario(self, cost_manifest_id: str) -> bool: ...
+
+
 class _UnavailableHistoricalClaimVerifier:
     def verify_training_lineage(
         self,
@@ -66,6 +59,11 @@ class _UnavailableHistoricalClaimVerifier:
         fold_manifest_id: str,
         feature_rows_digest: str,
     ) -> bool:
+        return False
+
+
+class _UnavailableCostScenarioVerifier:
+    def verify_cost_scenario(self, cost_manifest_id: str) -> bool:
         return False
 
 
@@ -145,12 +143,14 @@ class ForecastLab:
         self,
         *,
         historical_claim_verifier: FormalHistoricalClaimVerifier | None = None,
+        cost_scenario_verifier: FormalCostScenarioVerifier | None = None,
         class_prior_forecaster: TrendForecaster | None = None,
         logistic_forecaster: TrendForecaster | None = None,
     ) -> None:
         self._historical_claim_verifier = (
             historical_claim_verifier or _UnavailableHistoricalClaimVerifier()
         )
+        self._cost_scenario_verifier = cost_scenario_verifier or _UnavailableCostScenarioVerifier()
         self._class_prior_forecaster = class_prior_forecaster or ClassPriorTrendForecaster()
         self._logistic_forecaster = (
             logistic_forecaster or RegularizedMultinomialLogisticTrendForecaster()
@@ -172,9 +172,13 @@ class ForecastLab:
             historical_lineage=final_lineages,
         ).with_content_id()
         final_intent = replace(intent, feature_batch=feature_batch)
-        formal_qualification = self._has_formal_source_basis(final_intent)
-        if intent.execution_purpose == "formal_candidate" and not formal_qualification:
+        formal_source_basis = self._has_formal_source_basis(final_intent)
+        if intent.execution_purpose == "formal_candidate" and not formal_source_basis:
             return self._blocked("unverified_source_basis")
+        formal_cost_scenario = self._has_formal_cost_scenario(final_intent)
+        if intent.execution_purpose == "formal_candidate" and not formal_cost_scenario:
+            return self._blocked("unverified_cost_scenario")
+        formal_qualification = formal_source_basis and formal_cost_scenario
         try:
             evaluation = self._evaluate(
                 feature_batch,
@@ -278,6 +282,16 @@ class ForecastLab:
                     feature_rows_digest=intent.feature_batch.market_rows_digest(item.market),
                 )
                 for item in intent.historical_claims
+            )
+        except (KeyError, RuntimeError, ValueError):
+            return False
+
+    def _has_formal_cost_scenario(self, intent: TrainingIntentRef) -> bool:
+        if intent.execution_purpose != "formal_candidate":
+            return False
+        try:
+            return self._cost_scenario_verifier.verify_cost_scenario(
+                intent.feature_batch.cost_manifest_id
             )
         except (KeyError, RuntimeError, ValueError):
             return False

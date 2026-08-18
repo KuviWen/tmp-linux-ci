@@ -266,6 +266,10 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
                 and lineage.feature_rows_digest == feature_rows_digest
             )
 
+    class VerifiedCostScenario:
+        def verify_cost_scenario(self, cost_manifest_id: str) -> bool:
+            return cost_manifest_id == batch.cost_manifest_id
+
     batch = engineering_model_history()
 
     def lineage(market: Market) -> HistoricalTrainingLineage:
@@ -304,7 +308,19 @@ def test_formal_candidate_consumes_both_ticket_08_verified_claim_chains() -> Non
         historical_claims=tuple(claim_ref(item) for item in lineages),
     )
 
-    outcome = ForecastLab(historical_claim_verifier=VerifiedClaimBoundary()).develop(intent)
+    unverified_cost = ForecastLab(
+        historical_claim_verifier=VerifiedClaimBoundary(),
+    ).develop(intent)
+
+    assert unverified_cost.status == "blocked"
+    assert unverified_cost.blocked_reasons == ("unverified_cost_scenario",)
+    assert unverified_cost.candidate_bundle is None
+    verified_lineages.clear()
+
+    outcome = ForecastLab(
+        historical_claim_verifier=VerifiedClaimBoundary(),
+        cost_scenario_verifier=VerifiedCostScenario(),
+    ).develop(intent)
 
     assert outcome.status == "developed"
     assert outcome.candidate_bundle is not None

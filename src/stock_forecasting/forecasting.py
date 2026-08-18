@@ -9,6 +9,7 @@ from datetime import date
 from math import exp, isfinite, log
 from typing import Literal, Protocol, TypeGuard, cast
 
+from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.contracts import (
     HistoricalTrainingLineage,
     PredictionPayload,
@@ -505,7 +506,42 @@ def _fit_temperature_calibrators(
     predict_raw: Callable[[FeatureRow], ProbabilityVector],
 ) -> tuple[CalibrationEvidence, ...]:
     if not request.validation_row_ids:
-        return ()
+        training_ids = set(request.training_row_ids)
+        cells = sorted(
+            {
+                (row.market, row.horizon_sessions)
+                for row in request.feature_batch.rows
+                if row.row_id in training_ids
+            }
+        )
+        insufficient_evidence: list[CalibrationEvidence] = []
+        for market, horizon in cells:
+            insufficient_payload: dict[str, object] = {
+                "market": market,
+                "horizon_sessions": horizon,
+                "sample_count": 0,
+                "class_counts": (0, 0, 0),
+                "temperature": 1.0,
+                "fit_method": "temperature_scaling",
+                "pre_nll": 0.0,
+                "post_nll": 0.0,
+                "status": "insufficient_data",
+            }
+            insufficient_evidence.append(
+                CalibrationEvidence(
+                    calibrator_id=_content_id("temperature_calibrator", insufficient_payload),
+                    market=market,
+                    horizon_sessions=horizon,
+                    status="insufficient_data",
+                    sample_count=0,
+                    class_counts=(0, 0, 0),
+                    temperature=1.0,
+                    fit_method="temperature_scaling",
+                    pre_nll=0.0,
+                    post_nll=0.0,
+                )
+            )
+        return tuple(insufficient_evidence)
     rows_by_id = {row.row_id: row for row in request.feature_batch.rows}
     validation_rows = tuple(rows_by_id[row_id] for row_id in request.validation_row_ids)
     labels: tuple[TrendLabel, ...] = ("up", "flat", "down")
@@ -574,8 +610,6 @@ def _bind_calibrators(
     calibrators: tuple[CalibrationEvidence, ...],
 ) -> dict[str, object]:
     base_payload = {**payload, "artifact_format": "safe-json-v1"}
-    if not calibrators:
-        return base_payload
     return {
         **base_payload,
         "calibrator_ids": [item.calibrator_id for item in calibrators],
@@ -627,8 +661,10 @@ def _load_logistic_artifact(serialized: bytes) -> dict[str, object]:
         "loss_weighting",
         "regularization",
         "weights",
+        "calibrator_ids",
+        "calibrators",
     }
-    optional = {"calibrator_ids", "calibrators", "evaluation_report_id"}
+    optional = {"evaluation_report_id"}
     if (
         not required.issubset(payload)
         or not set(payload).issubset(required | optional)
@@ -766,8 +802,10 @@ def _load_class_prior_artifact(serialized: bytes) -> dict[str, object]:
         "manifest_ids",
         "training_selection_id",
         "probabilities_by_cell",
+        "calibrator_ids",
+        "calibrators",
     }
-    optional = {"calibrator_ids", "calibrators", "evaluation_report_id"}
+    optional = {"evaluation_report_id"}
     if (
         not required.issubset(payload)
         or not set(payload).issubset(required | optional)
@@ -851,12 +889,12 @@ def _validate_artifact_calibrators(
                 or calibrator.get("market") not in {"XTAI", "XNAS"}
                 or calibrator.get("horizon_sessions") not in {1, 5, 20}
                 or calibrator.get("fit_method") != "temperature_scaling"
-                or calibrator.get("status") != "sufficient_data"
+                or calibrator.get("status") not in {"sufficient_data", "insufficient_data"}
                 or not _is_finite_number(calibrator.get("temperature"))
                 or cast(float, calibrator["temperature"]) <= 0
                 or isinstance(calibrator.get("sample_count"), bool)
                 or not isinstance(calibrator.get("sample_count"), int)
-                or cast(int, calibrator["sample_count"]) <= 0
+                or cast(int, calibrator["sample_count"]) < 0
                 or not isinstance(calibrator.get("class_counts"), list)
                 or len(cast(list[object], calibrator["class_counts"])) != 3
                 or any(
@@ -867,6 +905,16 @@ def _validate_artifact_calibrators(
                 or not _is_finite_number(calibrator.get("pre_nll"))
                 or not _is_finite_number(calibrator.get("post_nll"))
                 or cast(float, calibrator["post_nll"]) > cast(float, calibrator["pre_nll"])
+            ):
+                raise ValueError("artifact_schema_invalid")
+            if calibrator["status"] == "sufficient_data" and calibrator["sample_count"] == 0:
+                raise ValueError("artifact_schema_invalid")
+            if calibrator["status"] == "insufficient_data" and (
+                calibrator["sample_count"] != 0
+                or calibrator["class_counts"] != [0, 0, 0]
+                or calibrator["temperature"] != 1.0
+                or calibrator["pre_nll"] != 0.0
+                or calibrator["post_nll"] != 0.0
             ):
                 raise ValueError("artifact_schema_invalid")
             calibrator_id = cast(str, calibrator["calibrator_id"])
@@ -913,10 +961,6 @@ def _serialize_payload(payload: object) -> bytes:
 
 def _artifact_id(serialized: bytes) -> str:
     return f"sha256:{hashlib.sha256(serialized).hexdigest()}"
-
-
-def _content_id(kind: str, payload: object) -> str:
-    return _artifact_id(kind.encode() + _serialize_payload(payload))
 
 
 def _feature_row_payload(row: FeatureRow) -> dict[str, object]:

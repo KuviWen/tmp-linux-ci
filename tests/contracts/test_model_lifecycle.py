@@ -1,6 +1,6 @@
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from io import BytesIO
 from typing import Literal
 
@@ -23,6 +23,7 @@ from stock_forecasting.model_governance import (
     ObjectGatePolicyRepository,
     RecordCandidate,
     RecordShadowEod,
+    ShadowEligibilityVerifier,
     ShadowRunEvidence,
     SqlAlchemyLifecycleStore,
 )
@@ -41,10 +42,29 @@ class _VerifiedEvidenceRepository:
         return report if evidence.evidence_refs == (report.artifact_id,) else None
 
 
+class _JointMarketEodVerifier:
+    def __init__(self, eligible_dates: frozenset[date]) -> None:
+        self._eligible_dates = eligible_dates
+
+    def verify_eligible_eod(self, evidence: ShadowRunEvidence) -> bool:
+        return evidence.eligible_eod_date in self._eligible_dates and set(evidence.markets) == {
+            "XTAI",
+            "XNAS",
+        }
+
+
 def _verified_lifecycle(
     store: InMemoryLifecycleStore | SqlAlchemyLifecycleStore,
+    *,
+    shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
 ) -> ModelLifecycle:
-    return ModelLifecycle(store, evidence_repository=_VerifiedEvidenceRepository())
+    if shadow_eligibility_verifier is None:
+        return ModelLifecycle(store, evidence_repository=_VerifiedEvidenceRepository())
+    return ModelLifecycle(
+        store,
+        evidence_repository=_VerifiedEvidenceRepository(),
+        shadow_eligibility_verifier=shadow_eligibility_verifier,
+    )
 
 
 def _hard_gates(
@@ -63,9 +83,16 @@ def _shadow_evidence(
     *,
     previous_shadow_run_id: str | None,
 ) -> ShadowRunEvidence:
+    eligible_dates = (
+        date(2026, 8, 18),
+        date(2026, 8, 19),
+        date(2026, 8, 20),
+        date(2026, 8, 21),
+        date(2026, 8, 24),
+    )
     return ShadowRunEvidence.create(
         shadow_run_id=f"shadow-run-{cycle}",
-        eligible_eod_date=date(2026, 8, 18 + cycle),
+        eligible_eod_date=eligible_dates[cycle - 1],
         previous_shadow_run_id=previous_shadow_run_id,
         markets=("XTAI", "XNAS"),
         cold_load_checksum_verified=True,
@@ -308,10 +335,12 @@ def _record_candidate(
     candidate_id: str,
     model_family_id: str,
     improvement: float,
+    actual_improvement: float | None = None,
     formal_qualification: bool = True,
     intent_initiator: str = "model-operator-a",
     training_executor: str = "model-operator-b",
 ) -> None:
+    verified_improvement = improvement if actual_improvement is None else actual_improvement
     result = lifecycle.execute(
         RecordCandidate(
             command_id=f"record-{candidate_id}",
@@ -324,6 +353,8 @@ def _record_candidate(
             intent_initiator=intent_initiator,
             training_executor=training_executor,
             improvement_percentage_points=improvement,
+            class_prior_equal_cell_macro_f1=0.4,
+            logistic_equal_cell_macro_f1=0.4 + verified_improvement / 100,
             calibrator_statuses=("sufficient_data",) * 6,
             formal_qualification=formal_qualification,
             expected_version=0,
@@ -386,7 +417,6 @@ def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> Non
             occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
         )
     )
-
     assert failed.status == "gate_failed"
     assert failed.gate_decision is not None
     assert failed.gate_decision.failed_gates == (
@@ -400,6 +430,34 @@ def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> Non
         "CandidateRecorded",
         "GateDecisionRecorded",
     )
+
+
+def test_bootstrap_gate_recomputes_improvement_from_recorded_scores() -> None:
+    store = InMemoryLifecycleStore()
+    lifecycle = _verified_lifecycle(store)
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-self-reported-improvement",
+        model_family_id="family-self-reported-improvement",
+        improvement=12.0,
+        actual_improvement=0.0,
+    )
+
+    result = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-self-reported-improvement",
+            model_family_id="family-self-reported-improvement",
+            candidate_id="candidate-self-reported-improvement",
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates("candidate-self-reported-improvement"),
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "gate_failed"
+    assert result.gate_decision is not None
+    assert "minimum_improvement" in result.gate_decision.failed_gates
 
 
 def test_approval_binds_exact_evidence_and_enforces_duty_separation() -> None:
@@ -803,9 +861,26 @@ def test_rejection_of_exact_evidence_cannot_be_reversed_by_a_later_approval() ->
     assert reversal.approval_decision.invalidated_reason == "prior_rejection_irreversible"
 
 
-def _approved_lifecycle() -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
+def _approved_lifecycle(
+    *,
+    shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
+) -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
     store = InMemoryLifecycleStore()
-    lifecycle = _verified_lifecycle(store)
+    verifier = shadow_eligibility_verifier or _JointMarketEodVerifier(
+        frozenset(
+            {
+                date(2026, 8, 18),
+                date(2026, 8, 19),
+                date(2026, 8, 20),
+                date(2026, 8, 21),
+                date(2026, 8, 24),
+            }
+        )
+    )
+    lifecycle = _verified_lifecycle(
+        store,
+        shadow_eligibility_verifier=verifier,
+    )
     _record_candidate(
         lifecycle,
         candidate_id="candidate-shadow",
@@ -842,6 +917,61 @@ def _approved_lifecycle() -> tuple[ModelLifecycle, InMemoryLifecycleStore]:
     return lifecycle, store
 
 
+def test_closed_market_date_cannot_count_as_an_eligible_shadow_eod() -> None:
+    lifecycle, _ = _approved_lifecycle(
+        shadow_eligibility_verifier=_JointMarketEodVerifier(frozenset({date(2026, 8, 21)}))
+    )
+
+    result = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-closed-market-date",
+            model_family_id="family-shadow",
+            candidate_id="candidate-shadow",
+            evidence=ShadowRunEvidence.create(
+                shadow_run_id="shadow-run-closed-market",
+                eligible_eod_date=date(2026, 8, 22),
+                previous_shadow_run_id=None,
+                markets=("XTAI", "XNAS"),
+                cold_load_checksum_verified=True,
+                schema_compatible=True,
+                probability_invariants_verified=True,
+                comparison_completed=True,
+                source_policy_verified=True,
+                cpu_prediction_seconds=420.0,
+            ),
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 22, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "shadow_blocked"
+    assert result.shadow_evidence is not None
+    assert result.shadow_evidence.blocked_reason == "shadow_eod_not_eligible"
+
+
+def test_shadow_calendar_verification_failure_is_fail_closed() -> None:
+    class FailingVerifier:
+        def verify_eligible_eod(self, evidence: ShadowRunEvidence) -> bool:
+            raise RuntimeError("calendar_provider_unavailable")
+
+    lifecycle, _ = _approved_lifecycle(shadow_eligibility_verifier=FailingVerifier())
+
+    result = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-calendar-unavailable",
+            model_family_id="family-shadow",
+            candidate_id="candidate-shadow",
+            evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "shadow_blocked"
+    assert result.shadow_evidence is not None
+    assert result.shadow_evidence.blocked_reason == "shadow_eod_not_eligible"
+
+
 def test_five_joint_market_shadows_complete_without_production_assignment() -> None:
     lifecycle, store = _approved_lifecycle()
 
@@ -857,7 +987,14 @@ def test_five_joint_market_shadows_complete_without_production_assignment() -> N
                     previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
                 ),
                 expected_version=cycle + 2,
-                occurred_at=datetime(2026, 8, 18 + cycle, 2, 0, tzinfo=UTC),
+                occurred_at=datetime.combine(
+                    _shadow_evidence(
+                        cycle,
+                        previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                    ).eligible_eod_date,
+                    time(3, 0),
+                    tzinfo=UTC,
+                ),
             )
         )
 

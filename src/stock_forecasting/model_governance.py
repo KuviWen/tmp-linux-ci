@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
+from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
 from stock_forecasting.platform.schema import model_lifecycle_events
 
@@ -590,6 +591,15 @@ class ShadowRunEvidence:
         return rebuilt == self
 
 
+class ShadowEligibilityVerifier(Protocol):
+    def verify_eligible_eod(self, evidence: ShadowRunEvidence) -> bool: ...
+
+
+class UnavailableShadowEligibilityVerifier:
+    def verify_eligible_eod(self, evidence: ShadowRunEvidence) -> bool:
+        return False
+
+
 @dataclass(frozen=True)
 class RecordShadowEod:
     command_id: str
@@ -945,6 +955,7 @@ class ModelLifecycle:
         policy_repository: GatePolicyRepository | None = None,
         evidence_repository: GateEvidenceRepository | None = None,
         approval_policy: ModelApprovalPolicyVersion | None = None,
+        shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
     ) -> None:
         self._store = store
         self._policy_repository = policy_repository or InMemoryGatePolicyRepository(
@@ -952,6 +963,9 @@ class ModelLifecycle:
         )
         self._evidence_repository = evidence_repository or UnavailableGateEvidenceRepository()
         self._approval_policy = approval_policy or SEPARATED_DUTIES_APPROVAL_POLICY_V1
+        self._shadow_eligibility_verifier = (
+            shadow_eligibility_verifier or UnavailableShadowEligibilityVerifier()
+        )
 
     def execute(self, command: LifecycleCommand) -> LifecycleResult:
         if isinstance(command, RecordCandidate):
@@ -998,7 +1012,23 @@ class ModelLifecycle:
             failed_gates.append("model_family")
         if candidate["formal_qualification"] is not True:
             failed_gates.append("qualification")
-        if cast(float, candidate["improvement_percentage_points"]) < 1.0:
+        class_prior_score = cast(float, candidate["class_prior_equal_cell_macro_f1"])
+        logistic_score = cast(float, candidate["logistic_equal_cell_macro_f1"])
+        submitted_improvement = cast(float, candidate["improvement_percentage_points"])
+        verified_improvement = (logistic_score - class_prior_score) * 100
+        if (
+            not all(
+                isfinite(value)
+                for value in (
+                    class_prior_score,
+                    logistic_score,
+                    submitted_improvement,
+                    verified_improvement,
+                )
+            )
+            or abs(submitted_improvement - verified_improvement) > 1e-12
+            or verified_improvement < 1.0
+        ):
             failed_gates.append("minimum_improvement")
         calibrator_statuses = tuple(cast(list[str], candidate["calibrator_statuses"]))
         if len(calibrator_statuses) != 6 or any(
@@ -1049,6 +1079,8 @@ class ModelLifecycle:
             "submitted_hard_gate_measurements": [
                 {"name": item.name, "value": item.value} for item in evidence.measurements
             ],
+            "submitted_improvement_percentage_points": submitted_improvement,
+            "verified_improvement_percentage_points": verified_improvement,
             "verified_hard_gate_measurements": [
                 {"name": item.name, "value": item.value}
                 for item in (report.measurements if evidence_is_valid and report else ())
@@ -1242,6 +1274,8 @@ class ModelLifecycle:
             blocked_reason = "shadow_evidence_checksum_mismatch"
         elif set(evidence.markets) != {"XTAI", "XNAS"}:
             blocked_reason = "incomplete_market_shadow"
+        elif not self._is_eligible_shadow_eod(evidence):
+            blocked_reason = "shadow_eod_not_eligible"
         elif (
             not all(
                 (
@@ -1312,6 +1346,12 @@ class ModelLifecycle:
             version=event.version,
             shadow_evidence=outcome_evidence,
         )
+
+    def _is_eligible_shadow_eod(self, evidence: ShadowRunEvidence) -> bool:
+        try:
+            return self._shadow_eligibility_verifier.verify_eligible_eod(evidence)
+        except Exception:
+            return False
 
     def _current_approval(self, model_family_id: str, candidate_id: str) -> dict[str, object]:
         for event in reversed(self._store.events(model_family_id)):
@@ -1458,13 +1498,3 @@ class ModelGovernanceQuery:
             if payload["candidate_id"] == candidate_id:
                 return payload
         return None
-
-
-def _content_id(kind: str, payload: object) -> str:
-    serialized = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(kind.encode() + serialized).hexdigest()}"

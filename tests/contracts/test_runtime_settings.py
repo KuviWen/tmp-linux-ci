@@ -17,6 +17,7 @@ from stock_forecasting.authorization_repository import (
 )
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
+    SEPARATED_DUTIES_APPROVAL_POLICY_V1,
     DecideApproval,
     EvaluateBootstrapCandidate,
     ModelApprovalPolicyVersion,
@@ -111,6 +112,43 @@ def test_operator_runtime_does_not_require_fixture_timestamps(
     assert settings.fixture_collection_observed_at is None
     assert application.security_context.principal_id == owner.context.principal_id
     assert application.source_adapter_security_context == source_adapter.context
+
+
+def test_non_operator_runtime_keeps_separated_duties_approval_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 18, 8, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="development-runtime",
+        environment="development",
+        scopes={"model_governance.read", "model_governance.approve"},
+        issued_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(hours=1),
+    )
+    key_file = tmp_path / "run" / "development-api-key.json"
+    identity.save(key_file)
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'development-runtime.db'}"
+    _install_fixture_policy_catalog(database_url, identity)
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setenv("OBJECT_ROOT", str(tmp_path / "objects"))
+    monkeypatch.setenv("SOURCE_SECRET_ROOT", str(tmp_path / "source-secrets"))
+    monkeypatch.setenv("FIXTURE_INFORMATION_CUTOFF", "2026-08-18T08:00:00Z")
+    monkeypatch.setenv("FIXTURE_COLLECTION_OBSERVED_AT", "2026-08-18T08:00:00Z")
+    monkeypatch.setenv("RUNTIME_ENVIRONMENT", "development")
+    monkeypatch.setenv("PUBLIC_BIND_HOST", "127.0.0.1")
+    monkeypatch.setenv("LOCAL_API_KEY_MODE", "enabled")
+    monkeypatch.setenv("LOCAL_API_KEY_FILE", str(key_file))
+    monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", FIXTURE_ACTIVE_POLICY_SET)
+
+    application = RuntimeSettings.from_environment().build_application()
+
+    assert (
+        application.governance_object_repository.open_by_id(
+            SEPARATED_DUTIES_APPROVAL_POLICY_V1.policy_version_id
+        ).read()
+        == SEPARATED_DUTIES_APPROVAL_POLICY_V1.serialized
+    )
 
 
 def test_runtime_keeps_observation_time_distinct_from_information_cutoff(
@@ -261,7 +299,7 @@ def test_runtime_processes_load_the_same_ephemeral_local_identity(
     assert b"runtime-persistence-secret" not in persisted
 
 
-def test_local_runtime_designates_its_single_owner_for_model_approval(
+def test_operator_runtime_designates_its_single_owner_for_model_approval(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -269,24 +307,28 @@ def test_local_runtime_designates_its_single_owner_for_model_approval(
     key_file = tmp_path / "run" / "owner-api-key.json"
     identity = LocalApiKeyIdentity.issue(
         owner="single-owner",
-        environment="development",
+        environment="local",
         scopes={"model_governance.read", "model_governance.approve"},
         issued_at=now - timedelta(minutes=1),
         expires_at=now + timedelta(hours=24),
     )
     identity.save(key_file)
     database_url = f"sqlite+pysqlite:///{tmp_path / 'owner-runtime.db'}"
-    _install_fixture_policy_catalog(database_url, identity)
+    repository = AuthorizationPolicyRepository(StateStore(database_url, create_schema=True))
+    repository.install(
+        TICKET_09_OWNER_OPERATOR_POLICY_SET,
+        build_pending_rights_operator_authorization_policy(identity.context),
+    )
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("OBJECT_ROOT", str(tmp_path / "objects"))
     monkeypatch.setenv("SOURCE_SECRET_ROOT", str(tmp_path / "source-secrets"))
-    monkeypatch.setenv("FIXTURE_INFORMATION_CUTOFF", "2026-08-17T02:00:00Z")
-    monkeypatch.setenv("FIXTURE_COLLECTION_OBSERVED_AT", "2026-08-17T02:00:00Z")
-    monkeypatch.setenv("RUNTIME_ENVIRONMENT", "development")
+    monkeypatch.delenv("FIXTURE_INFORMATION_CUTOFF", raising=False)
+    monkeypatch.delenv("FIXTURE_COLLECTION_OBSERVED_AT", raising=False)
+    monkeypatch.setenv("RUNTIME_ENVIRONMENT", "local")
     monkeypatch.setenv("PUBLIC_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("LOCAL_API_KEY_MODE", "enabled")
     monkeypatch.setenv("LOCAL_API_KEY_FILE", str(key_file))
-    monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", FIXTURE_ACTIVE_POLICY_SET)
+    monkeypatch.setenv("AUTHORIZATION_POLICY_SET_ID", TICKET_09_OWNER_OPERATOR_POLICY_SET)
     application = RuntimeSettings.from_environment().build_application()
     owner_id = identity.context.principal_id
     evaluation_id = "sha256:owner-runtime-evaluation"
@@ -308,6 +350,8 @@ def test_local_runtime_designates_its_single_owner_for_model_approval(
             intent_initiator=owner_id,
             training_executor=owner_id,
             improvement_percentage_points=12.0,
+            class_prior_equal_cell_macro_f1=0.40,
+            logistic_equal_cell_macro_f1=0.52,
             calibrator_statuses=("sufficient_data",) * 6,
             expected_version=0,
             occurred_at=now,

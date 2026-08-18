@@ -216,6 +216,26 @@ def test_offline_loaders_reject_stale_calibrator_content_ids(
         loader(serialized)
 
 
+@pytest.mark.parametrize(
+    ("payload_factory", "loader"),
+    [
+        (_literal_class_prior_payload, ClassPriorTrendForecaster.load),
+        (_literal_logistic_payload, RegularizedMultinomialLogisticTrendForecaster.load),
+    ],
+)
+def test_offline_loaders_require_the_complete_calibrator_bundle(
+    payload_factory: Callable[[], dict[str, object]],
+    loader: Callable[[bytes], object],
+) -> None:
+    payload = payload_factory()
+    del payload["calibrator_ids"]
+    del payload["calibrators"]
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+    with pytest.raises(ValueError, match="artifact_schema_invalid"):
+        loader(serialized)
+
+
 def test_logistic_offline_loader_rejects_missing_or_orphan_calibrator_cells() -> None:
     missing = _literal_logistic_payload()
     missing["calibrator_ids"] = []
