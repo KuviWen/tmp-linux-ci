@@ -39,6 +39,12 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert approval["responses"]["201"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/ApprovalDecisionResponse"
     }
+    assert (
+        contract["components"]["schemas"]["ApprovalDecisionRequest"]["properties"]["reason"][
+            "pattern"
+        ]
+        == r"\S"
+    )
     approval_read = contract["components"]["schemas"]["ModelGovernanceBacktest"]["properties"][
         "approval"
     ]

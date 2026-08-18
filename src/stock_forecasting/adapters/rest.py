@@ -65,7 +65,7 @@ class ApprovalDecisionRequest(BaseModel):
     evaluation_report_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     policy_version_id: Annotated[str, StringConstraints(min_length=1, max_length=128)]
     decision: Literal["approved", "rejected"]
-    reason: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
+    reason: Annotated[str, StringConstraints(min_length=1, max_length=1000, pattern=r"\S")]
     expected_assignment: Annotated[str, StringConstraints(min_length=1, max_length=256)]
 
 

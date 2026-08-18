@@ -1046,7 +1046,7 @@ components:
         evaluation_report_id: {type: string, minLength: 1, maxLength: 128}
         policy_version_id: {type: string, minLength: 1, maxLength: 128}
         decision: {type: string, enum: [approved, rejected]}
-        reason: {type: string, minLength: 1, maxLength: 1000}
+        reason: {type: string, minLength: 1, maxLength: 1000, pattern: '\S'}
         expected_assignment: {type: string, minLength: 1, maxLength: 256}
     ApprovalDecisionResponse:
       type: object

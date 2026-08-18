@@ -992,6 +992,36 @@ def test_bootstrap_gate_requires_one_point_and_every_absolute_hard_gate() -> Non
     )
 
 
+def test_bootstrap_gate_requires_the_turnover_post_cost_condition() -> None:
+    store = InMemoryLifecycleStore()
+    lifecycle = _verified_lifecycle(store)
+    _record_candidate(
+        lifecycle,
+        candidate_id="candidate-turnover-condition",
+        model_family_id="family-turnover-condition",
+        improvement=12.0,
+    )
+
+    result = lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="gate-turnover-condition",
+            model_family_id="family-turnover-condition",
+            candidate_id=_candidate_id("candidate-turnover-condition"),
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=_hard_gates(
+                "candidate-turnover-condition",
+                overrides={"economics.turnover_post_cost_condition_passed": 0.0},
+            ),
+            expected_version=1,
+            occurred_at=datetime(2026, 8, 17, 2, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "gate_failed"
+    assert result.gate_decision is not None
+    assert result.gate_decision.failed_gates == ("economics",)
+
+
 def test_bootstrap_gate_recomputes_improvement_from_recorded_scores() -> None:
     store = InMemoryLifecycleStore()
     lifecycle = _verified_lifecycle(store)
@@ -1588,6 +1618,29 @@ def test_approved_decision_requires_an_approval_request_and_nonblank_reason() ->
         )
 
 
+def test_rejected_decision_requires_a_nonblank_reason() -> None:
+    with pytest.raises(ValueError, match="approval_decision_schema_invalid"):
+        ApprovalDecision.create(
+            candidate_id="sha256:candidate",
+            artifact_id="sha256:artifact",
+            evaluation_report_id="sha256:evaluation",
+            policy_version_id="sha256:gate-policy",
+            gate_decision_id="sha256:gate-decision",
+            approval_policy_version_id="sha256:approval-policy",
+            approval_mode="owner_operated",
+            approval_policy_owner_principal_id="owner-a",
+            independent_review=False,
+            approver_id="owner-a",
+            requested_decision="rejected",
+            decision="rejected",
+            reason="   ",
+            expected_assignment="unassigned",
+            decided_at=datetime(2026, 8, 18, 2, 0, tzinfo=UTC),
+            expires_at=datetime(2026, 8, 25, 2, 0, tzinfo=UTC),
+            invalidated_reason="approver_rejected",
+        )
+
+
 def _approved_lifecycle(
     *,
     store: LifecycleStore | None = None,
@@ -1975,6 +2028,57 @@ def test_shadow_command_replays_the_original_result_and_rejects_changed_evidence
             )
         )
     assert len(store.events("family-shadow")) == 4
+
+
+def test_shadow_replay_rejects_a_corrupted_eligible_cycle_count() -> None:
+    store = _CorruptingReadStore()
+    lifecycle, _ = _approved_lifecycle(store=store)
+    command = RecordShadowEod(
+        command_id="shadow-corrupted-count-replay",
+        model_family_id="family-shadow",
+        candidate_id=_candidate_id("candidate-shadow"),
+        evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+        expected_version=3,
+        occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+    )
+    lifecycle.execute(command)
+    store.corruption_command_id = command.command_id
+    store.corruption = ("ShadowEodRecorded", "eligible_cycle_count", 5)
+
+    with pytest.raises(LifecycleConflict, match="command_id_payload_conflict"):
+        lifecycle.execute(command)
+
+
+def test_shadow_replay_rejects_a_corrupted_blocked_reason() -> None:
+    store = _CorruptingReadStore()
+    lifecycle, _ = _approved_lifecycle(store=store)
+    lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-before-blocked-replay",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        )
+    )
+    command = RecordShadowEod(
+        command_id="shadow-corrupted-reason-replay",
+        model_family_id="family-shadow",
+        candidate_id=_candidate_id("candidate-shadow"),
+        evidence=_shadow_evidence(1, previous_shadow_run_id=None),
+        expected_version=4,
+        occurred_at=datetime(2026, 8, 18, 4, 0, tzinfo=UTC),
+    )
+    first = lifecycle.execute(command)
+    assert first.status == "shadow_blocked"
+    assert first.shadow_evidence is not None
+    assert first.shadow_evidence.blocked_reason == "duplicate_shadow_run"
+    store.corruption_command_id = command.command_id
+    store.corruption = ("ShadowEodBlocked", "blocked_reason", "shadow_already_complete")
+
+    with pytest.raises(LifecycleConflict, match="command_id_payload_conflict"):
+        lifecycle.execute(command)
 
 
 def test_future_eligible_shadow_date_is_blocked_before_completion() -> None:

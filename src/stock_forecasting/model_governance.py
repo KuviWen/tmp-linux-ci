@@ -356,6 +356,9 @@ _BOOTSTRAP_THRESHOLDS_V1: Mapping[str, GateThreshold] = MappingProxyType(
         "economics.nonnegative_market_excess_count": GateThreshold("economics", "at_least", 2.0),
         "economics.nonnegative_cell_excess_count": GateThreshold("economics", "at_least", 4.0),
         "economics.drawdown_worsening_points": GateThreshold("economics", "at_most", 2.0),
+        "economics.turnover_post_cost_condition_passed": GateThreshold(
+            "economics", "at_least", 1.0
+        ),
         "stability.noninferior_quarter_count": GateThreshold(
             "stability", "at_least", float(BOOTSTRAP_MINIMUM_NONINFERIOR_QUARTERS)
         ),
@@ -806,8 +809,40 @@ class ShadowRunEvidence:
         return rebuilt == self
 
 
+def _shadow_record_payload(
+    evidence: ShadowRunEvidence,
+    *,
+    eligible_cycle_count: int,
+    blocked_reason: str | None,
+) -> dict[str, object]:
+    return {
+        "shadow_run_id": evidence.shadow_run_id,
+        "shadow_evidence_id": evidence.evidence_id,
+        "eligible_eod_date": evidence.eligible_eod_date.isoformat(),
+        "previous_shadow_run_id": evidence.previous_shadow_run_id,
+        "candidate_id": evidence.candidate_id,
+        "artifact_id": evidence.artifact_id,
+        "evaluation_report_id": evidence.evaluation_report_id,
+        "gate_decision_id": evidence.gate_decision_id,
+        "approval_decision_id": evidence.approval_decision_id,
+        "approval_policy_version_id": evidence.approval_policy_version_id,
+        "expected_assignment": evidence.expected_assignment,
+        "market_eligibility": list(evidence.markets),
+        "cold_load_checksum_verified": evidence.cold_load_checksum_verified,
+        "schema_compatible": evidence.schema_compatible,
+        "probability_invariants_verified": evidence.probability_invariants_verified,
+        "comparison_completed": evidence.comparison_completed,
+        "source_policy_verified": evidence.source_policy_verified,
+        "cpu_prediction_seconds": evidence.cpu_prediction_seconds,
+        "eligible_cycle_count": eligible_cycle_count,
+        "blocked_reason": blocked_reason,
+        "production_history_written": False,
+    }
+
+
 @dataclass(frozen=True)
 class ShadowRunRecord:
+    shadow_record_id: str
     evidence: ShadowRunEvidence
     eligible_cycle_count: int
     blocked_reason: str | None
@@ -833,41 +868,32 @@ class ShadowRunRecord:
             )
         ):
             raise ValueError("shadow_run_record_schema_invalid")
+        payload = _shadow_record_payload(
+            evidence,
+            eligible_cycle_count=eligible_cycle_count,
+            blocked_reason=blocked_reason,
+        )
         return cls(
+            shadow_record_id=_content_id("shadow_run_record", payload),
             evidence=evidence,
             eligible_cycle_count=eligible_cycle_count,
             blocked_reason=blocked_reason,
         )
 
     def to_payload(self) -> dict[str, object]:
-        evidence = self.evidence
         return {
-            "shadow_run_id": evidence.shadow_run_id,
-            "shadow_evidence_id": evidence.evidence_id,
-            "eligible_eod_date": evidence.eligible_eod_date.isoformat(),
-            "previous_shadow_run_id": evidence.previous_shadow_run_id,
-            "candidate_id": evidence.candidate_id,
-            "artifact_id": evidence.artifact_id,
-            "evaluation_report_id": evidence.evaluation_report_id,
-            "gate_decision_id": evidence.gate_decision_id,
-            "approval_decision_id": evidence.approval_decision_id,
-            "approval_policy_version_id": evidence.approval_policy_version_id,
-            "expected_assignment": evidence.expected_assignment,
-            "market_eligibility": list(evidence.markets),
-            "cold_load_checksum_verified": evidence.cold_load_checksum_verified,
-            "schema_compatible": evidence.schema_compatible,
-            "probability_invariants_verified": evidence.probability_invariants_verified,
-            "comparison_completed": evidence.comparison_completed,
-            "source_policy_verified": evidence.source_policy_verified,
-            "cpu_prediction_seconds": evidence.cpu_prediction_seconds,
-            "eligible_cycle_count": self.eligible_cycle_count,
-            "blocked_reason": self.blocked_reason,
-            "production_history_written": self.production_history_written,
+            "shadow_record_id": self.shadow_record_id,
+            **_shadow_record_payload(
+                self.evidence,
+                eligible_cycle_count=self.eligible_cycle_count,
+                blocked_reason=self.blocked_reason,
+            ),
         }
 
     @classmethod
     def from_payload(cls, payload: object) -> ShadowRunRecord:
         expected = {
+            "shadow_record_id",
             "shadow_run_id",
             "shadow_evidence_id",
             "eligible_eod_date",
@@ -893,6 +919,7 @@ class ShadowRunRecord:
         if (
             not isinstance(payload, dict)
             or set(payload) != expected
+            or not isinstance(payload["shadow_record_id"], str)
             or not isinstance(payload["shadow_evidence_id"], str)
             or not isinstance(payload["eligible_eod_date"], str)
             or not isinstance(payload["market_eligibility"], list)
@@ -927,6 +954,8 @@ class ShadowRunRecord:
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("shadow_run_record_schema_invalid") from error
         if evidence.evidence_id != payload["shadow_evidence_id"]:
+            raise ValueError("shadow_run_record_checksum_mismatch")
+        if record.shadow_record_id != payload["shadow_record_id"]:
             raise ValueError("shadow_run_record_checksum_mismatch")
         return record
 
@@ -1348,6 +1377,7 @@ class ApprovalDecision:
             or requested_decision not in {"approved", "rejected"}
             or decision not in {"approved", "rejected"}
             or not isinstance(reason, str)
+            or not reason.strip()
             or not isinstance(decided_at, datetime)
             or decided_at.tzinfo is None
             or not isinstance(expires_at, datetime)
@@ -1366,7 +1396,7 @@ class ApprovalDecision:
                 and approval_mode == "separated_duties"
                 and independent_review is not True
             )
-            or (decision == "approved" and (requested_decision != "approved" or not reason.strip()))
+            or (decision == "approved" and requested_decision != "approved")
         ):
             raise ValueError("approval_decision_schema_invalid")
         payload = {

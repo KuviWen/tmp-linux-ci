@@ -46,6 +46,7 @@ def passing_hard_gate_report(
         "economics.nonnegative_market_excess_count": 2.0,
         "economics.nonnegative_cell_excess_count": 4.0,
         "economics.drawdown_worsening_points": 2.0,
+        "economics.turnover_post_cost_condition_passed": 1.0,
         "stability.noninferior_quarter_count": 6.0,
         "stability.max_consecutive_lagging_quarters": 2.0,
         "stability.seed_macro_f1_std_points": 1.0,

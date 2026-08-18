@@ -399,6 +399,32 @@ def test_designated_owner_rejection_still_discloses_no_independent_review() -> N
     assert "<dt>Independent review</dt><dd>false</dd>" in page.text
 
 
+def test_rejection_reason_cannot_contain_only_whitespace() -> None:
+    application, identity, bundle = _governance_application(owner_operated=True)
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+
+    response = client.post(
+        "/api/v1/governance/approval-decisions",
+        headers={
+            "Authorization": identity.credential.authorization_header(),
+            "Idempotency-Key": "owner-reject-without-reason",
+            "If-Match": '"2"',
+        },
+        json={
+            "model_family_id": "dual-market-price-baseline-v1",
+            "candidate_id": bundle.candidate_id,
+            "artifact_id": bundle.primary_artifact.artifact_id,
+            "evaluation_report_id": bundle.evaluation_report.evaluation_report_id,
+            "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            "decision": "rejected",
+            "reason": "   ",
+            "expected_assignment": "unassigned",
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_invalidated_owner_operated_attempt_is_not_attributed_to_an_owner_rejection() -> None:
     application, identity, bundle = _governance_application(owner_operated=True)
     evaluation_id = bundle.evaluation_report.evaluation_report_id
