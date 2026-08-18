@@ -99,14 +99,44 @@ class FeatureBatch:
 
 
 @dataclass(frozen=True)
+class ArtifactProvenance:
+    feature_schema_id: str
+    runtime_id: str
+    code_provenance: str
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, str) or not value
+            for value in (self.feature_schema_id, self.runtime_id, self.code_provenance)
+        ):
+            raise ValueError("artifact_provenance_invalid")
+
+    def payload(self) -> dict[str, str]:
+        return {
+            "feature_schema_id": self.feature_schema_id,
+            "runtime_id": self.runtime_id,
+            "code_provenance": self.code_provenance,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> ArtifactProvenance:
+        try:
+            return cls(
+                cast(str, payload["feature_schema_id"]),
+                cast(str, payload["runtime_id"]),
+                cast(str, payload["code_provenance"]),
+            )
+        except KeyError as error:
+            raise ValueError("artifact_provenance_invalid") from error
+
+
+@dataclass(frozen=True)
 class TrainingRequest:
     feature_batch: FeatureBatch
     training_row_ids: tuple[str, ...]
     validation_row_ids: tuple[str, ...]
     seed: int
-    feature_schema_id: str
-    runtime_id: str
-    code_provenance: str
+    provenance: ArtifactProvenance
 
 
 @dataclass(frozen=True)
@@ -131,9 +161,7 @@ class ModelArtifact:
     manifest_ids: tuple[str, str, str, str, str]
     training_selection_id: str
     model_parameters_id: str
-    feature_schema_id: str
-    runtime_id: str
-    code_provenance: str
+    provenance: ArtifactProvenance
     serialized: bytes
     calibrator_ids: tuple[str, ...] = ()
     calibrators: tuple[CalibrationEvidence, ...] = ()
@@ -150,9 +178,7 @@ class ModelArtifact:
             manifest_ids=self.manifest_ids,
             training_selection_id=self.training_selection_id,
             model_parameters_id=self.model_parameters_id,
-            feature_schema_id=self.feature_schema_id,
-            runtime_id=self.runtime_id,
-            code_provenance=self.code_provenance,
+            provenance=self.provenance,
             serialized=serialized,
             calibrator_ids=self.calibrator_ids,
             calibrators=self.calibrators,
@@ -235,9 +261,7 @@ class ClassPriorTrendForecaster:
             manifest_ids=manifest_ids,
             training_selection_id=training_selection_id,
             model_parameters_id=model_parameters_id,
-            feature_schema_id=request.feature_schema_id,
-            runtime_id=request.runtime_id,
-            code_provenance=request.code_provenance,
+            provenance=request.provenance,
             serialized=serialized,
             calibrator_ids=tuple(item.calibrator_id for item in calibrators),
             calibrators=calibrators,
@@ -431,9 +455,7 @@ class RegularizedMultinomialLogisticTrendForecaster:
             manifest_ids=manifest_ids,
             training_selection_id=training_selection_id,
             model_parameters_id=model_parameters_id,
-            feature_schema_id=request.feature_schema_id,
-            runtime_id=request.runtime_id,
-            code_provenance=request.code_provenance,
+            provenance=request.provenance,
             serialized=serialized,
             calibrator_ids=tuple(item.calibrator_id for item in calibrators),
             calibrators=calibrators,
@@ -980,21 +1002,17 @@ def _serialize_payload(payload: object) -> bytes:
 
 
 def _artifact_provenance(request: TrainingRequest) -> dict[str, str]:
-    values = {
-        "feature_schema_id": request.feature_schema_id,
-        "runtime_id": request.runtime_id,
-        "code_provenance": request.code_provenance,
-    }
-    if any(not value for value in values.values()):
+    if not isinstance(request.provenance, ArtifactProvenance):
         raise ValueError("artifact_provenance_required")
-    return values
+    return request.provenance.payload()
 
 
 def _valid_artifact_provenance(payload: dict[str, object]) -> bool:
-    return all(
-        isinstance(payload.get(field), str) and bool(payload[field])
-        for field in ("feature_schema_id", "runtime_id", "code_provenance")
-    )
+    try:
+        ArtifactProvenance.from_payload(payload)
+    except ValueError:
+        return False
+    return True
 
 
 def _artifact_id(serialized: bytes) -> str:

@@ -13,7 +13,12 @@ from stock_forecasting.bootstrap_workflow import (
     BootstrapGovernanceWorkflow,
 )
 from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
-from stock_forecasting.forecasting import FeatureBatch, FeatureRow, TrendLabel
+from stock_forecasting.forecasting import (
+    ArtifactProvenance,
+    FeatureBatch,
+    FeatureRow,
+    TrendLabel,
+)
 from stock_forecasting.model_governance import (
     BOOTSTRAP_GATE_POLICY_V1,
     GateMeasurement,
@@ -171,9 +176,11 @@ def run_ticket_09_acceptance(
         created_at=observed_at,
         feature_batch=_engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
-        feature_schema_id="feature-schema:price-baseline-v1",
-        runtime_id="runtime:ticket-09-compose-acceptance-v1",
-        code_provenance="build:ticket-09-compose-acceptance-v1",
+        provenance=ArtifactProvenance(
+            "feature-schema:price-baseline-v1",
+            "runtime:ticket-09-compose-acceptance-v1",
+            "build:ticket-09-compose-acceptance-v1",
+        ),
         execution_purpose="engineering_acceptance",
     )
     intent = lab.preregister(intent)

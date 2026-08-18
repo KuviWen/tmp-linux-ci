@@ -1,10 +1,12 @@
 import hashlib
 import json
 from collections.abc import Callable
+from typing import cast
 
 import pytest
 
 from stock_forecasting.forecasting import (
+    ArtifactProvenance,
     ClassPriorTrendForecaster,
     FeatureBatch,
     FeatureRow,
@@ -18,6 +20,23 @@ from stock_forecasting.forecasting import (
 _FEATURE_SCHEMA_ID = "feature-schema:price-baseline-v1"
 _RUNTIME_ID = "runtime:cpython-3.12-safe-json-v1"
 _CODE_PROVENANCE = "git:ticket-09-test-fixture"
+_PROVENANCE = ArtifactProvenance(_FEATURE_SCHEMA_ID, _RUNTIME_ID, _CODE_PROVENANCE)
+
+
+@pytest.mark.parametrize(
+    "values",
+    (
+        ("", _RUNTIME_ID, _CODE_PROVENANCE),
+        (_FEATURE_SCHEMA_ID, "", _CODE_PROVENANCE),
+        (_FEATURE_SCHEMA_ID, _RUNTIME_ID, ""),
+        (17, _RUNTIME_ID, _CODE_PROVENANCE),
+    ),
+)
+def test_artifact_provenance_requires_nonempty_strings(
+    values: tuple[object, object, object],
+) -> None:
+    with pytest.raises(ValueError, match="artifact_provenance_invalid"):
+        ArtifactProvenance(*(cast(str, value) for value in values))
 
 
 def _literal_calibrator(*, temperature: float = 1.0) -> dict[str, object]:
@@ -129,9 +148,7 @@ def test_class_prior_artifact_loads_offline_and_predicts_training_priors() -> No
         training_row_ids=("row-1", "row-2", "row-3", "row-4"),
         validation_row_ids=(),
         seed=17,
-        feature_schema_id=_FEATURE_SCHEMA_ID,
-        runtime_id=_RUNTIME_ID,
-        code_provenance=_CODE_PROVENANCE,
+        provenance=_PROVENANCE,
     )
 
     artifact = ClassPriorTrendForecaster().train(request)
@@ -176,9 +193,7 @@ def test_class_prior_fits_separate_empirical_priors_per_market_horizon_cell() ->
             tuple(row.row_id for row in rows),
             (),
             17,
-            _FEATURE_SCHEMA_ID,
-            _RUNTIME_ID,
-            _CODE_PROVENANCE,
+            _PROVENANCE,
         )
     )
 
@@ -324,9 +339,7 @@ def test_logistic_artifact_loads_offline_and_prediction_is_order_invariant() -> 
         training_row_ids=tuple(row.row_id for row in rows),
         validation_row_ids=(),
         seed=29,
-        feature_schema_id=_FEATURE_SCHEMA_ID,
-        runtime_id=_RUNTIME_ID,
-        code_provenance=_CODE_PROVENANCE,
+        provenance=_PROVENANCE,
     )
 
     artifact = RegularizedMultinomialLogisticTrendForecaster().train(request)
@@ -405,9 +418,7 @@ def test_logistic_class_weights_are_fit_on_training_rows_and_bounded() -> None:
             training_row_ids=tuple(row.row_id for row in taiwan_rows + us_rows + balanced_rows),
             validation_row_ids=(),
             seed=17,
-            feature_schema_id=_FEATURE_SCHEMA_ID,
-            runtime_id=_RUNTIME_ID,
-            code_provenance=_CODE_PROVENANCE,
+            provenance=_PROVENANCE,
         )
     )
 
@@ -447,9 +458,7 @@ def test_logistic_offline_artifact_applies_bound_market_horizon_temperature() ->
         manifest_ids=("feature", "source", "label", "fold", "cost"),
         training_selection_id="sha256:selection",
         model_parameters_id="sha256:parameters",
-        feature_schema_id=_FEATURE_SCHEMA_ID,
-        runtime_id=_RUNTIME_ID,
-        code_provenance=_CODE_PROVENANCE,
+        provenance=_PROVENANCE,
         serialized=serialized,
         calibrator_ids=(calibrator_ids[0],),
     )

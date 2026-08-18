@@ -12,6 +12,7 @@ from stock_forecasting.bootstrap_workflow import (
     BootstrapGovernanceWorkflow,
 )
 from stock_forecasting.forecast_lab import ForecastLab, TrainingIntentRef
+from stock_forecasting.forecasting import ArtifactProvenance
 from stock_forecasting.model_governance import BOOTSTRAP_GATE_POLICY_V1
 from tests.modeling_support import (
     engineering_model_history,
@@ -38,9 +39,11 @@ def test_engineering_bootstrap_tracer_fails_closed_before_approval_or_shadow() -
         created_at=now - timedelta(hours=2),
         feature_batch=engineering_model_history(),
         preregistered_seeds=(17, 29, 43),
-        feature_schema_id="feature-schema:price-baseline-v1",
-        runtime_id="runtime:cpython-3.12-safe-json-v1",
-        code_provenance="git:ticket-09-acceptance-fixture",
+        provenance=ArtifactProvenance(
+            "feature-schema:price-baseline-v1",
+            "runtime:cpython-3.12-safe-json-v1",
+            "git:ticket-09-acceptance-fixture",
+        ),
         execution_purpose="engineering_acceptance",
     )
     lab = ForecastLab()

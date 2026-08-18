@@ -9,6 +9,7 @@ from stock_forecasting.content_address import content_id as _content_id
 from stock_forecasting.contracts import HistoricalTrainingLineage
 from stock_forecasting.evaluation_report import EvaluationReport
 from stock_forecasting.forecasting import (
+    ArtifactProvenance,
     CalibrationEvidence,
     ClassPriorTrendForecaster,
     FeatureBatch,
@@ -78,9 +79,7 @@ class TrainingIntentRef:
     created_at: datetime
     feature_batch: FeatureBatch
     preregistered_seeds: tuple[int, int, int]
-    feature_schema_id: str
-    runtime_id: str
-    code_provenance: str
+    provenance: ArtifactProvenance
     execution_purpose: Literal["formal_candidate", "engineering_acceptance"] = "formal_candidate"
     historical_claims: tuple[HistoricalClaimRef, ...] = ()
 
@@ -94,9 +93,7 @@ class TrainingIntentRef:
                 "created_at": self.created_at.isoformat(),
                 "feature_batch_id": self.feature_batch.feature_batch_id,
                 "preregistered_seeds": self.preregistered_seeds,
-                "feature_schema_id": self.feature_schema_id,
-                "runtime_id": self.runtime_id,
-                "code_provenance": self.code_provenance,
+                "provenance": self.provenance.payload(),
                 "execution_purpose": self.execution_purpose,
                 "historical_claims": [
                     {"market": claim.market, "claim_id": claim.claim_id}
@@ -193,10 +190,16 @@ class ForecastLab:
         return replace(draft, feature_batch=feature_batch).with_content_id()
 
     def develop(self, intent: TrainingIntentRef) -> ForecastLabOutcome:
-        if len(intent.preregistered_seeds) != 3 or len(set(intent.preregistered_seeds)) != 3:
+        seeds = intent.preregistered_seeds
+        if (
+            not isinstance(seeds, tuple)
+            or len(seeds) != 3
+            or any(isinstance(seed, bool) or not isinstance(seed, int) for seed in seeds)
+            or len(set(seeds)) != 3
+        ):
             return self._blocked("invalid_preregistered_seeds")
-        if not intent.feature_schema_id or not intent.runtime_id or not intent.code_provenance:
-            return self._blocked("training_intent_provenance_missing")
+        if not isinstance(intent.provenance, ArtifactProvenance):
+            return self._blocked("training_intent_provenance_invalid")
         if not self._has_class_support(intent.feature_batch.rows):
             return self._blocked("insufficient_class_support")
         fold_manifest = self._build_fold_manifest(intent.feature_batch.rows)
@@ -226,9 +229,7 @@ class ForecastLab:
                 feature_batch,
                 fold_manifest,
                 intent.preregistered_seeds,
-                feature_schema_id=intent.feature_schema_id,
-                runtime_id=intent.runtime_id,
-                code_provenance=intent.code_provenance,
+                provenance=intent.provenance,
             )
             training_ids, validation_ids = self._latest_joint_split(fold_manifest)
             logistic_artifacts = tuple(
@@ -238,9 +239,7 @@ class ForecastLab:
                         training_row_ids=training_ids,
                         validation_row_ids=validation_ids,
                         seed=seed,
-                        feature_schema_id=intent.feature_schema_id,
-                        runtime_id=intent.runtime_id,
-                        code_provenance=intent.code_provenance,
+                        provenance=intent.provenance,
                     )
                 )
                 for seed in intent.preregistered_seeds
@@ -253,9 +252,7 @@ class ForecastLab:
                         training_row_ids=training_ids,
                         validation_row_ids=validation_ids,
                         seed=seed,
-                        feature_schema_id=intent.feature_schema_id,
-                        runtime_id=intent.runtime_id,
-                        code_provenance=intent.code_provenance,
+                        provenance=intent.provenance,
                     )
                 )
                 for seed in intent.preregistered_seeds
@@ -455,9 +452,7 @@ class ForecastLab:
         fold_manifest: FoldManifest,
         seeds: tuple[int, int, int],
         *,
-        feature_schema_id: str,
-        runtime_id: str,
-        code_provenance: str,
+        provenance: ArtifactProvenance,
     ) -> EvaluationReport:
         rows_by_id = {row.row_id: row for row in batch.rows}
         folds_by_quarter: dict[str, list[WalkForwardFold]] = defaultdict(list)
@@ -478,9 +473,7 @@ class ForecastLab:
                     training_ids,
                     validation_ids,
                     seeds[0],
-                    feature_schema_id,
-                    runtime_id,
-                    code_provenance,
+                    provenance,
                 )
             )
             prior_forecast = self._class_prior_forecaster.predict(
@@ -499,9 +492,7 @@ class ForecastLab:
                         training_ids,
                         validation_ids,
                         seed,
-                        feature_schema_id,
-                        runtime_id,
-                        code_provenance,
+                        provenance,
                     )
                 )
                 forecast = self._logistic_forecaster.predict(PredictionRequest(artifact, test_rows))
