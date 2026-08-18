@@ -46,6 +46,23 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "separated_duties",
         "owner_operated",
     ]
+    governance_schema = contract["components"]["schemas"]["ModelGovernanceBacktest"]
+    assert governance_schema["properties"]["gate"]["properties"]["status"]["enum"] == [
+        "not_evaluated",
+        "passed",
+        "failed",
+        "gate_evidence_invalid",
+    ]
+    assert governance_schema["properties"]["approval"]["properties"]["status"]["enum"] == [
+        "blocked_by_gate",
+        "awaiting_approval",
+        "approved",
+        "rejected",
+        "approval_evidence_invalid",
+        "gate_lineage_changed",
+        "approval_expired",
+        "expected_assignment_changed",
+    ]
     approval_response = contract["components"]["schemas"]["ApprovalDecisionResponse"]["properties"][
         "decision"
     ]

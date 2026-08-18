@@ -143,6 +143,17 @@ class _CorruptingReadStore:
         return self._store.production_assignments(model_family_id)
 
 
+class _MutableAssignmentStore(InMemoryLifecycleStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.assignments: dict[str, tuple[str, ...]] = {}
+
+    def production_assignments(self, model_family_id: str) -> tuple[str, ...]:
+        return self.assignments.get(
+            model_family_id, super().production_assignments(model_family_id)
+        )
+
+
 def _verified_lifecycle(
     store: LifecycleStore,
     *,
@@ -1850,6 +1861,89 @@ def test_five_joint_market_shadows_complete_without_production_assignment() -> N
     assert duplicate.shadow_evidence.blocked_reason == "duplicate_shadow_run"
 
 
+def test_shadow_completion_cannot_regress_after_a_sixth_eligible_cycle() -> None:
+    eligible_dates = frozenset(
+        {
+            date(2026, 8, 18),
+            date(2026, 8, 19),
+            date(2026, 8, 20),
+            date(2026, 8, 21),
+            date(2026, 8, 24),
+            date(2026, 8, 25),
+        }
+    )
+    lifecycle, store = _approved_lifecycle(
+        shadow_eligibility_verifier=_JointMarketEodVerifier(eligible_dates)
+    )
+    for cycle in range(1, 6):
+        lifecycle.execute(
+            RecordShadowEod(
+                command_id=f"shadow-through-completion-{cycle}",
+                model_family_id="family-shadow",
+                candidate_id=_candidate_id("candidate-shadow"),
+                evidence=_shadow_evidence(
+                    cycle,
+                    previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                ),
+                expected_version=cycle + 2,
+                occurred_at=datetime.combine(
+                    _shadow_evidence(
+                        cycle,
+                        previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+                    ).eligible_eod_date,
+                    time(3, 0),
+                    tzinfo=UTC,
+                ),
+            )
+        )
+
+    sixth = lifecycle.execute(
+        RecordShadowEod(
+            command_id="shadow-after-completion",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            evidence=_bound_shadow_evidence(
+                shadow_run_id="shadow-run-6",
+                eligible_eod_date=date(2026, 8, 25),
+                previous_shadow_run_id="shadow-run-5",
+            ),
+            expected_version=8,
+            occurred_at=datetime(2026, 8, 25, 1, 0, tzinfo=UTC),
+        )
+    )
+
+    assert sixth.status == "shadow_blocked"
+    assert sixth.shadow_evidence is not None
+    assert sixth.shadow_evidence.eligible_cycle_count == 5
+    assert sixth.shadow_evidence.blocked_reason == "shadow_already_complete"
+    assert ModelGovernanceQuery(store).get_backtest("family-shadow")["shadow"] == {
+        "eligible_cycle_count": 5,
+        "required": 5,
+    }
+
+
+def test_shadow_checksum_mismatch_is_an_explicit_conflict_without_an_event() -> None:
+    lifecycle, store = _approved_lifecycle()
+    corrupted = replace(
+        _shadow_evidence(1, previous_shadow_run_id=None),
+        evidence_id="sha256:corrupted-shadow-evidence",
+    )
+
+    with pytest.raises(LifecycleConflict, match="shadow_evidence_checksum_mismatch"):
+        lifecycle.execute(
+            RecordShadowEod(
+                command_id="shadow-checksum-conflict",
+                model_family_id="family-shadow",
+                candidate_id=_candidate_id("candidate-shadow"),
+                evidence=corrupted,
+                expected_version=3,
+                occurred_at=datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+            )
+        )
+
+    assert len(store.events("family-shadow")) == 3
+
+
 def test_corrupted_persisted_shadow_evidence_cannot_complete_five_cycles() -> None:
     store = _CorruptingReadStore()
     lifecycle, _ = _approved_lifecycle(store=store)
@@ -2020,6 +2114,36 @@ def test_later_passing_gate_with_different_evidence_invalidates_stale_approval()
         ModelGovernanceQuery(store).get_backtest("family-shadow")["approval"],
     )
     assert approval_projection["status"] == "gate_lineage_changed"
+
+
+def test_research_query_projects_an_expired_approval_as_invalid() -> None:
+    _, store = _approved_lifecycle()
+
+    approval_projection = cast(
+        dict[str, object],
+        ModelGovernanceQuery(
+            store,
+            clock=lambda: datetime(2026, 8, 25, 2, 0, tzinfo=UTC),
+        ).get_backtest("family-shadow")["approval"],
+    )
+
+    assert approval_projection["status"] == "approval_expired"
+
+
+def test_research_query_projects_assignment_change_as_approval_invalidation() -> None:
+    store = _MutableAssignmentStore()
+    _approved_lifecycle(store=store)
+    store.assignments["family-shadow"] = ("production:new-assignment",)
+
+    approval_projection = cast(
+        dict[str, object],
+        ModelGovernanceQuery(
+            store,
+            clock=lambda: datetime(2026, 8, 18, 3, 0, tzinfo=UTC),
+        ).get_backtest("family-shadow")["approval"],
+    )
+
+    assert approval_projection["status"] == "expected_assignment_changed"
 
 
 def test_corrupted_latest_approval_cannot_resurrect_an_older_approval() -> None:

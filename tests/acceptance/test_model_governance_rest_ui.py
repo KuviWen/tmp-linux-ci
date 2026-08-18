@@ -301,6 +301,65 @@ def test_designated_owner_self_approval_is_disclosed_through_rest_and_ui() -> No
     assert "<dt>Independent review</dt><dd>false</dd>" in page.text
 
 
+def test_owner_operated_ui_distinguishes_gate_lineage_change_from_rejection() -> None:
+    application, identity, bundle = _governance_application(owner_operated=True)
+    evaluation_id = bundle.evaluation_report.evaluation_report_id
+    client = TestClient(create_web_app(application), client=("127.0.0.1", 50000))
+    authorization = identity.credential.authorization_header()
+    approval = client.post(
+        "/api/v1/governance/approval-decisions",
+        headers={
+            "Authorization": authorization,
+            "Idempotency-Key": "owner-approval-before-regating",
+            "If-Match": '"2"',
+        },
+        json={
+            "model_family_id": "dual-market-price-baseline-v1",
+            "candidate_id": bundle.candidate_id,
+            "artifact_id": bundle.primary_artifact.artifact_id,
+            "evaluation_report_id": evaluation_id,
+            "policy_version_id": BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            "decision": "approved",
+            "reason": "Owner approves this exact gate lineage.",
+            "expected_assignment": "unassigned",
+        },
+    )
+    assert approval.status_code == 201
+    changed_report = passing_hard_gate_report(
+        evaluation_id,
+        overrides={"economics.ic_information_ratio": 0.31},
+    )
+    application.governance_object_repository.put_verified(
+        BytesIO(changed_report.serialized),
+        expected_checksum=changed_report.artifact_id.removeprefix("sha256:"),
+        metadata={"content_type": "application/json", "object_kind": "gate_report"},
+    )
+    application.model_lifecycle.execute(
+        EvaluateBootstrapCandidate(
+            command_id="owner-regate-with-changed-evidence",
+            model_family_id="dual-market-price-baseline-v1",
+            candidate_id=bundle.candidate_id,
+            policy_version_id=BOOTSTRAP_GATE_POLICY_V1.policy_version_id,
+            hard_gates=passing_hard_gate_evidence(
+                evaluation_id,
+                overrides={"economics.ic_information_ratio": 0.31},
+            ),
+            expected_version=3,
+            occurred_at=datetime(2026, 8, 17, 2, 30, tzinfo=UTC),
+        )
+    )
+
+    page = client.get(
+        "/research/model-families/dual-market-price-baseline-v1/backtests",
+        headers={"Authorization": authorization},
+    )
+
+    assert page.status_code == 200
+    assert "gate_lineage_changed" in page.text
+    assert "Rejected under owner-operated policy" not in page.text
+    assert "依擁有者操作政策拒絕" not in page.text
+
+
 def test_designated_owner_rejection_still_discloses_no_independent_review() -> None:
     application, identity, bundle = _governance_application(owner_operated=True)
     evaluation_id = bundle.evaluation_report.evaluation_report_id

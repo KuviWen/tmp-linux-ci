@@ -167,7 +167,10 @@ class Application:
                 formal_qualification_verifier or self.forecast_lab.qualification_verifier
             ),
         )
-        self.model_governance_query = ModelGovernanceQuery(self.model_lifecycle_store)
+        self.model_governance_query = ModelGovernanceQuery(
+            self.model_lifecycle_store,
+            clock=lambda: self._fixed_security_time or datetime.now(UTC),
+        )
         self.local_identity = local_identity
         self.security_context: SecurityContext = local_identity.context
         if source_adapter_security_context is not None:

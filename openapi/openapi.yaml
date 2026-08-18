@@ -982,7 +982,9 @@ components:
           type: object
           required: [status]
           properties:
-            status: {type: string, enum: [not_evaluated, passed, failed]}
+            status:
+              type: string
+              enum: [not_evaluated, passed, failed, gate_evidence_invalid]
             policy_version_id: {type: string}
             failed_gates:
               type: array
@@ -996,7 +998,17 @@ components:
           additionalProperties: false
           required: [status]
           properties:
-            status: {type: string, enum: [blocked_by_gate, awaiting_approval, approved, rejected]}
+            status:
+              type: string
+              enum:
+                - blocked_by_gate
+                - awaiting_approval
+                - approved
+                - rejected
+                - approval_evidence_invalid
+                - gate_lineage_changed
+                - approval_expired
+                - expected_assignment_changed
             approval_policy_version_id: {type: [string, 'null']}
             approval_mode: {type: string, enum: [separated_duties, owner_operated]}
             approval_policy_owner_principal_id: {type: [string, 'null']}

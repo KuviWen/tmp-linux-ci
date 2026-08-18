@@ -494,14 +494,17 @@ def create_web_app(application: Application) -> FastAPI:
         serving = cast(dict[str, object], report["serving"])
         formal_qualification = escape(str(candidate["formal_qualification"]))
         if approval.get("approval_mode") == "owner_operated":
-            approval_disclosure = (
-                "Owner self-approved; no independent review（擁有者自行核准；無獨立審查）"
-                if approval.get("status") == "approved"
-                else (
+            if approval.get("status") == "approved":
+                approval_disclosure = (
+                    "Owner self-approved; no independent review（擁有者自行核准；無獨立審查）"
+                )
+            elif approval.get("status") == "rejected":
+                approval_disclosure = (
                     "Rejected under owner-operated policy; no independent review"
                     "（依擁有者操作政策拒絕；無獨立審查）"
                 )
-            )
+            else:
+                approval_disclosure = escape(str(approval["status"]))
         else:
             approval_disclosure = escape(str(approval["status"]))
         approval_policy_version = escape(

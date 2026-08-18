@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from io import BytesIO
 from math import isfinite
 from types import MappingProxyType
@@ -2370,6 +2370,9 @@ class ModelLifecycle:
 
     def _record_shadow(self, command: RecordShadowEod) -> LifecycleResult:
         candidate = self._candidate(command.model_family_id, command.candidate_id)
+        evidence = command.evidence
+        if not evidence.is_content_addressed():
+            raise LifecycleConflict("shadow_evidence_checksum_mismatch")
         try:
             approval_payload = self._current_approval(command.model_family_id, command.candidate_id)
         except LifecycleConflict as error:
@@ -2391,7 +2394,6 @@ class ModelLifecycle:
         except LifecycleConflict:
             current_gate = None
             current_gate_passed = False
-        evidence = command.evidence
         try:
             prior_records = _verified_shadow_lineage(
                 self._store.events(command.model_family_id),
@@ -2435,8 +2437,6 @@ class ModelLifecycle:
             blocked_reason = "shadow_before_approval"
         elif approval.expected_assignment != self._current_assignment(command.model_family_id):
             blocked_reason = "expected_assignment_changed"
-        elif not evidence.is_content_addressed():
-            blocked_reason = "shadow_evidence_checksum_mismatch"
         elif (
             evidence.candidate_id != command.candidate_id
             or evidence.artifact_id != candidate["artifact_id"]
@@ -2478,6 +2478,8 @@ class ModelLifecycle:
             blocked_reason = "shadow_sequence_broken"
         elif previous is not None and evidence.eligible_eod_date <= previous.eligible_eod_date:
             blocked_reason = "shadow_date_not_increasing"
+        elif len(prior_records) >= 5:
+            blocked_reason = "shadow_already_complete"
         completed_cycles = len(prior_records)
         eligible_cycle_count = completed_cycles + (0 if blocked_reason else 1)
         outcome_evidence = ShadowEvidence(
@@ -2564,8 +2566,14 @@ class ModelLifecycle:
 
 
 class ModelGovernanceQuery:
-    def __init__(self, store: LifecycleStore) -> None:
+    def __init__(
+        self,
+        store: LifecycleStore,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._store = store
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def get_backtest(self, model_family_id: str) -> dict[str, object]:
         events = self._store.events(model_family_id)
@@ -2596,13 +2604,13 @@ class ModelGovernanceQuery:
                     "hard_gate_evidence_refs": gate.hard_gate_evidence_refs,
                 }
         approval = self._latest_payload(events, "ApprovalDecisionRecorded", candidate_id)
+        assignments = self._store.production_assignments(model_family_id)
         shadow_count = self._current_lineage_shadow_count(
             events,
             candidate_id,
             gate,
             approval,
         )
-        assignments = self._store.production_assignments(model_family_id)
         calibrator_statuses = cast(list[str], candidate["calibrator_statuses"])
         return {
             "model_family_id": model_family_id,
@@ -2632,6 +2640,8 @@ class ModelGovernanceQuery:
                 candidate,
                 gate,
                 gate_projection,
+                evaluated_at=self._clock(),
+                current_assignment=assignments[-1] if assignments else "unassigned",
             ),
             "shadow": {"eligible_cycle_count": shadow_count, "required": 5},
             "serving": {
@@ -2676,6 +2686,9 @@ class ModelGovernanceQuery:
         candidate: dict[str, object],
         current_gate: GateDecision | None,
         gate_projection: dict[str, object],
+        *,
+        evaluated_at: datetime,
+        current_assignment: str,
     ) -> dict[str, object]:
         if approval is None:
             return {
@@ -2696,6 +2709,13 @@ class ModelGovernanceQuery:
                 or decision.policy_version_id != current_gate.policy_version_id
             ):
                 status = "gate_lineage_changed"
+            elif decision.decision == "approved" and evaluated_at >= decision.expires_at:
+                status = "approval_expired"
+            elif (
+                decision.decision == "approved"
+                and decision.expected_assignment != current_assignment
+            ):
+                status = "expected_assignment_changed"
             else:
                 status = "approved" if decision.decision == "approved" else "rejected"
             return {
