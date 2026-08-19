@@ -297,6 +297,13 @@ class Application:
         self._fixture_use = FixtureUseWorkflow(
             state_store=self.state_store,
         )
+
+        def load_production_authorization_policy() -> AuthorizationPolicy:
+            return self.authorization_policy_repository.get(
+                authorization_policy_set_id,
+                principal_id=self.security_context.principal_id,
+            )
+
         self._production_eod = ForecastExecution(
             assignment_resolver=ServingAssignmentResolver(
                 self.model_lifecycle_store,
@@ -308,7 +315,7 @@ class Application:
             artifact_repository=self.model_artifact_repository,
             publication_store=SqlAlchemyProductionPublicationStore(self.state_store),
             security_context=self.security_context,
-            authorization_policy=self.authorization_policy,
+            authorization_policy=load_production_authorization_policy,
             clock=lambda: self._fixed_security_time or datetime.now(UTC),
         )
 

@@ -1,4 +1,3 @@
-from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
@@ -100,17 +99,13 @@ class _DelayedProductionStateStore:
         *,
         clock: _MutableClock,
         elapsed: timedelta,
-        before_publish: Callable[[], None] | None = None,
     ) -> None:
         self.delegate = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
         self._clock = clock
         self._elapsed = elapsed
-        self._before_publish = before_publish
 
     def publish_production_trace(self, **kwargs: Any) -> int:
         self._clock.advance(self._elapsed)
-        if self._before_publish is not None:
-            self._before_publish()
         return self.delegate.publish_production_trace(**kwargs)
 
     def record_authorization_decision(
@@ -221,6 +216,23 @@ class _AuthorizationFirstPublicationStore:
         return None
 
 
+class _ReplacingAuthorizationPolicyRepository:
+    def __init__(
+        self,
+        *,
+        active: AuthorizationPolicy,
+        replacement: AuthorizationPolicy,
+    ) -> None:
+        self._active = active
+        self._replacement = replacement
+        self.reads = 0
+
+    def get(self, policy_set_id: str, *, principal_id: str) -> AuthorizationPolicy:
+        del policy_set_id, principal_id
+        self.reads += 1
+        return self._replacement if self.reads >= 3 else self._active
+
+
 def _listing_id(index: int, market: str = "XTAI") -> str:
     return str(uuid5(NAMESPACE_URL, f"ticket-10/{market.lower()}/listing/{index}"))
 
@@ -327,6 +339,21 @@ def _production_identity_and_policy(
         ),
     )
     return identity, policy
+
+
+def _without_dataset_policy(
+    policy: AuthorizationPolicy,
+    dataset_id: str,
+) -> AuthorizationPolicy:
+    return replace(
+        policy,
+        source_policies=tuple(
+            item for item in policy.source_policies if item.dataset_id != dataset_id
+        ),
+        source_entitlements=tuple(
+            item for item in policy.source_entitlements if item.dataset_id != dataset_id
+        ),
+    )
 
 
 def test_deployed_production_entrypoint_fails_closed_without_data_selection() -> None:
@@ -685,27 +712,17 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
         )
         assert expired_audit[-1]["reason_code"] == "identity_expired"
 
-        current_policy = [production_policy]
-
-        def withdraw_manifest_policy() -> None:
-            current_policy[0] = replace(
+        current_policy_repository = _ReplacingAuthorizationPolicyRepository(
+            active=production_policy,
+            replacement=_without_dataset_policy(
                 production_policy,
-                source_policies=tuple(
-                    item
-                    for item in production_policy.source_policies
-                    if item.dataset_id != selection.source_policy_manifest_id
-                ),
-                source_entitlements=tuple(
-                    item
-                    for item in production_policy.source_entitlements
-                    if item.dataset_id != selection.source_policy_manifest_id
-                ),
-            )
+                selection.source_policy_manifest_id,
+            ),
+        )
 
         withdrawn_state_store = _DelayedProductionStateStore(
             clock=_MutableClock(information_cutoff),
             elapsed=timedelta(),
-            before_publish=withdraw_manifest_policy,
         )
         withdrawn_at_commit = ForecastExecution(
             assignment_resolver=ServingAssignmentResolver(
@@ -716,7 +733,10 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
             artifact_repository=artifacts,
             publication_store=SqlAlchemyProductionPublicationStore(withdrawn_state_store),
             security_context=production_identity.context,
-            authorization_policy=lambda: current_policy[0],
+            authorization_policy=lambda: current_policy_repository.get(
+                "production-policy",
+                principal_id=production_identity.context.principal_id,
+            ),
             clock=lambda: information_cutoff,
         ).run(
             ForecastRunCommand(
@@ -1039,6 +1059,53 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
     assert not isinstance(deployed, PolicyDeniedOutcome)
     assert deployed.status == "completed"
     assert len(application.state_store.list_research_records(execution_purpose="production")) == 10
+
+    if market == "XTAI":
+        current_policy_repository = _ReplacingAuthorizationPolicyRepository(
+            active=production_policy,
+            replacement=_without_dataset_policy(
+                production_policy,
+                selection.source_policy_manifest_id,
+            ),
+        )
+        withdrawal_application = build_test_application(
+            observed_at=information_cutoff,
+            production_data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
+            local_identity=production_identity,
+            authorization_policy_override=production_policy,
+        )
+        withdrawal_application.authorization_policy_repository = cast(
+            Any,
+            current_policy_repository,
+        )
+        withdrawal_application.model_artifact_repository.put(
+            artifact.artifact_id,
+            artifact.serialized,
+            object_kind="bootstrap_model_artifact",
+        )
+        withdrawal_application.model_lifecycle_store.promote(
+            command_id="arrange-withdrawn-deployed-production-assignment",
+            model_family_id=assignment.model_family_id,
+            expected_version=0,
+            promotion_payload={"promotion_event_id": "sha256:withdrawn-deployed-promotion"},
+            assignment_payload=assignment.to_payload(),
+            occurred_at=assignment.assigned_at,
+        )
+
+        withdrawn = withdrawal_application.run_production_eod(
+            replace(
+                denied_command,
+                idempotency_key="xtai-withdrawn-deployed",
+                trace_id="P2-TRACE-EOD-01-WITHDRAWN-DEPLOYED-XTAI",
+            )
+        )
+
+        assert isinstance(withdrawn, PolicyDeniedOutcome)
+        assert current_policy_repository.reads == 3
+        assert (
+            withdrawal_application.state_store.list_research_records(execution_purpose="production")
+            == []
+        )
 
 
 def test_late_and_non_observed_inputs_are_unavailable_without_losing_successes() -> None:
@@ -1448,6 +1515,19 @@ def test_withdrawn_source_policy_publishes_only_stable_unavailable_reasons() -> 
         "source_policy_withdrawn"
     }
     assert all(item.probabilities is None for item in publication.predictions)
+
+    unstable_reason = replace(
+        publication.predictions[0],
+        unavailable_reason="provider says nope",
+    )
+    with pytest.raises(ValueError, match="production_unavailable_contract_invalid"):
+        InMemoryProductionPublicationStore().publish(
+            replace(publication, predictions=(unstable_reason, *publication.predictions[1:])),
+            trace_id="trace-unstable-published-reason",
+            idempotency_key="unstable-published-reason",
+            persistence_clock=lambda: publication.completed_at,
+            authorize_at_persistence=lambda _at: {},
+        )
 
     replacement_selection = ResolvedProductionDataSelection.create(
         market="XTAI",
