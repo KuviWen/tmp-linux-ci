@@ -1,6 +1,6 @@
-# Ticket 09 AC 5–7 正式化操作手冊
+# Ticket 09 模型營運資格操作手冊（選用）
 
-本手冊只處理 Ticket 09 尚未完成的 AC 5–7：正式 hard gates、`owner_operated` 核准，以及五個不同 eligible EOD 日期的 shadow。工程 fixture、mock、同日重播或人工改資料庫都不能當作通過證據。
+依 ADR 0020，Ticket 09 的 AC 5–7 已改由明確標示的 deterministic engineering evidence 驗收，不必執行本手冊，也不必等待五個真實交易日。本手冊只在 owner 想讓某個真實模型取得「模型營運資格」時使用：正式 hard gates、`owner_operated` 核准，以及五個不同 eligible EOD 日期的實際 shadow。工程 fixture、mock、同日重播或人工改資料庫仍不能當作真實模型營運資格證據。
 
 ## 目前判斷（2026-08-19）
 

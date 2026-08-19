@@ -149,6 +149,7 @@ Gate 的數值與細節只存在於權威領域契約；後續規格引用 trace
 
 - `P2-EXIT-01`：兩市場在五個不同合格日期完成EOD shadow、10＋10歷史資格、bootstrap gate、版本化人工核准與獨立審查揭露、重現、回退、來源政策、故障恢復、Compose small smoke與K8s smoke全數通過，才可建立首個production服務指派；日期間每日排定停機不違反 exit，但不算 shadow cycle。
 - 首個logistic未勝class-prior至少 1 percentage point，或任一絕對gate失敗，則正式 serving 維持blocked。
+- 依 ADR 0020，Ticket 09 的工程 exit 可用同日 deterministic engineering evidence 驗證 gate、owner-operated approval 與五-cycle shadow 契約；這不滿足 `P2-EXIT-01` 的真實模型營運資格，也不允許 production 服務指派。
 
 ## P3：多模態研究 pilot
 
