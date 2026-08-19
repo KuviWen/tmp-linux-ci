@@ -9,6 +9,7 @@ from stock_forecasting.authorization import (
     PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
     LocalApiKeyIdentity,
     OperationIntent,
+    SourceUseRight,
     build_fixture_authorization_policy,
 )
 from stock_forecasting.authorization_repository import (
@@ -390,6 +391,7 @@ def test_qualified_operator_authorization_is_bound_to_reviewed_rights_evidence(
             "research_prediction.read",
             "production_forecast.publish",
             "production_notification.deliver",
+            "production_operations.read",
         },
         issued_at=now,
         expires_at=now.replace(day=20),
@@ -412,7 +414,7 @@ def test_qualified_operator_authorization_is_bound_to_reviewed_rights_evidence(
 
     evidence_root = tmp_path / "evidence"
     evidence_root.mkdir()
-    required_uses = [
+    required_uses: list[SourceUseRight] = [
         "backup_restore",
         "ingest",
         "internal_display",
@@ -551,18 +553,28 @@ def test_qualified_operator_authorization_is_bound_to_reviewed_rights_evidence(
         "research_prediction.read",
         "production_forecast.publish",
         "production_notification.deliver",
+        "production_operations.read",
     ):
         decision = owner_policy.evaluate(
             owner.context,
             OperationIntent(
                 action=action,
-                dataset_id=f"sha256:{manifest_sha256}",
+                dataset_id=(
+                    PRODUCTION_RESEARCH_CATALOG_DATASET_ID
+                    if action == "production_operations.read"
+                    else f"sha256:{manifest_sha256}"
+                ),
                 purpose="price_research",
                 environment="local",
                 resource_state="active",
                 evaluated_at=now,
                 trace_id=f"trace-qualified-{action}",
                 correlation_id=f"trace-qualified-{action}",
+                required_uses=(
+                    frozenset({"internal_display"})
+                    if action == "production_operations.read"
+                    else frozenset(required_uses)
+                ),
             ),
         )
         assert decision.allowed is True
@@ -577,6 +589,7 @@ def test_qualified_operator_authorization_is_bound_to_reviewed_rights_evidence(
             evaluated_at=now,
             trace_id="trace-qualified-production-catalog",
             correlation_id="trace-qualified-production-catalog",
+            required_uses=frozenset({"internal_display"}),
         ),
     )
     assert catalog_decision.allowed is True

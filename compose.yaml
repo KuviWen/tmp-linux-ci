@@ -1137,6 +1137,8 @@ services:
       - production_forecast.publish
       - --scope
       - production_notification.deliver
+      - --scope
+      - production_operations.read
       - --data-protection-class
       - internal
       - --data-protection-class

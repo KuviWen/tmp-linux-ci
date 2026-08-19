@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
@@ -19,6 +20,7 @@ from stock_forecasting.authorization import (
     RuntimeEnvironment,
     SourceEntitlement,
     SourcePolicyVersion,
+    SourceUseRight,
 )
 from stock_forecasting.content_address import content_id
 from stock_forecasting.model_governance import (
@@ -60,6 +62,79 @@ class _FixedProductionDataSelectionResolver:
         return self._selection
 
 
+class _MutableClock:
+    def __init__(self, current: datetime) -> None:
+        self.current = current
+
+    def __call__(self) -> datetime:
+        return self.current
+
+    def advance(self, elapsed: timedelta) -> None:
+        self.current += elapsed
+
+
+class _AdvancingProductionDataSelectionResolver:
+    def __init__(
+        self,
+        selection: ResolvedProductionDataSelection,
+        *,
+        clock: _MutableClock,
+        elapsed: timedelta,
+    ) -> None:
+        self._delegate = _FixedProductionDataSelectionResolver(selection)
+        self._clock = clock
+        self._elapsed = elapsed
+
+    def resolve(
+        self,
+        request: ProductionDataSelectionRequest,
+    ) -> ResolvedProductionDataSelection:
+        selection = self._delegate.resolve(request)
+        self._clock.advance(self._elapsed)
+        return selection
+
+
+class _DelayedPublicationStore:
+    def __init__(self, *, clock: _MutableClock, elapsed: timedelta) -> None:
+        self._delegate = InMemoryProductionPublicationStore()
+        self._clock = clock
+        self._elapsed = elapsed
+
+    def replay(self, *, idempotency_key: str, trace_id: str) -> ForecastPublication | None:
+        return self._delegate.replay(idempotency_key=idempotency_key, trace_id=trace_id)
+
+    def publish(
+        self,
+        publication: ForecastPublication,
+        *,
+        trace_id: str,
+        idempotency_key: str,
+        authorization: dict[str, object],
+        persistence_clock: Callable[[], datetime],
+    ) -> ForecastPublication:
+        self._clock.advance(self._elapsed)
+        return self._delegate.publish(
+            publication,
+            trace_id=trace_id,
+            idempotency_key=idempotency_key,
+            authorization=authorization,
+            persistence_clock=persistence_clock,
+        )
+
+    def record_authorization_decision(
+        self,
+        *,
+        authorization: dict[str, object],
+        outcome: Literal["allowed", "denied"],
+        trace_id: str,
+    ) -> None:
+        self._delegate.record_authorization_decision(
+            authorization=authorization,
+            outcome=outcome,
+            trace_id=trace_id,
+        )
+
+
 class _ResearchOnlyApplication:
     def __init__(
         self,
@@ -99,6 +174,28 @@ class _RejectedNotificationTransport:
         return False
 
 
+class _AuthorizationFirstResearchStore:
+    def __init__(self) -> None:
+        self.authorization_recorded = False
+        self.protected_read_attempted = False
+
+    def record_authorization_decision(
+        self,
+        *,
+        authorization: dict[str, object],
+        outcome: str,
+        trace_id: str,
+    ) -> None:
+        del authorization, outcome, trace_id
+        self.authorization_recorded = True
+
+    def list_research_records(self, *, execution_purpose: str) -> list[dict[str, Any]]:
+        del execution_purpose
+        self.protected_read_attempted = True
+        assert self.authorization_recorded
+        return []
+
+
 def _listing_id(index: int, market: str = "XTAI") -> str:
     return str(uuid5(NAMESPACE_URL, f"ticket-10/{market.lower()}/listing/{index}"))
 
@@ -108,9 +205,28 @@ def _production_identity_and_policy(
     at: datetime,
     *,
     actions: frozenset[AuthorizationAction] = frozenset(
-        {"production_forecast.publish", "production_notification.deliver"}
+        {
+            "production_forecast.publish",
+            "production_notification.deliver",
+            "production_operations.read",
+        }
+    ),
+    allowed_uses: frozenset[SourceUseRight] = frozenset(
+        {
+            "ingest",
+            "retain_observed_history",
+            "transform",
+            "model",
+            "internal_display",
+            "backup_restore",
+        }
     ),
 ) -> tuple[LocalApiKeyIdentity, AuthorizationPolicy]:
+    source_actions = actions - {"production_operations.read"}
+    catalog_actions = actions & {
+        "production_notification.deliver",
+        "production_operations.read",
+    }
     identity = LocalApiKeyIdentity.issue(
         owner="production-workload",
         environment="development",
@@ -134,13 +250,26 @@ def _production_identity_and_policy(
             SourcePolicyVersion(
                 version_id="production-source-policy-v1",
                 dataset_id=source_policy_manifest_id,
-                allowed_actions=actions,
+                allowed_actions=source_actions,
                 purposes=frozenset({"price_research"}),
                 environments=frozenset({"development"}),
                 data_protection_class="licensed",
                 resource_states=frozenset({"active"}),
                 valid_from=at - timedelta(hours=1),
                 valid_to=at + timedelta(hours=2),
+                allowed_uses=allowed_uses,
+            ),
+            SourcePolicyVersion(
+                version_id="production-catalog-policy-v1",
+                dataset_id=PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+                allowed_actions=catalog_actions,
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                valid_from=at - timedelta(hours=1),
+                valid_to=at + timedelta(hours=2),
+                allowed_uses=allowed_uses,
             ),
         ),
         source_entitlements=(
@@ -149,11 +278,24 @@ def _production_identity_and_policy(
                 principal_id=identity.context.principal_id,
                 dataset_id=source_policy_manifest_id,
                 status="active",
-                allowed_actions=actions,
+                allowed_actions=source_actions,
                 purposes=frozenset({"price_research"}),
                 environments=frozenset({"development"}),
                 valid_from=at - timedelta(hours=1),
                 valid_to=at + timedelta(hours=2),
+                allowed_uses=allowed_uses,
+            ),
+            SourceEntitlement(
+                version_id="production-catalog-entitlement-v1",
+                principal_id=identity.context.principal_id,
+                dataset_id=PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+                status="active",
+                allowed_actions=catalog_actions,
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({"development"}),
+                valid_from=at - timedelta(hours=1),
+                valid_to=at + timedelta(hours=2),
+                allowed_uses=allowed_uses,
             ),
         ),
     )
@@ -176,6 +318,35 @@ def test_deployed_production_entrypoint_fails_closed_without_data_selection() ->
                 trace_id="trace-production-provider-unavailable",
             )
         )
+
+
+def test_production_collection_authorizes_before_protected_state_lookup() -> None:
+    cutoff = datetime(2026, 8, 18, 6, 0, tzinfo=UTC)
+    identity = LocalApiKeyIdentity.issue(
+        owner="formal-researcher",
+        environment="development",
+        scopes={"research_prediction.read"},
+        issued_at=cutoff - timedelta(minutes=1),
+        expires_at=cutoff + timedelta(hours=1),
+    )
+    store = _AuthorizationFirstResearchStore()
+    outcome = ResearchQuery(
+        cast(StateStore, store),
+        security_context=identity.context,
+        authorization_policy=AuthorizationPolicy(
+            action_grants=(),
+            source_policies=(),
+            source_entitlements=(),
+        ),
+        authorization_time=cutoff,
+    ).list_predictions(
+        execution_purpose="production",
+        trace_id="trace-production-authorization-first",
+    )
+
+    assert isinstance(outcome, PolicyDeniedOutcome)
+    assert store.authorization_recorded is True
+    assert store.protected_read_attempted is False
 
 
 @pytest.mark.parametrize("market", ["XTAI", "XNAS"])
@@ -309,6 +480,101 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
     assert publication.projection.stale is True
     assert publication.outbox_delivery_status == "pending"
 
+    missing_model_identity, missing_model_policy = _production_identity_and_policy(
+        artifact.manifest_ids[1],
+        information_cutoff,
+        allowed_uses=frozenset({"internal_display"}),
+    )
+    denied = ForecastExecution(
+        assignment_resolver=ServingAssignmentResolver(
+            lifecycle_store,
+            InMemoryAssignmentPinStore(),
+        ),
+        data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
+        artifact_repository=artifacts,
+        publication_store=InMemoryProductionPublicationStore(),
+        security_context=missing_model_identity.context,
+        authorization_policy=missing_model_policy,
+        clock=lambda: information_cutoff,
+    ).run(
+        ForecastRunCommand(
+            market=market,
+            information_cutoff=information_cutoff,
+            stock_pool_version_id=f"sha256:p2-{market.lower()}-stock-pool-v1",
+            model_family_id="taiwan-us-price-trend-v1",
+            execution_purpose="production",
+            idempotency_key=f"{market.lower()}-missing-model-use",
+            trace_id=f"trace-{market.lower()}-missing-model-use",
+        )
+    )
+
+    assert isinstance(denied, PolicyDeniedOutcome)
+
+    if market == "XTAI":
+        readiness_clock = _MutableClock(information_cutoff)
+        late_readiness = ForecastExecution(
+            assignment_resolver=ServingAssignmentResolver(
+                lifecycle_store,
+                InMemoryAssignmentPinStore(),
+            ),
+            data_selection_resolver=_AdvancingProductionDataSelectionResolver(
+                selection,
+                clock=readiness_clock,
+                elapsed=timedelta(minutes=1),
+            ),
+            artifact_repository=artifacts,
+            publication_store=InMemoryProductionPublicationStore(),
+            security_context=production_identity.context,
+            authorization_policy=production_policy,
+            clock=readiness_clock,
+        ).run(
+            ForecastRunCommand(
+                market=market,
+                information_cutoff=information_cutoff,
+                stock_pool_version_id=f"sha256:p2-{market.lower()}-stock-pool-v1",
+                model_family_id="taiwan-us-price-trend-v1",
+                execution_purpose="production",
+                idempotency_key="xtai-late-readiness",
+                trace_id="trace-xtai-late-readiness",
+            )
+        )
+
+        assert not isinstance(late_readiness, PolicyDeniedOutcome)
+        assert late_readiness.milestones[0].status == "missed"
+        assert late_readiness.milestones[0].observed_at == information_cutoff + timedelta(minutes=1)
+
+        persistence_clock = _MutableClock(information_cutoff)
+        late_persistence = ForecastExecution(
+            assignment_resolver=ServingAssignmentResolver(
+                lifecycle_store,
+                InMemoryAssignmentPinStore(),
+            ),
+            data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
+            artifact_repository=artifacts,
+            publication_store=_DelayedPublicationStore(
+                clock=persistence_clock,
+                elapsed=timedelta(minutes=31),
+            ),
+            security_context=production_identity.context,
+            authorization_policy=production_policy,
+            clock=persistence_clock,
+        ).run(
+            ForecastRunCommand(
+                market=market,
+                information_cutoff=information_cutoff,
+                stock_pool_version_id=f"sha256:p2-{market.lower()}-stock-pool-v1",
+                model_family_id="taiwan-us-price-trend-v1",
+                execution_purpose="production",
+                idempotency_key="xtai-late-persistence",
+                trace_id="trace-xtai-late-persistence",
+            )
+        )
+
+        assert not isinstance(late_persistence, PolicyDeniedOutcome)
+        assert late_persistence.slo_breached is True
+        assert late_persistence.milestones[-1].status == "missed"
+        assert late_persistence.completed_at == information_cutoff + timedelta(minutes=31)
+
     other_market: Literal["XTAI", "XNAS"] = "XNAS" if market == "XTAI" else "XTAI"
     mixed_market_selection = ResolvedProductionDataSelection.create(
         market=market,
@@ -384,6 +650,7 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
             invalid_publication,
             trace_id="trace-invalid-probability",
             idempotency_key="invalid-probability",
+            persistence_clock=lambda: invalid_publication.completed_at,
         )
 
     assert invalid_store.get_batch(publication.forecast_batch_id) is None
@@ -401,6 +668,7 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
             ),
             trace_id="trace-invalid-lineage",
             idempotency_key="invalid-lineage",
+            persistence_clock=lambda: publication.completed_at,
         )
 
     def assert_cross_artifact_lineage_rejected(corrupted: ForecastPublication, key: str) -> None:
@@ -412,6 +680,7 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
                 corrupted,
                 trace_id=f"trace-{key}",
                 idempotency_key=key,
+                persistence_clock=lambda: corrupted.completed_at,
             )
 
     assert_cross_artifact_lineage_rejected(
@@ -626,6 +895,7 @@ def test_late_and_non_observed_inputs_are_unavailable_without_losing_successes()
     observed_times = iter(
         (
             cutoff,
+            cutoff + timedelta(minutes=5),
             cutoff + timedelta(minutes=10),
             cutoff + timedelta(minutes=20),
             cutoff + timedelta(minutes=31),
@@ -679,10 +949,31 @@ def test_late_and_non_observed_inputs_are_unavailable_without_losing_successes()
         publication_store=SqlAlchemyProductionPublicationStore(state_store),
         security_context=production_identity.context,
         authorization_policy=production_policy,
-        clock=lambda: (_ for _ in ()).throw(AssertionError("replay_called_clock")),
+        clock=lambda: cutoff + timedelta(minutes=32),
     )
 
     assert restarted_execution.run(command) == publication
+    replay_identity, replay_policy = _production_identity_and_policy(
+        selection.source_policy_manifest_id,
+        cutoff,
+        allowed_uses=frozenset({"internal_display"}),
+    )
+    denied_replay = ForecastExecution(
+        assignment_resolver=ServingAssignmentResolver(
+            lifecycle_store,
+            InMemoryAssignmentPinStore(),
+        ),
+        data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
+        artifact_repository=artifacts,
+        publication_store=SqlAlchemyProductionPublicationStore(state_store),
+        security_context=replay_identity.context,
+        authorization_policy=replay_policy,
+        clock=lambda: cutoff + timedelta(minutes=33),
+    ).run(command)
+
+    assert isinstance(denied_replay, PolicyDeniedOutcome)
+    replay_audit = state_store.list_audit_events(trace_id=command.trace_id)
+    assert [item["outcome"] for item in replay_audit[-2:]] == ["allowed", "denied"]
     operations_control = OperationsControl(
         state_store,
         authorization_policy=production_policy,
@@ -692,7 +983,12 @@ def test_late_and_non_observed_inputs_are_unavailable_without_losing_successes()
         source_adapter_security_context=None,
         source_adapter_authorization_policy=None,
     )
-    operations = operations_control.get_production_forecast(publication.forecast_batch_id)
+    operations = operations_control.get_production_forecast(
+        publication.forecast_batch_id,
+        trace_id="trace-production-operations-read",
+        security_context=production_identity.context,
+    )
+    assert isinstance(operations, dict)
     assert publication.slo_breached is True
     assert state_store.get_outbox_event(publication.outbox_event_id)["occurred_at"] == (
         publication.completed_at.isoformat()
@@ -710,6 +1006,37 @@ def test_late_and_non_observed_inputs_are_unavailable_without_losing_successes()
     ]
     assert operations["notifications"][0]["delivery_status"] == "pending"
 
+    missing_display_identity, missing_display_policy = _production_identity_and_policy(
+        selection.source_policy_manifest_id,
+        cutoff,
+        allowed_uses=frozenset({"model"}),
+    )
+    denied_transport = _RejectedNotificationTransport()
+    denied_operations_control = OperationsControl(
+        state_store,
+        authorization_policy=missing_display_policy,
+        secret_provider=InMemorySecretProvider(clock=lambda: cutoff),
+        source_credential_validators={},
+        clock=lambda: cutoff + timedelta(minutes=32),
+        source_adapter_security_context=None,
+        source_adapter_authorization_policy=None,
+    )
+    denied_operations = denied_operations_control.get_production_forecast(
+        publication.forecast_batch_id,
+        trace_id="trace-production-operations-missing-display-use",
+        security_context=missing_display_identity.context,
+    )
+    denied_delivery = denied_operations_control.deliver_production_notification(
+        publication.forecast_batch_id,
+        transport=denied_transport,
+        trace_id="trace-production-notification-missing-display-use",
+        security_context=missing_display_identity.context,
+    )
+
+    assert isinstance(denied_operations, PolicyDeniedOutcome)
+    assert isinstance(denied_delivery, PolicyDeniedOutcome)
+    assert denied_transport.calls == 0
+
     notification_transport = _RejectedNotificationTransport()
     notification_trace_id = "trace-production-notification-delivery"
     delivery = operations_control.deliver_production_notification(
@@ -719,7 +1046,12 @@ def test_late_and_non_observed_inputs_are_unavailable_without_losing_successes()
         security_context=production_identity.context,
     )
     assert isinstance(delivery, dict)
-    after_delivery = operations_control.get_production_forecast(publication.forecast_batch_id)
+    after_delivery = operations_control.get_production_forecast(
+        publication.forecast_batch_id,
+        trace_id="trace-production-operations-after-delivery",
+        security_context=production_identity.context,
+    )
+    assert isinstance(after_delivery, dict)
 
     assert delivery["delivery_status"] == "dead_letter"
     assert [item["delivery_status"] for item in after_delivery["notifications"]] == [
@@ -1095,6 +1427,7 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
             trace_id="P2-TRACE-EOD-01",
             idempotency_key="xtai-2026-08-18-sql",
             authorization={},
+            persistence_clock=lambda: conflicting_replay.completed_at,
         )
     assert len(state_store.list_prediction_records(trace_id="P2-TRACE-EOD-01")) == 30
 
@@ -1128,6 +1461,7 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
                 environments=environments,
                 data_protection_class="internal",
                 resource_states=frozenset({"active"}),
+                allowed_uses=frozenset({"internal_display"}),
             )
             for index, dataset_id in enumerate(
                 (
@@ -1148,6 +1482,7 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
                 environments=environments,
                 valid_from=cutoff - timedelta(minutes=1),
                 valid_to=cutoff + timedelta(hours=1),
+                allowed_uses=frozenset({"internal_display"}),
             )
             for index, dataset_id in enumerate(
                 (
@@ -1170,6 +1505,26 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
     assert isinstance(formal_records, list)
     assert len(formal_records) == 10
     assert {item["execution_purpose"] for item in formal_records} == {"production"}
+    missing_display_policy = AuthorizationPolicy(
+        action_grants=policy.action_grants,
+        source_policies=tuple(
+            replace(item, allowed_uses=frozenset()) for item in policy.source_policies
+        ),
+        source_entitlements=tuple(
+            replace(item, allowed_uses=frozenset()) for item in policy.source_entitlements
+        ),
+    )
+    denied_formal_records = ResearchQuery(
+        state_store,
+        security_context=identity.context,
+        authorization_policy=missing_display_policy,
+        authorization_time=cutoff,
+    ).list_predictions(
+        execution_purpose="production",
+        trace_id="trace-production-research-missing-display-use",
+    )
+
+    assert isinstance(denied_formal_records, PolicyDeniedOutcome)
     web_application = _ResearchOnlyApplication(
         state_store=state_store,
         research_query=query,

@@ -23,6 +23,7 @@ Status: ready-for-agent
 ## Implementation notes
 
 - Public seams: `ModelLifecycle.execute(...)` for promotion／rollback, `ForecastExecution.run(...)` for one market EOD batch, and `ResearchQuery`／REST／繁中 UI／`OperationsControl` for publication and operations evidence.
+- Production publication, replay, research display, operations reads, and notifications re-evaluate the current scoped action and source-use rights; readiness is observed after data selection／assignment pin, while T+120 is finalized by the publication-store persistence clock.
 - Deterministic positive scenarios are isolated engineering acceptance only. The deployed application has no default formal `ProductionDataSelection` provider and fails closed; `formal_model_qualification=not_claimed` remains unchanged.
-- Verified with focused acceptance／contract tests (171 passed), all acceptance＋contract tests (533 passed), full repo tests without the opt-in PostgreSQL URL (533 passed, 1 PostgreSQL skip), strict mypy, Ruff lint／format, Alembic upgrade to `20260819_09 (head)`, and a wheel build.
+- Verified with focused acceptance／contract tests, all acceptance＋contract tests (534 passed), full repo tests without the opt-in PostgreSQL URL (534 passed, 1 PostgreSQL skip), strict mypy (109 files), Ruff lint／format (227 files), Alembic upgrade to `20260819_09 (head)`, and a wheel build.
 - Docker CLI is unavailable on this host. The externally configured PostgreSQL URL timed out, so Compose smoke and real-PostgreSQL integration could not be verified; no passing operational or formal-model evidence is claimed for them.

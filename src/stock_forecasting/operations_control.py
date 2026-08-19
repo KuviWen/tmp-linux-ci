@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from stock_forecasting.authorization import (
+    PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
     AuthorizationAction,
     AuthorizationDecision,
     AuthorizationPolicy,
@@ -63,8 +64,22 @@ class OperationsControl:
         self._source_adapter_security_context = source_adapter_security_context
         self._source_adapter_authorization_policy = source_adapter_authorization_policy
 
-    def get_production_forecast(self, forecast_batch_id: str) -> dict[str, Any]:
-        return self._state_store.list_production_operations(forecast_batch_id)
+    def get_production_forecast(
+        self,
+        forecast_batch_id: str,
+        *,
+        trace_id: str,
+        security_context: SecurityContext,
+    ) -> dict[str, Any] | PolicyDeniedOutcome:
+        denial = self._authorize_production_resource(
+            action="production_operations.read",
+            dataset_id=PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+            trace_id=trace_id,
+            security_context=security_context,
+        )
+        if denial is not None:
+            return denial
+        return self._load_production_forecast(forecast_batch_id)
 
     def deliver_production_notification(
         self,
@@ -74,7 +89,15 @@ class OperationsControl:
         trace_id: str,
         security_context: SecurityContext,
     ) -> dict[str, Any] | PolicyDeniedOutcome:
-        operations = self.get_production_forecast(forecast_batch_id)
+        catalog_denial = self._authorize_production_resource(
+            action="production_notification.deliver",
+            dataset_id=PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+            trace_id=trace_id,
+            security_context=security_context,
+        )
+        if catalog_denial is not None:
+            return catalog_denial
+        operations = self._load_production_forecast(forecast_batch_id)
         pending = [
             item for item in operations["notifications"] if item["delivery_status"] == "pending"
         ]
@@ -94,6 +117,7 @@ class OperationsControl:
                 evaluated_at=self._clock(),
                 trace_id=trace_id,
                 correlation_id=trace_id,
+                required_uses=frozenset({"internal_display"}),
             ),
         )
         authorization = authorization_audit_payload(decision)
@@ -125,6 +149,40 @@ class OperationsControl:
             trace_id=trace_id,
         )
         return outcome
+
+    def _authorize_production_resource(
+        self,
+        *,
+        action: AuthorizationAction,
+        dataset_id: str,
+        trace_id: str,
+        security_context: SecurityContext,
+    ) -> PolicyDeniedOutcome | None:
+        decision = self._authorization_policy.evaluate(
+            security_context,
+            OperationIntent(
+                action=action,
+                dataset_id=dataset_id,
+                purpose="price_research",
+                environment=security_context.environment,
+                resource_state="active",
+                evaluated_at=self._clock(),
+                trace_id=trace_id,
+                correlation_id=trace_id,
+                required_uses=frozenset({"internal_display"}),
+            ),
+        )
+        self._state_store.record_authorization_decision(
+            authorization=authorization_audit_payload(decision),
+            outcome="allowed" if decision.allowed else "denied",
+            trace_id=trace_id,
+        )
+        if decision.allowed:
+            return None
+        return PolicyDeniedOutcome.from_decision(decision)
+
+    def _load_production_forecast(self, forecast_batch_id: str) -> dict[str, Any]:
+        return self._state_store.list_production_operations(forecast_batch_id)
 
     def list_historical_qualifications(
         self,

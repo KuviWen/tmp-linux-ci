@@ -32,6 +32,7 @@ AuthorizationAction = Literal[
     "model_governance.approve",
     "production_forecast.publish",
     "production_notification.deliver",
+    "production_operations.read",
 ]
 LOCAL_API_KEY_SCOPES: tuple[AuthorizationAction, ...] = (
     "fixture_pipeline.execute",
@@ -45,6 +46,7 @@ LOCAL_API_KEY_SCOPES: tuple[AuthorizationAction, ...] = (
     "model_governance.approve",
     "production_forecast.publish",
     "production_notification.deliver",
+    "production_operations.read",
 )
 PRODUCTION_RESEARCH_CATALOG_DATASET_ID = "production-research-catalog"
 AuthorizationPurpose = Literal[
@@ -1691,6 +1693,7 @@ def build_pending_rights_operator_authorization_policy(
             "research_prediction.read",
             "production_forecast.publish",
             "production_notification.deliver",
+            "production_operations.read",
         }
     )
     actions = supported_actions & context.scopes
@@ -1730,10 +1733,16 @@ def build_pending_rights_operator_authorization_policy(
         )
         & actions
     )
-    production_research_actions: frozenset[AuthorizationAction] = (
+    production_catalog_actions: frozenset[AuthorizationAction] = (
         cast(
             frozenset[AuthorizationAction],
-            frozenset({"research_prediction.read"}),
+            frozenset(
+                {
+                    "research_prediction.read",
+                    "production_notification.deliver",
+                    "production_operations.read",
+                }
+            ),
         )
         & actions
     )
@@ -1766,7 +1775,7 @@ def build_pending_rights_operator_authorization_policy(
         ),
         (
             PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
-            production_research_actions,
+            production_catalog_actions,
             frozenset({"price_research"}),
             "internal",
         ),
@@ -1776,6 +1785,11 @@ def build_pending_rights_operator_authorization_policy(
     for dataset_id, resource_actions, purposes, protection_class in resource_contracts:
         if not resource_actions:
             continue
+        resource_uses: frozenset[SourceUseRight] = (
+            frozenset({"internal_display"})
+            if dataset_id == PRODUCTION_RESEARCH_CATALOG_DATASET_ID
+            else frozenset()
+        )
         policy_payload: dict[str, object] = {
             "dataset_id": dataset_id,
             "allowed_actions": sorted(resource_actions),
@@ -1785,6 +1799,7 @@ def build_pending_rights_operator_authorization_policy(
             "resource_states": ["active"],
             "valid_from": _instant(context.issued_at),
             "valid_to": _instant(context.expires_at),
+            "allowed_uses": sorted(resource_uses),
         }
         source_policies.append(
             SourcePolicyVersion(
@@ -1800,6 +1815,7 @@ def build_pending_rights_operator_authorization_policy(
                 resource_states=frozenset({"active"}),
                 valid_from=context.issued_at,
                 valid_to=context.expires_at,
+                allowed_uses=resource_uses,
             )
         )
         entitlement_payload: dict[str, object] = {
@@ -1811,6 +1827,7 @@ def build_pending_rights_operator_authorization_policy(
             "environments": [context.environment],
             "valid_from": _instant(context.issued_at),
             "valid_to": _instant(context.expires_at),
+            "allowed_uses": sorted(resource_uses),
         }
         source_entitlements.append(
             SourceEntitlement(
@@ -1826,6 +1843,7 @@ def build_pending_rights_operator_authorization_policy(
                 environments=frozenset({context.environment}),
                 valid_from=context.issued_at,
                 valid_to=context.expires_at,
+                allowed_uses=resource_uses,
             )
         )
     return AuthorizationPolicy(

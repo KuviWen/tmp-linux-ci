@@ -9,6 +9,7 @@ from typing import Any, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from stock_forecasting.authorization import (
+    AuthorizationDecision,
     AuthorizationPolicy,
     OperationIntent,
     PolicyDeniedOutcome,
@@ -241,6 +242,26 @@ class ForecastPublication:
     milestones: tuple[WorkflowMilestone, ...]
 
 
+def _at_persistence_boundary(
+    publication: ForecastPublication,
+    observed_at: datetime,
+) -> ForecastPublication:
+    if observed_at.tzinfo is None or observed_at < publication.completed_at:
+        raise ValueError("production_clock_skew_detected")
+    publication_milestone = replace(
+        publication.milestones[-1],
+        observed_at=observed_at,
+        status="met" if observed_at <= publication.milestones[-1].due_at else "missed",
+    )
+    milestones = (*publication.milestones[:-1], publication_milestone)
+    return replace(
+        publication,
+        completed_at=observed_at,
+        slo_breached=publication_milestone.status == "missed",
+        milestones=milestones,
+    )
+
+
 class ProductionPublicationStore(Protocol):
     def replay(self, *, idempotency_key: str, trace_id: str) -> ForecastPublication | None: ...
 
@@ -251,12 +272,14 @@ class ProductionPublicationStore(Protocol):
         trace_id: str,
         idempotency_key: str,
         authorization: dict[str, object],
+        persistence_clock: Callable[[], datetime],
     ) -> ForecastPublication: ...
 
-    def record_authorization_denial(
+    def record_authorization_decision(
         self,
         *,
         authorization: dict[str, object],
+        outcome: Literal["allowed", "denied"],
         trace_id: str,
     ) -> None: ...
 
@@ -312,8 +335,10 @@ class InMemoryProductionPublicationStore:
         trace_id: str,
         idempotency_key: str,
         authorization: dict[str, object] | None = None,
+        persistence_clock: Callable[[], datetime],
     ) -> ForecastPublication:
         del authorization
+        publication = _at_persistence_boundary(publication, persistence_clock())
         self._validate(publication)
         replay_batch_id = self._idempotency_batches.get(idempotency_key)
         if replay_batch_id is not None and replay_batch_id != publication.forecast_batch_id:
@@ -340,13 +365,14 @@ class InMemoryProductionPublicationStore:
         self._idempotency_traces[idempotency_key] = trace_id
         return committed
 
-    def record_authorization_denial(
+    def record_authorization_decision(
         self,
         *,
         authorization: dict[str, object],
+        outcome: Literal["allowed", "denied"],
         trace_id: str,
     ) -> None:
-        del authorization, trace_id
+        del authorization, outcome, trace_id
 
     def get_batch(self, forecast_batch_id: str) -> ForecastPublication | None:
         return self._batches.get(forecast_batch_id)
@@ -490,6 +516,7 @@ class SqlAlchemyProductionPublicationStore:
         trace_id: str,
         idempotency_key: str,
         authorization: dict[str, object],
+        persistence_clock: Callable[[], datetime],
     ) -> ForecastPublication:
         InMemoryProductionPublicationStore._validate(publication)
         predictions = [self._prediction_payload(item) for item in publication.predictions]
@@ -538,6 +565,8 @@ class SqlAlchemyProductionPublicationStore:
                 for dataset_id in dataset_ids
             ],
         ]
+        publication = _at_persistence_boundary(publication, persistence_clock())
+        InMemoryProductionPublicationStore._validate(publication)
         publication_payload = self._publication_payload(publication)
         core_version = self._state_store.publish_production_trace(
             publication=publication_payload,
@@ -731,15 +760,16 @@ class SqlAlchemyProductionPublicationStore:
         InMemoryProductionPublicationStore._validate(publication)
         return publication
 
-    def record_authorization_denial(
+    def record_authorization_decision(
         self,
         *,
         authorization: dict[str, object],
+        outcome: Literal["allowed", "denied"],
         trace_id: str,
     ) -> None:
         self._state_store.record_authorization_decision(
             authorization=authorization,
-            outcome="denied",
+            outcome=outcome,
             trace_id=trace_id,
         )
 
@@ -861,6 +891,18 @@ class ForecastExecution:
         if replay is not None:
             if replay.forecast_batch_id != forecast_batch_id:
                 raise ValueError("immutable_production_work_conflict")
+            replay_authorization = self._publication_authorization(
+                dataset_id=replay.data_selection.source_policy_manifest_id,
+                command=command,
+                evaluated_at=self._observe_clock(not_before=command.information_cutoff),
+            )
+            self._publication_store.record_authorization_decision(
+                authorization=authorization_audit_payload(replay_authorization),
+                outcome="allowed" if replay_authorization.allowed else "denied",
+                trace_id=command.trace_id,
+            )
+            if not replay_authorization.allowed:
+                return PolicyDeniedOutcome.from_decision(replay_authorization)
             return replay
         started_at = self._observe_clock(not_before=command.information_cutoff)
         selection = self._data_selection_resolver.resolve(
@@ -871,25 +913,16 @@ class ForecastExecution:
             )
         )
         self._validate_selection(command, selection)
-        if self._security_context is None or self._authorization_policy is None:
-            raise ValueError("production_authorization_unavailable")
-        authorization_decision = self._authorization_policy.evaluate(
-            self._security_context,
-            OperationIntent(
-                action="production_forecast.publish",
-                dataset_id=selection.source_policy_manifest_id,
-                purpose="price_research",
-                environment=self._security_context.environment,
-                resource_state="active",
-                evaluated_at=started_at,
-                trace_id=command.trace_id,
-                correlation_id=command.trace_id,
-            ),
+        authorization_decision = self._publication_authorization(
+            dataset_id=selection.source_policy_manifest_id,
+            command=command,
+            evaluated_at=started_at,
         )
         authorization = authorization_audit_payload(authorization_decision)
         if not authorization_decision.allowed:
-            self._publication_store.record_authorization_denial(
+            self._publication_store.record_authorization_decision(
                 authorization=authorization,
+                outcome="denied",
                 trace_id=command.trace_id,
             )
             return PolicyDeniedOutcome.from_decision(authorization_decision)
@@ -902,6 +935,7 @@ class ForecastExecution:
                 started_at=started_at,
             )
         )
+        readiness_completed_at = self._observe_clock(not_before=started_at)
         serialized = self._artifact_repository.resolve(pin.assignment.artifact_id)
         if serialized is None:
             raise ValueError("production_artifact_unavailable")
@@ -941,7 +975,7 @@ class ForecastExecution:
                 ],
             },
         )
-        feature_completed_at = self._observe_clock(not_before=started_at)
+        feature_completed_at = self._observe_clock(not_before=readiness_completed_at)
         rows: list[FeatureRow] = []
         for listing in included_listings:
             for horizon, _target_session_id in listing.target_session_ids:
@@ -987,13 +1021,12 @@ class ForecastExecution:
                         serving_assignment_id=pin.assignment.assignment_id,
                     )
                 )
-        completed_at = self._observe_clock(not_before=validation_completed_at)
         milestones = self._milestones(
             information_cutoff=command.information_cutoff,
-            readiness_at=started_at,
+            readiness_at=readiness_completed_at,
             feature_at=feature_completed_at,
             validation_at=validation_completed_at,
-            publication_at=completed_at,
+            publication_at=validation_completed_at,
         )
         publication = ForecastPublication(
             forecast_batch_id=forecast_batch_id,
@@ -1013,7 +1046,7 @@ class ForecastExecution:
             projection=ProjectionState(0, 0, True),
             outbox_event_id=_stable_id("production-outbox", forecast_batch_id),
             outbox_delivery_status="pending",
-            completed_at=completed_at,
+            completed_at=validation_completed_at,
             slo_breached=milestones[-1].status == "missed",
             milestones=milestones,
         )
@@ -1022,6 +1055,31 @@ class ForecastExecution:
             trace_id=command.trace_id,
             idempotency_key=command.idempotency_key,
             authorization=authorization,
+            persistence_clock=lambda: self._observe_clock(not_before=validation_completed_at),
+        )
+
+    def _publication_authorization(
+        self,
+        *,
+        dataset_id: str,
+        command: ForecastRunCommand,
+        evaluated_at: datetime,
+    ) -> AuthorizationDecision:
+        if self._security_context is None or self._authorization_policy is None:
+            raise ValueError("production_authorization_unavailable")
+        return self._authorization_policy.evaluate(
+            self._security_context,
+            OperationIntent(
+                action="production_forecast.publish",
+                dataset_id=dataset_id,
+                purpose="price_research",
+                environment=self._security_context.environment,
+                resource_state="active",
+                evaluated_at=evaluated_at,
+                trace_id=command.trace_id,
+                correlation_id=command.trace_id,
+                required_uses=frozenset({"model"}),
+            ),
         )
 
     def _observe_clock(self, *, not_before: datetime) -> datetime:

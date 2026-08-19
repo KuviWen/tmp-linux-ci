@@ -49,6 +49,9 @@ class ResearchQuery:
                 evaluated_at=self._authorization_time or datetime.now(UTC),
                 trace_id=trace_id,
                 correlation_id=trace_id,
+                required_uses=(
+                    frozenset({"internal_display"}) if purpose == "price_research" else frozenset()
+                ),
             ),
         )
         self._state_store.record_authorization_decision(
@@ -60,25 +63,51 @@ class ResearchQuery:
             return PolicyDeniedOutcome.from_decision(decision)
         return None
 
-    @staticmethod
-    def _authorization_scope(
-        records: list[dict[str, Any]],
+    def _authorize_collection(
+        self,
+        *,
         execution_purpose: str,
-    ) -> tuple[tuple[str, ...], Literal["fixture_research", "price_research"]]:
-        if execution_purpose == "production":
-            return (
-                (
-                    PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
-                    *sorted(
-                        {str(record["lineage"]["source_policy_manifest_id"]) for record in records}
-                    ),
-                ),
-                "price_research",
-            )
-        return (
-            tuple(fixture_dataset_id(market) for market in ("XTAI", "XNAS")),
-            "fixture_research",
+        trace_id: str,
+        security_context: SecurityContext,
+    ) -> PolicyDeniedOutcome | None:
+        datasets = (
+            (PRODUCTION_RESEARCH_CATALOG_DATASET_ID,)
+            if execution_purpose == "production"
+            else tuple(fixture_dataset_id(market) for market in ("XTAI", "XNAS"))
         )
+        purpose: Literal["fixture_research", "price_research"] = (
+            "price_research" if execution_purpose == "production" else "fixture_research"
+        )
+        for dataset_id in datasets:
+            denial = self._authorize_dataset(
+                dataset_id,
+                purpose=purpose,
+                trace_id=trace_id,
+                security_context=security_context,
+            )
+            if denial is not None:
+                return denial
+        return None
+
+    def _authorize_production_sources(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        trace_id: str,
+        security_context: SecurityContext,
+    ) -> PolicyDeniedOutcome | None:
+        for dataset_id in sorted(
+            {str(record["lineage"]["source_policy_manifest_id"]) for record in records}
+        ):
+            denial = self._authorize_dataset(
+                dataset_id,
+                purpose="price_research",
+                trace_id=trace_id,
+                security_context=security_context,
+            )
+            if denial is not None:
+                return denial
+        return None
 
     def get_listing_research(
         self,
@@ -144,14 +173,20 @@ class ResearchQuery:
         security_context: SecurityContext | None = None,
     ) -> list[dict[str, Any]] | PolicyDeniedOutcome:
         resolved_trace_id = trace_id or f"trace-research-{uuid4()}"
+        resolved_security_context = security_context or self._security_context
+        denial = self._authorize_collection(
+            execution_purpose=execution_purpose,
+            trace_id=resolved_trace_id,
+            security_context=resolved_security_context,
+        )
+        if denial is not None:
+            return denial
         records = self._state_store.list_research_records(execution_purpose=execution_purpose)
-        datasets, purpose = self._authorization_scope(records, execution_purpose)
-        for dataset_id in datasets:
-            denial = self._authorize_dataset(
-                dataset_id,
-                purpose=purpose,
+        if execution_purpose == "production":
+            denial = self._authorize_production_sources(
+                records,
                 trace_id=resolved_trace_id,
-                security_context=security_context or self._security_context,
+                security_context=resolved_security_context,
             )
             if denial is not None:
                 return denial
@@ -166,17 +201,23 @@ class ResearchQuery:
         security_context: SecurityContext | None = None,
     ) -> list[dict[str, Any]] | PolicyDeniedOutcome:
         resolved_trace_id = trace_id or f"trace-research-history-{uuid4()}"
+        resolved_security_context = security_context or self._security_context
+        denial = self._authorize_collection(
+            execution_purpose=execution_purpose,
+            trace_id=resolved_trace_id,
+            security_context=resolved_security_context,
+        )
+        if denial is not None:
+            return denial
         records = self._state_store.list_listing_research_history(
             listing_id=listing_id,
             execution_purpose=execution_purpose,
         )
-        datasets, purpose = self._authorization_scope(records, execution_purpose)
-        for dataset_id in datasets:
-            denial = self._authorize_dataset(
-                dataset_id,
-                purpose=purpose,
+        if execution_purpose == "production":
+            denial = self._authorize_production_sources(
+                records,
                 trace_id=resolved_trace_id,
-                security_context=security_context or self._security_context,
+                security_context=resolved_security_context,
             )
             if denial is not None:
                 return denial
