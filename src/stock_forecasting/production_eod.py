@@ -1082,14 +1082,12 @@ class ForecastExecution:
             slo_breached=milestones[-1].status == "missed",
             milestones=milestones,
         )
-        persistence_policy = self._current_authorization_policy()
 
         def authorize_at_persistence(observed_at: datetime) -> dict[str, object]:
             decision = self._publication_authorization(
                 dataset_id=selection.source_policy_manifest_id,
                 command=command,
                 evaluated_at=observed_at,
-                policy=persistence_policy,
             )
             if not decision.allowed:
                 raise _ProductionAuthorizationDenied(decision)
@@ -1117,11 +1115,10 @@ class ForecastExecution:
         dataset_id: str,
         command: ForecastRunCommand,
         evaluated_at: datetime,
-        policy: AuthorizationPolicy | None = None,
     ) -> AuthorizationDecision:
         if self._security_context is None:
             raise ValueError("production_authorization_unavailable")
-        current_policy = policy or self._current_authorization_policy()
+        current_policy = self._current_authorization_policy()
         return current_policy.evaluate(
             self._security_context,
             OperationIntent(

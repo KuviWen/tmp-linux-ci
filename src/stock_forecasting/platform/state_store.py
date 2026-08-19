@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from typing import Any, cast
 
@@ -72,6 +74,10 @@ class StateStore:
             )
         else:
             self.engine = create_engine(database_url)
+        self._authorization_policy_read_connection: ContextVar[Connection | None] = ContextVar(
+            "authorization_policy_read_connection",
+            default=None,
+        )
         self._outbox = OutboxRelay(self.engine)
         if create_schema:
             metadata.create_all(self.engine)
@@ -183,7 +189,16 @@ class StateStore:
         policy_set_id: str,
         principal_id: str,
     ) -> dict[str, Any]:
-        with self.engine.connect() as connection:
+        connection = self._authorization_policy_read_connection.get()
+        if connection is None:
+            with self.engine.connect() as standalone_connection:
+                payload = standalone_connection.execute(
+                    select(authorization_policy_sets.c.payload).where(
+                        authorization_policy_sets.c.policy_set_id == policy_set_id,
+                        authorization_policy_sets.c.principal_id == principal_id,
+                    )
+                ).scalar_one_or_none()
+        else:
             payload = connection.execute(
                 select(authorization_policy_sets.c.payload).where(
                     authorization_policy_sets.c.policy_set_id == policy_set_id,
@@ -193,6 +208,17 @@ class StateStore:
         if payload is None:
             raise KeyError(policy_set_id)
         return deepcopy(cast(dict[str, Any], payload))
+
+    @contextmanager
+    def _reuse_transaction_for_authorization_policy_reads(
+        self,
+        connection: Connection,
+    ) -> Iterator[None]:
+        token = self._authorization_policy_read_connection.set(connection)
+        try:
+            yield
+        finally:
+            self._authorization_policy_read_connection.reset(token)
 
     def publish_fixture_trace(
         self,
@@ -434,7 +460,10 @@ class StateStore:
             {"forecast_batch_id": forecast_batch_id},
         )[-36:]
         has_unavailable = any(item["prediction_status"] == "unavailable" for item in predictions)
-        with self.engine.begin() as connection:
+        with (
+            self.engine.begin() as connection,
+            self._reuse_transaction_for_authorization_policy_reads(connection),
+        ):
             existing_work = (
                 connection.execute(
                     select(

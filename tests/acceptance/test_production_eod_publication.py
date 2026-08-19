@@ -228,21 +228,21 @@ class _MutableAuthorizationPolicyRepository:
         self._policy = policy
 
 
-class _PolicyWithdrawingArtifactRepository:
+class _PolicyWithdrawingProductionStateStore(_DelayedProductionStateStore):
     def __init__(
         self,
-        delegate: InMemoryCandidateArtifactRepository,
         *,
+        clock: _MutableClock,
         policy_repository: _MutableAuthorizationPolicyRepository,
         withdrawn_policy: AuthorizationPolicy,
     ) -> None:
-        self._delegate = delegate
+        super().__init__(clock=clock, elapsed=timedelta())
         self._policy_repository = policy_repository
         self._withdrawn_policy = withdrawn_policy
 
-    def resolve(self, artifact_id: str) -> bytes | None:
+    def publish_production_trace(self, **kwargs: Any) -> int:
         self._policy_repository.replace_current(self._withdrawn_policy)
-        return self._delegate.resolve(artifact_id)
+        return super().publish_production_trace(**kwargs)
 
 
 class _PolicyWithdrawingDataSelectionResolver:
@@ -751,9 +751,10 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
         )
         current_policy_repository = _MutableAuthorizationPolicyRepository(production_policy)
 
-        withdrawn_state_store = _DelayedProductionStateStore(
+        withdrawn_state_store = _PolicyWithdrawingProductionStateStore(
             clock=_MutableClock(information_cutoff),
-            elapsed=timedelta(),
+            policy_repository=current_policy_repository,
+            withdrawn_policy=withdrawn_policy,
         )
         withdrawn_at_commit = ForecastExecution(
             assignment_resolver=ServingAssignmentResolver(
@@ -761,11 +762,7 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
                 InMemoryAssignmentPinStore(),
             ),
             data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
-            artifact_repository=_PolicyWithdrawingArtifactRepository(
-                artifacts,
-                policy_repository=current_policy_repository,
-                withdrawn_policy=withdrawn_policy,
-            ),
+            artifact_repository=artifacts,
             publication_store=SqlAlchemyProductionPublicationStore(withdrawn_state_store),
             security_context=production_identity.context,
             authorization_policy=lambda: current_policy_repository.get(
