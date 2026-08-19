@@ -24,5 +24,5 @@ Status: ready-for-agent
 
 - Public seams: `ModelLifecycle.execute(...)` for promotion／rollback, `ForecastExecution.run(...)` for one market EOD batch, and `ResearchQuery`／REST／繁中 UI／`OperationsControl` for publication and operations evidence.
 - Deterministic positive scenarios are isolated engineering acceptance only. The deployed application has no default formal `ProductionDataSelection` provider and fails closed; `formal_model_qualification=not_claimed` remains unchanged.
-- Verified with focused acceptance／contract tests (117 passed), all acceptance＋contract tests (530 passed), full repo tests without the opt-in PostgreSQL URL (530 passed, 1 PostgreSQL skip), strict mypy, Ruff lint／format, Alembic upgrade to `20260819_09 (head)`, and a wheel build.
+- Verified with focused acceptance／contract tests (120 passed), all acceptance＋contract tests (533 passed), full repo tests without the opt-in PostgreSQL URL (533 passed, 1 PostgreSQL skip), strict mypy, Ruff lint／format, Alembic upgrade to `20260819_09 (head)`, and a wheel build.
 - Docker CLI is unavailable on this host. The externally configured PostgreSQL URL timed out, so Compose smoke and real-PostgreSQL integration could not be verified; no passing operational or formal-model evidence is claimed for them.

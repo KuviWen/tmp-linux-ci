@@ -426,7 +426,6 @@ class StateStore:
     ) -> int:
         forecast_batch_id = str(publication["forecast_batch_id"])
         outbox_event_id = str(publication["outbox_event_id"])
-        information_cutoff = str(publication["information_cutoff"])
         work_id = content_id("production_work", {"forecast_batch_id": forecast_batch_id})[-36:]
         health_assessment_id = content_id(
             "production_health",
@@ -480,7 +479,7 @@ class StateStore:
                     schema_version="1.0.0",
                     aggregate_id=forecast_batch_id,
                     aggregate_version=1,
-                    occurred_at=information_cutoff,
+                    occurred_at=str(publication["completed_at"]),
                     producer="forecast_execution",
                     trace_id=trace_id,
                     payload={
@@ -2291,6 +2290,9 @@ class StateStore:
             "artifact_content_digests": {
                 artifact["artifact_id"]: _content_digest(artifact["payload"])
                 for artifact in artifacts
+            },
+            "artifact_payloads": {
+                artifact["artifact_id"]: deepcopy(artifact["payload"]) for artifact in artifacts
             },
             "lineage_ids": {
                 lineage_kinds[artifact["artifact_kind"]]: artifact["artifact_id"]

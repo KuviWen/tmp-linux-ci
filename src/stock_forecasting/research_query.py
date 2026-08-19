@@ -59,6 +59,25 @@ class ResearchQuery:
             return PolicyDeniedOutcome.from_decision(decision)
         return None
 
+    @staticmethod
+    def _authorization_scope(
+        records: list[dict[str, Any]],
+        execution_purpose: str,
+    ) -> tuple[tuple[str, ...], Literal["fixture_research", "price_research"]]:
+        if execution_purpose == "production":
+            return (
+                tuple(
+                    sorted(
+                        {str(record["lineage"]["source_policy_manifest_id"]) for record in records}
+                    )
+                ),
+                "price_research",
+            )
+        return (
+            tuple(fixture_dataset_id(market) for market in ("XTAI", "XNAS")),
+            "fixture_research",
+        )
+
     def get_listing_research(
         self,
         *,
@@ -78,6 +97,8 @@ class ResearchQuery:
             execution_purpose=execution_purpose,
             fixture_scenario=fixture_scenario,
         )
+        if authorization_dataset_id is None and execution_purpose == "production":
+            raise KeyError(listing_id)
         datasets = (
             (authorization_dataset_id,)
             if authorization_dataset_id is not None
@@ -113,18 +134,11 @@ class ResearchQuery:
     ) -> list[dict[str, Any]] | PolicyDeniedOutcome:
         resolved_trace_id = trace_id or f"trace-research-{uuid4()}"
         records = self._state_store.list_research_records(execution_purpose=execution_purpose)
-        formal_records_present = execution_purpose == "production" and bool(records)
-        datasets = (
-            tuple(
-                sorted({str(record["lineage"]["source_policy_manifest_id"]) for record in records})
-            )
-            if formal_records_present
-            else tuple(fixture_dataset_id(market) for market in ("XTAI", "XNAS"))
-        )
+        datasets, purpose = self._authorization_scope(records, execution_purpose)
         for dataset_id in datasets:
             denial = self._authorize_dataset(
                 dataset_id,
-                purpose=("price_research" if formal_records_present else "fixture_research"),
+                purpose=purpose,
                 trace_id=resolved_trace_id,
                 security_context=security_context or self._security_context,
             )
@@ -145,18 +159,11 @@ class ResearchQuery:
             listing_id=listing_id,
             execution_purpose=execution_purpose,
         )
-        formal_records_present = execution_purpose == "production" and bool(records)
-        datasets = (
-            tuple(
-                sorted({str(record["lineage"]["source_policy_manifest_id"]) for record in records})
-            )
-            if formal_records_present
-            else tuple(fixture_dataset_id(market) for market in ("XTAI", "XNAS"))
-        )
+        datasets, purpose = self._authorization_scope(records, execution_purpose)
         for dataset_id in datasets:
             denial = self._authorize_dataset(
                 dataset_id,
-                purpose=("price_research" if formal_records_present else "fixture_research"),
+                purpose=purpose,
                 trace_id=resolved_trace_id,
                 security_context=security_context or self._security_context,
             )

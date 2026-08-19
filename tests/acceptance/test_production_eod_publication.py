@@ -447,6 +447,10 @@ def test_late_and_non_observed_inputs_are_unavailable_without_losing_successes()
     )
     operations = operations_control.get_production_forecast(publication.forecast_batch_id)
     assert publication.slo_breached is True
+    assert state_store.get_outbox_event(publication.outbox_event_id)["occurred_at"] == (
+        publication.completed_at.isoformat()
+    )
+    assert publication.completed_at > publication.information_cutoff
     assert operations["milestones"][-1]["status"] == "missed"
     assert operations["source_health"]["status"] == "degraded"
     assert operations["incidents"] == [
@@ -709,6 +713,16 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
         )
         for index in range(1, 11)
     )
+    listings = (
+        listings[0],
+        replace(listings[1], support_status="degraded"),
+        replace(
+            listings[2],
+            support_status="unavailable",
+            unavailable_reason="data_support_unavailable",
+        ),
+        *listings[3:],
+    )
     selection = ResolvedProductionDataSelection.create(
         market="XTAI",
         information_cutoff=cutoff,
@@ -759,7 +773,17 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
     )
     trace = state_store.get_trace_evidence("P2-TRACE-EOD-01")
     assert trace["work"]["status"] == "succeeded"
-    assert trace["health"]["status"] == "healthy"
+    assert trace["health"]["status"] == "degraded"
+    data_selection_payload = trace["artifact_payloads"][publication.data_selection_id]
+    feature_snapshot_payload = trace["artifact_payloads"][publication.feature_snapshot_id]
+    assert len(data_selection_payload["listings"]) == 10
+    assert {item["listing_id"] for item in data_selection_payload["listings"]} == {
+        item.listing_id for item in listings
+    }
+    assert len(feature_snapshot_payload["rows"]) == 9
+    assert {item["listing_id"] for item in feature_snapshot_payload["rows"]} == set(
+        publication.feature_snapshot_listing_ids
+    )
     operations = state_store.list_production_operations(publication.forecast_batch_id)
     assert [item["event_kind"] for item in operations["milestones"]] == [
         "t_plus_90_readiness",
@@ -768,7 +792,7 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
         "t_plus_120_publication",
     ]
     assert {item["status"] for item in operations["milestones"]} == {"met"}
-    assert operations["source_health"]["status"] == "healthy"
+    assert operations["source_health"]["status"] == "degraded"
     assert operations["incidents"] == []
     assert operations["notifications"] == []
 
@@ -906,6 +930,9 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
     assert page.status_code == 200
     assert "正式預測比較矩陣" in page.text
     assert "正式資訊截止點" in page.text
+    assert 'name="support"' in page.text
+    assert "資料支援：降級" in page.text
+    assert "不可預測：data_support_unavailable" in page.text
     assert "fixture" not in page.text.lower()
     assert detail_page.status_code == 200
     assert "正式標的研究頁" in detail_page.text
@@ -943,7 +970,7 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
         artifact_id=artifact.artifact_id,
         previous_assignment_id=assignment.assignment_id,
         readiness_evidence_id="sha256:replacement-readiness",
-        effective_from_batch_id="next-unstarted-eod-2",
+        effective_from_batch_id="next-unstarted-eod",
         assigned_at=second_cutoff - timedelta(hours=1),
     )
     lifecycle_store.promote(
@@ -1025,3 +1052,8 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
         second_cutoff.isoformat().replace("+00:00", "Z"),
         cutoff_value,
     ]
+    fixture_history_response = client.get(
+        f"/api/v1/research/listings/{listings[0].listing_id}/prediction-history",
+        params={"execution_purpose": "fixture"},
+    )
+    assert fixture_history_response.status_code == 422

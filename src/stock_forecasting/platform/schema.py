@@ -170,6 +170,7 @@ production_serving_assignment_pins = Table(
     Column("model_family_id", String(128), nullable=False),
     Column("forecast_batch_id", String(36), nullable=False),
     Column("market", String(8), nullable=False),
+    Column("assignment_id", String(72), nullable=False),
     Column("payload", JSON, nullable=False),
     UniqueConstraint(
         "model_family_id",

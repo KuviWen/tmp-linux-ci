@@ -299,7 +299,7 @@ def test_empty_prediction_collection_is_denied_before_protected_state_lookup() -
     trace_id = "trace-ticket-04-empty-predictions-denied"
 
     outcome = application.research_query.list_predictions(
-        execution_purpose="production",
+        execution_purpose="fixture",
         trace_id=trace_id,
     )
 
@@ -307,6 +307,23 @@ def test_empty_prediction_collection_is_denied_before_protected_state_lookup() -
     assert application.security_audit.list_events(trace_id=trace_id)[0]["reason_code"] == (
         "source_entitlement_revoked"
     )
+
+
+def test_empty_production_collection_does_not_borrow_fixture_authorization() -> None:
+    cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
+    application = build_test_application(
+        observed_at=cutoff,
+        entitlement_states={"XTAI": "revoked"},
+    )
+    trace_id = "trace-ticket-10-empty-production"
+
+    outcome = application.research_query.list_predictions(
+        execution_purpose="production",
+        trace_id=trace_id,
+    )
+
+    assert outcome == []
+    assert application.security_audit.list_events(trace_id=trace_id) == []
 
 
 def test_rest_and_ui_return_only_stable_denial_problem_while_audit_keeps_reason(

@@ -69,7 +69,35 @@ class ResolvedProductionDataSelection:
     ) -> ResolvedProductionDataSelection:
         if information_cutoff.tzinfo is None:
             raise ValueError("information_cutoff_timezone_required")
-        payload = {
+        payload = cls._payload(
+            market=market,
+            information_cutoff=information_cutoff,
+            stock_pool_version_id=stock_pool_version_id,
+            source_policy_manifest_id=source_policy_manifest_id,
+            source_policy_status=source_policy_status,
+            listings=listings,
+        )
+        return cls(
+            data_selection_id=content_id("production_data_selection", payload),
+            market=market,
+            information_cutoff=information_cutoff,
+            stock_pool_version_id=stock_pool_version_id,
+            source_policy_manifest_id=source_policy_manifest_id,
+            source_policy_status=source_policy_status,
+            listings=listings,
+        )
+
+    @staticmethod
+    def _payload(
+        *,
+        market: Market,
+        information_cutoff: datetime,
+        stock_pool_version_id: str,
+        source_policy_manifest_id: str,
+        source_policy_status: str,
+        listings: tuple[ProductionListingInput, ...],
+    ) -> dict[str, Any]:
+        return {
             "market": market,
             "information_cutoff": information_cutoff.isoformat(),
             "stock_pool_version_id": stock_pool_version_id,
@@ -94,14 +122,15 @@ class ResolvedProductionDataSelection:
                 for item in listings
             ],
         }
-        return cls(
-            data_selection_id=content_id("production_data_selection", payload),
-            market=market,
-            information_cutoff=information_cutoff,
-            stock_pool_version_id=stock_pool_version_id,
-            source_policy_manifest_id=source_policy_manifest_id,
-            source_policy_status=source_policy_status,
-            listings=listings,
+
+    def to_payload(self) -> dict[str, Any]:
+        return self._payload(
+            market=self.market,
+            information_cutoff=self.information_cutoff,
+            stock_pool_version_id=self.stock_pool_version_id,
+            source_policy_manifest_id=self.source_policy_manifest_id,
+            source_policy_status=self.source_policy_status,
+            listings=self.listings,
         )
 
 
@@ -189,9 +218,11 @@ class ForecastPublication:
     status: Literal["completed"]
     execution_purpose: Literal["production"]
     information_cutoff: datetime
+    data_selection: ResolvedProductionDataSelection
     data_selection_id: str
     feature_snapshot_id: str
     feature_snapshot_listing_ids: tuple[str, ...]
+    feature_snapshot_rows: tuple[tuple[str, tuple[float, ...]], ...]
     serving_assignment_id: str
     predictions: tuple[ProductionPrediction, ...]
     projection: ProjectionState
@@ -260,6 +291,21 @@ class InMemoryProductionPublicationStore:
 
     @staticmethod
     def _validate(publication: ForecastPublication) -> None:
+        feature_snapshot_payload = {
+            "data_selection_id": publication.data_selection_id,
+            "rows": [
+                {"listing_id": listing_id, "values": values}
+                for listing_id, values in publication.feature_snapshot_rows
+            ],
+        }
+        if (
+            publication.data_selection.data_selection_id != publication.data_selection_id
+            or content_id("production_feature_snapshot", feature_snapshot_payload)
+            != publication.feature_snapshot_id
+            or tuple(listing_id for listing_id, _values in publication.feature_snapshot_rows)
+            != publication.feature_snapshot_listing_ids
+        ):
+            raise ValueError("production_publication_artifact_invalid")
         listing_ids = {item.listing_id for item in publication.predictions}
         if len(listing_ids) != 10 or len(publication.predictions) != 30:
             raise ValueError("production_result_or_reason_incomplete")
@@ -331,20 +377,17 @@ class SqlAlchemyProductionPublicationStore:
             {
                 "artifact_id": publication.data_selection_id,
                 "artifact_kind": "data_selection",
-                "payload": {
-                    "data_selection_id": publication.data_selection_id,
-                    "information_cutoff": publication.information_cutoff.isoformat(),
-                    "stock_pool_version_id": first_prediction.stock_pool_version_id,
-                    "source_policy_manifest_id": first_prediction.source_policy_manifest_id,
-                },
+                "payload": publication.data_selection.to_payload(),
             },
             {
                 "artifact_id": publication.feature_snapshot_id,
                 "artifact_kind": "feature_snapshot",
                 "payload": {
-                    "feature_snapshot_id": publication.feature_snapshot_id,
                     "data_selection_id": publication.data_selection_id,
-                    "listing_ids": list(publication.feature_snapshot_listing_ids),
+                    "rows": [
+                        {"listing_id": listing_id, "values": list(values)}
+                        for listing_id, values in publication.feature_snapshot_rows
+                    ],
                 },
             },
             {
@@ -613,9 +656,13 @@ class ForecastExecution:
             status="completed",
             execution_purpose="production",
             information_cutoff=command.information_cutoff,
+            data_selection=selection,
             data_selection_id=selection.data_selection_id,
             feature_snapshot_id=feature_snapshot_id,
             feature_snapshot_listing_ids=tuple(item.listing_id for item in included_listings),
+            feature_snapshot_rows=tuple(
+                (item.listing_id, item.feature_values) for item in included_listings
+            ),
             serving_assignment_id=pin.assignment.assignment_id,
             predictions=tuple(predictions),
             projection=ProjectionState(0, 0, True),

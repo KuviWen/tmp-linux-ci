@@ -309,6 +309,7 @@ class OutboxRelay:
                         outbox_events.c.schema_version,
                         outbox_events.c.aggregate_id,
                         outbox_events.c.aggregate_version,
+                        outbox_events.c.occurred_at,
                         outbox_events.c.producer,
                         outbox_events.c.trace_id,
                         outbox_dispatch.c.status.label("delivery_status"),

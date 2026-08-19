@@ -8,6 +8,7 @@ from typing import Literal, cast
 import pytest
 from sqlalchemy import create_engine, func, select
 
+from stock_forecasting.application import build_test_application
 from stock_forecasting.content_address import canonical_json_bytes, sha256_id
 from stock_forecasting.evaluation_report import EvaluationReport
 from stock_forecasting.forecast_lab import (
@@ -2010,6 +2011,67 @@ def test_completed_shadow_lineage_promotes_the_next_unstarted_batch_atomically()
     )
 
 
+def test_application_composition_promotes_through_injected_readiness_verifier() -> None:
+    application = build_test_application(
+        observed_at=datetime(2026, 8, 24, 4, 0, tzinfo=UTC),
+        promotion_readiness_verifier=_VerifiedPromotionReadiness(),
+    )
+    arranger, _store = _approved_lifecycle(store=application.model_lifecycle_store)
+    for cycle in range(1, 6):
+        evidence = _shadow_evidence(
+            cycle,
+            previous_shadow_run_id=(f"shadow-run-{cycle - 1}" if cycle > 1 else None),
+        )
+        arranger.execute(
+            RecordShadowEod(
+                command_id=f"application-promotion-shadow-{cycle}",
+                model_family_id="family-shadow",
+                candidate_id=_candidate_id("candidate-shadow"),
+                evidence=evidence,
+                expected_version=cycle + 2,
+                occurred_at=datetime.combine(
+                    evidence.eligible_eod_date,
+                    time(3, 0),
+                    tzinfo=UTC,
+                ),
+            )
+        )
+    artifact = _RECORDED_CANDIDATES["candidate-shadow"].primary_artifact
+    application.model_artifact_repository.put(
+        artifact.artifact_id,
+        artifact.serialized,
+        object_kind="bootstrap_model_artifact",
+    )
+    readiness = PromotionReadiness.create(
+        candidate_id=_candidate_id("candidate-shadow"),
+        artifact_id=artifact.artifact_id,
+        evaluation_report_id=_evaluation_report_id("candidate-shadow"),
+        feature_schema_id=artifact.provenance.feature_schema_id,
+        runtime_id=artifact.provenance.runtime_id,
+        source_policy_manifest_id=artifact.manifest_ids[1],
+        rollback_assignment_id=None,
+        effective_from_batch_id="next-unstarted-eod",
+    )
+
+    result = application.model_lifecycle.execute(
+        PromoteProductionAssignment(
+            command_id="application-promote-production-assignment",
+            model_family_id="family-shadow",
+            candidate_id=_candidate_id("candidate-shadow"),
+            expected_assignment="unassigned",
+            readiness=readiness,
+            expected_version=8,
+            occurred_at=datetime(2026, 8, 24, 4, 0, tzinfo=UTC),
+        )
+    )
+
+    assert result.status == "promoted"
+    assert result.serving_assignment is not None
+    assert application.model_lifecycle_store.production_assignments("family-shadow") == (
+        result.serving_assignment.assignment_id,
+    )
+
+
 def test_started_batch_keeps_its_pinned_assignment_after_a_later_promotion() -> None:
     store = InMemoryLifecycleStore()
     first_assignment = ServingAssignment.create(
@@ -2059,6 +2121,15 @@ def test_started_batch_keeps_its_pinned_assignment_after_a_later_promotion() -> 
 
     assert resolver.pin(started_batch) == pinned
     assert pinned.assignment.assignment_id == first_assignment.assignment_id
+    with pytest.raises(LifecycleConflict, match="production_assignment_not_effective"):
+        resolver.pin(
+            replace(
+                started_batch,
+                forecast_batch_id="batch-before-b",
+                information_cutoff=datetime(2026, 8, 25, 5, 0, tzinfo=UTC),
+                started_at=datetime(2026, 8, 25, 5, 0, tzinfo=UTC),
+            )
+        )
     next_batch = resolver.pin(
         replace(
             started_batch,
@@ -2068,6 +2139,15 @@ def test_started_batch_keeps_its_pinned_assignment_after_a_later_promotion() -> 
         )
     )
     assert next_batch.assignment.assignment_id == second_assignment.assignment_id
+    later_batch = resolver.pin(
+        replace(
+            started_batch,
+            forecast_batch_id="batch-c",
+            information_cutoff=datetime(2026, 8, 26, 6, 0, tzinfo=UTC),
+            started_at=datetime(2026, 8, 26, 6, 0, tzinfo=UTC),
+        )
+    )
+    assert later_batch.assignment.assignment_id == second_assignment.assignment_id
 
 
 def test_sql_assignment_pin_survives_restart_and_ignores_later_promotion() -> None:
@@ -2220,7 +2300,7 @@ def test_verified_rollback_creates_a_new_assignment_for_the_next_batch() -> None
     current = ServingAssignment.create(
         model_family_id="family-valid-rollback",
         candidate_id="sha256:newer-candidate",
-        artifact_id="sha256:newer-artifact",
+        artifact_id=artifact.artifact_id,
         previous_assignment_id=target.assignment_id,
         readiness_evidence_id="sha256:readiness-current",
         effective_from_batch_id="batch-b",
@@ -2258,6 +2338,81 @@ def test_verified_rollback_creates_a_new_assignment_for_the_next_batch() -> None
         "RollbackEventRecorded",
         "ProductionAssignmentCreated",
     ]
+
+
+def test_rollback_rejects_a_loadable_target_incompatible_with_current_runtime() -> None:
+    bundle = lifecycle_candidate_bundle(
+        model_family_id="family-incompatible-rollback",
+        logistic_macro_f1=0.52,
+    )
+    target_artifact = bundle.primary_artifact
+    current_payload = json.loads(target_artifact.serialized)
+    current_payload["runtime_id"] = "runtime:cpython-3.12-safe-json-v2"
+    current_serialized = canonical_json_bytes(current_payload)
+    current_artifact = ModelArtifact.from_serialized(
+        sha256_id(current_serialized),
+        current_serialized,
+    )
+    artifacts = InMemoryCandidateArtifactRepository()
+    for artifact in (target_artifact, current_artifact):
+        artifacts.put(
+            artifact.artifact_id,
+            artifact.serialized,
+            object_kind="bootstrap_model_artifact",
+        )
+    store = InMemoryLifecycleStore()
+    target = ServingAssignment.create(
+        model_family_id="family-incompatible-rollback",
+        candidate_id=bundle.candidate_id,
+        artifact_id=target_artifact.artifact_id,
+        previous_assignment_id=None,
+        readiness_evidence_id="sha256:readiness-target",
+        effective_from_batch_id="batch-a",
+        assigned_at=datetime(2026, 8, 24, 1, 0, tzinfo=UTC),
+    )
+    store.promote(
+        command_id="arrange-incompatible-rollback-target",
+        model_family_id=target.model_family_id,
+        expected_version=0,
+        promotion_payload={"promotion_event_id": "sha256:promotion-target"},
+        assignment_payload=target.to_payload(),
+        occurred_at=target.assigned_at,
+    )
+    current = ServingAssignment.create(
+        model_family_id=target.model_family_id,
+        candidate_id="sha256:current-candidate",
+        artifact_id=current_artifact.artifact_id,
+        previous_assignment_id=target.assignment_id,
+        readiness_evidence_id="sha256:readiness-current",
+        effective_from_batch_id="batch-b",
+        assigned_at=datetime(2026, 8, 24, 2, 0, tzinfo=UTC),
+    )
+    store.promote(
+        command_id="arrange-incompatible-current-assignment",
+        model_family_id=current.model_family_id,
+        expected_version=2,
+        promotion_payload={"promotion_event_id": "sha256:promotion-current"},
+        assignment_payload=current.to_payload(),
+        occurred_at=current.assigned_at,
+    )
+
+    with pytest.raises(LifecycleConflict, match="rollback_target_invalid"):
+        ModelLifecycle(
+            store,
+            candidate_artifact_repository=artifacts,
+        ).execute(
+            RollbackProductionAssignment(
+                command_id="rollback-incompatible-target",
+                model_family_id=current.model_family_id,
+                expected_assignment=current.assignment_id,
+                rollback_target_assignment_id=target.assignment_id,
+                effective_from_batch_id="next-unstarted-eod",
+                expected_version=4,
+                occurred_at=datetime(2026, 8, 24, 3, 0, tzinfo=UTC),
+            )
+        )
+
+    assert len(store.events(current.model_family_id)) == 4
 
 
 def test_assignment_compare_and_swap_race_keeps_only_the_winner() -> None:

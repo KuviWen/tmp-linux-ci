@@ -62,6 +62,7 @@ from stock_forecasting.model_governance import (
     ObjectEvaluationReportRepository,
     ObjectGateEvidenceRepository,
     ObjectGatePolicyRepository,
+    PromotionReadinessVerifier,
     ServingAssignmentResolver,
     SqlAlchemyAssignmentPinStore,
     SqlAlchemyLifecycleStore,
@@ -126,6 +127,7 @@ class Application:
         secret_provider: SecretProvider | None = None,
         source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
         formal_qualification_verifier: FormalQualificationVerifier | None = None,
+        promotion_readiness_verifier: PromotionReadinessVerifier | None = None,
         production_data_selection_resolver: ProductionDataSelectionResolver | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
@@ -178,6 +180,7 @@ class Application:
             formal_qualification_verifier=(
                 formal_qualification_verifier or self.forecast_lab.qualification_verifier
             ),
+            promotion_readiness_verifier=promotion_readiness_verifier,
         )
         self.model_governance_query = ModelGovernanceQuery(
             self.model_lifecycle_store,
@@ -513,6 +516,7 @@ def build_test_application(
     secret_provider: SecretProvider | None = None,
     source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
     formal_qualification_verifier: FormalQualificationVerifier | None = None,
+    promotion_readiness_verifier: PromotionReadinessVerifier | None = None,
     production_data_selection_resolver: ProductionDataSelectionResolver | None = None,
 ) -> Application:
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
@@ -553,6 +557,7 @@ def build_test_application(
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
         formal_qualification_verifier=formal_qualification_verifier,
+        promotion_readiness_verifier=promotion_readiness_verifier,
         production_data_selection_resolver=production_data_selection_resolver,
     )
 
@@ -572,6 +577,8 @@ def build_application(
     model_approval_policy: ModelApprovalPolicyVersion | None = None,
     secret_provider: SecretProvider | None = None,
     source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
+    promotion_readiness_verifier: PromotionReadinessVerifier | None = None,
+    production_data_selection_resolver: ProductionDataSelectionResolver | None = None,
 ) -> Application:
     return Application(
         observed_at=observed_at,
@@ -590,4 +597,6 @@ def build_application(
         model_approval_policy=model_approval_policy,
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
+        promotion_readiness_verifier=promotion_readiness_verifier,
+        production_data_selection_resolver=production_data_selection_resolver,
     )

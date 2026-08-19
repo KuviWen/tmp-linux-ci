@@ -20,6 +20,7 @@ def upgrade() -> None:
         sa.Column("model_family_id", sa.String(length=128), nullable=False),
         sa.Column("forecast_batch_id", sa.String(length=36), nullable=False),
         sa.Column("market", sa.String(length=8), nullable=False),
+        sa.Column("assignment_id", sa.String(length=72), nullable=False),
         sa.Column("payload", sa.JSON(), nullable=False),
         sa.UniqueConstraint(
             "model_family_id",

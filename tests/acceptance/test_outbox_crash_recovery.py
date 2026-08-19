@@ -163,6 +163,7 @@ def test_prediction_publication_is_stale_until_its_outbox_event_is_relayed() -> 
         "schema_version": "1.0.0",
         "aggregate_id": outcome.listing_id,
         "aggregate_version": 1,
+        "occurred_at": "2026-08-12T07:00:00Z",
         "producer": "forecast_execution",
         "trace_id": trace_id,
         "delivery_status": "pending",

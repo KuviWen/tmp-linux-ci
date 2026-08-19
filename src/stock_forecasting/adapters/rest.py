@@ -207,13 +207,17 @@ def _horizon_cards(
             )
             continue
         probabilities = prediction["probabilities"]
+        support_label = {
+            "full": "完整",
+            "degraded": "降級",
+        }[prediction["data_support"]["price_volume"]]
         cards.append(
             f'<section class="horizon"{focused}><h3>{horizon} 個交易日後</h3>'
             f"<p>上漲 {probabilities['up'] * 100:.1f}%</p>"
             f"<p>盤整 {probabilities['flat'] * 100:.1f}%</p>"
             f"<p>下跌 {probabilities['down'] * 100:.1f}%</p>"
             f"<p>信心 {prediction['confidence_score'] * 100:.1f}%</p>"
-            '<p class="status">資料支援：完整</p></section>'
+            f'<p class="status">資料支援：{support_label}</p></section>'
         )
     return "".join(cards)
 
@@ -632,7 +636,7 @@ def create_web_app(application: Application) -> FastAPI:
     def list_listing_prediction_history(
         request: Request,
         listing_id: str,
-        execution_purpose: Literal["fixture", "production"] = Query("production"),
+        execution_purpose: Literal["production"] = Query("production"),
         security_context: SecurityContext = research_authentication,
     ) -> dict[str, object] | Response:
         outcome = application.research_query.list_prediction_history(
@@ -931,7 +935,7 @@ for (const button of document.querySelectorAll('[data-operation]')) {
         execution_purpose: Literal["fixture", "production"] = Query("fixture"),
         horizon: int = Query(5),
         market: str = Query("all"),
-        support: str = Query("full"),
+        support: str = Query("all"),
         sort: str = Query("confidence_desc"),
         security_context: SecurityContext = research_authentication,
     ) -> str | Response:
@@ -1009,10 +1013,24 @@ for (const button of document.querySelectorAll('[data-operation]')) {
             if execution_purpose == "fixture"
             else "<p>本頁只顯示 production 發布紀錄。</p>"
         )
+        support_options = "".join(
+            f'<option value="{value}"{" selected" if support == value else ""}>{label}</option>'
+            for value, label in (
+                ("all", "全部"),
+                ("full", "完整"),
+                ("degraded", "降級"),
+                ("unavailable", "不可用"),
+            )
+        )
         body = (
             f"<main><header><p>研究決策支援系統</p><h1>{title}</h1>"
             f"{notice}"
             '<p class="status">文件、基本面、總體模態：P1 尚未提供</p></header>'
+            '<form method="get" action="/research" aria-label="研究篩選">'
+            f'<input type="hidden" name="information_cutoff" value="{escape(information_cutoff)}">'
+            f'<input type="hidden" name="execution_purpose" value="{execution_purpose}">'
+            f'<label>資料支援 <select name="support">{support_options}</select></label>'
+            '<button type="submit">套用</button></form>'
             f'<section aria-label="目前檢視條件"><p>期間焦點 {horizon}</p>'
             f"<p>市場 {escape(market)}</p><p>資料支援 {escape(support)}</p>"
             f"<p>排序 {escape(sort)}</p></section>"

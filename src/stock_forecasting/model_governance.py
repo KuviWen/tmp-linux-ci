@@ -1902,6 +1902,8 @@ class AssignmentPinStore(Protocol):
 
     def put(self, pin: PinnedServingAssignment) -> PinnedServingAssignment: ...
 
+    def assignment_is_active(self, assignment_id: str) -> bool: ...
+
 
 class InMemoryAssignmentPinStore:
     def __init__(self) -> None:
@@ -1923,6 +1925,9 @@ class InMemoryAssignmentPinStore:
             raise LifecycleConflict("serving_assignment_pin_conflict")
         self._pins[key] = pin
         return pin
+
+    def assignment_is_active(self, assignment_id: str) -> bool:
+        return any(pin.assignment.assignment_id == assignment_id for pin in self._pins.values())
 
 
 class SqlAlchemyAssignmentPinStore:
@@ -1958,6 +1963,7 @@ class SqlAlchemyAssignmentPinStore:
                         model_family_id=pin.model_family_id,
                         forecast_batch_id=pin.forecast_batch_id,
                         market=pin.market,
+                        assignment_id=pin.assignment.assignment_id,
                         payload=payload,
                     )
                 )
@@ -1971,6 +1977,15 @@ class SqlAlchemyAssignmentPinStore:
                 raise LifecycleConflict("serving_assignment_pin_conflict") from None
             return existing
         return pin
+
+    def assignment_is_active(self, assignment_id: str) -> bool:
+        with self._engine.connect() as connection:
+            pin_id = connection.execute(
+                select(production_serving_assignment_pins.c.pin_id)
+                .where(production_serving_assignment_pins.c.assignment_id == assignment_id)
+                .limit(1)
+            ).scalar_one_or_none()
+        return pin_id is not None
 
     @staticmethod
     def _to_payload(pin: PinnedServingAssignment) -> dict[str, object]:
@@ -2032,7 +2047,15 @@ class ServingAssignmentResolver:
                 eligible.append(assignment)
         if not eligible:
             raise LifecycleConflict("production_assignment_unavailable")
-        pin = PinnedServingAssignment.create(request, eligible[-1])
+        assignment = eligible[-1]
+        activates_next_batch = assignment.effective_from_batch_id == "next-unstarted-eod"
+        if (
+            request.forecast_batch_id != assignment.effective_from_batch_id
+            and not activates_next_batch
+            and not self._pin_store.assignment_is_active(assignment.assignment_id)
+        ):
+            raise LifecycleConflict("production_assignment_not_effective")
+        pin = PinnedServingAssignment.create(request, assignment)
         return self._pin_store.put(pin)
 
 
@@ -3220,6 +3243,33 @@ class ModelLifecycle:
             raise LifecycleConflict("promotion_evidence_invalid") from error
         current_assignment = self._current_assignment(command.model_family_id)
         expected_rollback = None if current_assignment == "unassigned" else current_assignment
+        rollback_compatible = current_assignment == "unassigned"
+        if current_assignment != "unassigned":
+            try:
+                rollback_assignment = next(
+                    ServingAssignment.from_payload(json.loads(event.payload_json))
+                    for event in self._store.events(command.model_family_id)
+                    if event.event_kind == "ProductionAssignmentCreated"
+                    and json.loads(event.payload_json)["assignment_id"] == current_assignment
+                )
+                rollback_serialized = self._candidate_artifact_repository.resolve(
+                    rollback_assignment.artifact_id
+                )
+                if rollback_serialized is None:
+                    raise ValueError("rollback_artifact_unavailable")
+                rollback_artifact = ModelArtifact.from_serialized(
+                    rollback_assignment.artifact_id,
+                    rollback_serialized,
+                )
+                rollback_compatible = (
+                    _cold_load_model_artifact(rollback_artifact) == rollback_artifact
+                    and rollback_artifact.provenance.feature_schema_id
+                    == artifact.provenance.feature_schema_id
+                    and rollback_artifact.provenance.runtime_id == artifact.provenance.runtime_id
+                    and rollback_artifact.manifest_ids[1] == artifact.manifest_ids[1]
+                )
+            except (KeyError, StopIteration, TypeError, ValueError):
+                rollback_compatible = False
         bindings_valid = (
             readiness.is_content_addressed()
             and readiness.candidate_id == command.candidate_id
@@ -3229,6 +3279,7 @@ class ModelLifecycle:
             and readiness.runtime_id == artifact.provenance.runtime_id
             and readiness.source_policy_manifest_id == artifact.manifest_ids[1]
             and readiness.rollback_assignment_id == expected_rollback
+            and rollback_compatible
             and command.expected_assignment == current_assignment
             and approval.expected_assignment == current_assignment
             and approval.decision == "approved"
@@ -3319,6 +3370,21 @@ class ModelLifecycle:
             artifact = ModelArtifact.from_serialized(target.artifact_id, serialized)
             if _cold_load_model_artifact(artifact) != artifact:
                 raise ValueError("rollback_artifact_cold_load_failed")
+            current_serialized = self._candidate_artifact_repository.resolve(current.artifact_id)
+            if current_serialized is None:
+                raise ValueError("current_artifact_unavailable")
+            current_artifact = ModelArtifact.from_serialized(
+                current.artifact_id,
+                current_serialized,
+            )
+            if (
+                _cold_load_model_artifact(current_artifact) != current_artifact
+                or artifact.provenance.feature_schema_id
+                != current_artifact.provenance.feature_schema_id
+                or artifact.provenance.runtime_id != current_artifact.provenance.runtime_id
+                or artifact.manifest_ids[1] != current_artifact.manifest_ids[1]
+            ):
+                raise ValueError("rollback_artifact_incompatible")
             if (
                 current.assignment_id != command.expected_assignment
                 or current.previous_assignment_id != target.assignment_id
