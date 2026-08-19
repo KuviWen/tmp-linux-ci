@@ -216,21 +216,54 @@ class _AuthorizationFirstPublicationStore:
         return None
 
 
-class _ReplacingAuthorizationPolicyRepository:
-    def __init__(
-        self,
-        *,
-        active: AuthorizationPolicy,
-        replacement: AuthorizationPolicy,
-    ) -> None:
-        self._active = active
-        self._replacement = replacement
-        self.reads = 0
+class _MutableAuthorizationPolicyRepository:
+    def __init__(self, policy: AuthorizationPolicy) -> None:
+        self._policy = policy
 
     def get(self, policy_set_id: str, *, principal_id: str) -> AuthorizationPolicy:
         del policy_set_id, principal_id
-        self.reads += 1
-        return self._replacement if self.reads >= 3 else self._active
+        return self._policy
+
+    def replace_current(self, policy: AuthorizationPolicy) -> None:
+        self._policy = policy
+
+
+class _PolicyWithdrawingArtifactRepository:
+    def __init__(
+        self,
+        delegate: InMemoryCandidateArtifactRepository,
+        *,
+        policy_repository: _MutableAuthorizationPolicyRepository,
+        withdrawn_policy: AuthorizationPolicy,
+    ) -> None:
+        self._delegate = delegate
+        self._policy_repository = policy_repository
+        self._withdrawn_policy = withdrawn_policy
+
+    def resolve(self, artifact_id: str) -> bytes | None:
+        self._policy_repository.replace_current(self._withdrawn_policy)
+        return self._delegate.resolve(artifact_id)
+
+
+class _PolicyWithdrawingDataSelectionResolver:
+    def __init__(
+        self,
+        selection: ResolvedProductionDataSelection,
+        *,
+        policy_repository: _MutableAuthorizationPolicyRepository,
+        withdrawn_policy: AuthorizationPolicy,
+    ) -> None:
+        self._delegate = _FixedProductionDataSelectionResolver(selection)
+        self._policy_repository = policy_repository
+        self._withdrawn_policy = withdrawn_policy
+
+    def resolve(
+        self,
+        request: ProductionDataSelectionRequest,
+    ) -> ResolvedProductionDataSelection:
+        selection = self._delegate.resolve(request)
+        self._policy_repository.replace_current(self._withdrawn_policy)
+        return selection
 
 
 def _listing_id(index: int, market: str = "XTAI") -> str:
@@ -712,13 +745,11 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
         )
         assert expired_audit[-1]["reason_code"] == "identity_expired"
 
-        current_policy_repository = _ReplacingAuthorizationPolicyRepository(
-            active=production_policy,
-            replacement=_without_dataset_policy(
-                production_policy,
-                selection.source_policy_manifest_id,
-            ),
+        withdrawn_policy = _without_dataset_policy(
+            production_policy,
+            selection.source_policy_manifest_id,
         )
+        current_policy_repository = _MutableAuthorizationPolicyRepository(production_policy)
 
         withdrawn_state_store = _DelayedProductionStateStore(
             clock=_MutableClock(information_cutoff),
@@ -730,7 +761,11 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
                 InMemoryAssignmentPinStore(),
             ),
             data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
-            artifact_repository=artifacts,
+            artifact_repository=_PolicyWithdrawingArtifactRepository(
+                artifacts,
+                policy_repository=current_policy_repository,
+                withdrawn_policy=withdrawn_policy,
+            ),
             publication_store=SqlAlchemyProductionPublicationStore(withdrawn_state_store),
             security_context=production_identity.context,
             authorization_policy=lambda: current_policy_repository.get(
@@ -1061,16 +1096,18 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
     assert len(application.state_store.list_research_records(execution_purpose="production")) == 10
 
     if market == "XTAI":
-        current_policy_repository = _ReplacingAuthorizationPolicyRepository(
-            active=production_policy,
-            replacement=_without_dataset_policy(
-                production_policy,
-                selection.source_policy_manifest_id,
-            ),
+        withdrawn_policy = _without_dataset_policy(
+            production_policy,
+            selection.source_policy_manifest_id,
         )
+        current_policy_repository = _MutableAuthorizationPolicyRepository(production_policy)
         withdrawal_application = build_test_application(
             observed_at=information_cutoff,
-            production_data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
+            production_data_selection_resolver=_PolicyWithdrawingDataSelectionResolver(
+                selection,
+                policy_repository=current_policy_repository,
+                withdrawn_policy=withdrawn_policy,
+            ),
             local_identity=production_identity,
             authorization_policy_override=production_policy,
         )
@@ -1101,7 +1138,6 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
         )
 
         assert isinstance(withdrawn, PolicyDeniedOutcome)
-        assert current_policy_repository.reads == 3
         assert (
             withdrawal_application.state_store.list_research_records(execution_purpose="production")
             == []
