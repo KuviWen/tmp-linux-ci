@@ -71,13 +71,39 @@ class OperationsControl:
         forecast_batch_id: str,
         *,
         transport: ProductionNotificationTransport,
-    ) -> dict[str, Any]:
+        trace_id: str,
+        security_context: SecurityContext,
+    ) -> dict[str, Any] | PolicyDeniedOutcome:
         operations = self.get_production_forecast(forecast_batch_id)
         pending = [
             item for item in operations["notifications"] if item["delivery_status"] == "pending"
         ]
         if len(pending) != 1:
             raise ValueError("production_notification_not_pending")
+        source_policy_manifest_id = pending[0].get("source_policy_manifest_id")
+        if not isinstance(source_policy_manifest_id, str):
+            raise ValueError("production_notification_policy_unavailable")
+        decision = self._authorization_policy.evaluate(
+            security_context,
+            OperationIntent(
+                action="production_notification.deliver",
+                dataset_id=source_policy_manifest_id,
+                purpose="price_research",
+                environment=security_context.environment,
+                resource_state="active",
+                evaluated_at=self._clock(),
+                trace_id=trace_id,
+                correlation_id=trace_id,
+            ),
+        )
+        authorization = authorization_audit_payload(decision)
+        if not decision.allowed:
+            self._state_store.record_authorization_decision(
+                authorization=authorization,
+                outcome="denied",
+                trace_id=trace_id,
+            )
+            return PolicyDeniedOutcome.from_decision(decision)
         try:
             delivered = transport.deliver(pending[0])
         except Exception:
@@ -95,6 +121,8 @@ class OperationsControl:
             forecast_batch_id=forecast_batch_id,
             delivered_at=self._instant(self._clock()),
             payload=outcome,
+            authorization=authorization,
+            trace_id=trace_id,
         )
         return outcome
 

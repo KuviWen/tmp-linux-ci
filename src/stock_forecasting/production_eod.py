@@ -8,6 +8,13 @@ from math import isfinite, log
 from typing import Any, Literal, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
+from stock_forecasting.authorization import (
+    AuthorizationPolicy,
+    OperationIntent,
+    PolicyDeniedOutcome,
+    SecurityContext,
+    authorization_audit_payload,
+)
 from stock_forecasting.content_address import content_id
 from stock_forecasting.contracts import ProbabilityVector
 from stock_forecasting.forecasting import (
@@ -234,13 +241,23 @@ class ForecastPublication:
 
 
 class ProductionPublicationStore(Protocol):
+    def replay(self, *, idempotency_key: str, trace_id: str) -> ForecastPublication | None: ...
+
     def publish(
         self,
         publication: ForecastPublication,
         *,
         trace_id: str,
         idempotency_key: str,
+        authorization: dict[str, object],
     ) -> ForecastPublication: ...
+
+    def record_authorization_denial(
+        self,
+        *,
+        authorization: dict[str, object],
+        trace_id: str,
+    ) -> None: ...
 
 
 class ProductionStateStore(Protocol):
@@ -253,12 +270,39 @@ class ProductionStateStore(Protocol):
         predictions: list[dict[str, Any]],
         trace_id: str,
         idempotency_key: str,
+        authorization: dict[str, object],
     ) -> int: ...
+
+    def record_authorization_decision(
+        self,
+        *,
+        authorization: dict[str, object],
+        outcome: str,
+        trace_id: str,
+    ) -> None: ...
+
+    def get_production_publication_replay(
+        self,
+        *,
+        idempotency_key: str,
+        trace_id: str,
+    ) -> dict[str, Any] | None: ...
 
 
 class InMemoryProductionPublicationStore:
     def __init__(self) -> None:
         self._batches: dict[str, ForecastPublication] = {}
+        self._batch_idempotency_keys: dict[str, str] = {}
+        self._idempotency_batches: dict[str, str] = {}
+        self._idempotency_traces: dict[str, str] = {}
+
+    def replay(self, *, idempotency_key: str, trace_id: str) -> ForecastPublication | None:
+        forecast_batch_id = self._idempotency_batches.get(idempotency_key)
+        if forecast_batch_id is None:
+            return None
+        if self._idempotency_traces[idempotency_key] != trace_id:
+            raise ValueError("immutable_production_work_conflict")
+        return self._batches[forecast_batch_id]
 
     def publish(
         self,
@@ -266,11 +310,17 @@ class InMemoryProductionPublicationStore:
         *,
         trace_id: str,
         idempotency_key: str,
+        authorization: dict[str, object] | None = None,
     ) -> ForecastPublication:
-        del trace_id, idempotency_key
+        del authorization
         self._validate(publication)
+        replay_batch_id = self._idempotency_batches.get(idempotency_key)
+        if replay_batch_id is not None and replay_batch_id != publication.forecast_batch_id:
+            raise ValueError("immutable_production_work_conflict")
         existing = self._batches.get(publication.forecast_batch_id)
         if existing is not None:
+            if self._batch_idempotency_keys[publication.forecast_batch_id] != idempotency_key:
+                raise ValueError("immutable_production_batch_conflict")
             if existing.predictions != publication.predictions:
                 raise ValueError("immutable_production_batch_conflict")
             return existing
@@ -284,13 +334,29 @@ class InMemoryProductionPublicationStore:
             outbox_delivery_status="pending",
         )
         self._batches[publication.forecast_batch_id] = committed
+        self._batch_idempotency_keys[publication.forecast_batch_id] = idempotency_key
+        self._idempotency_batches[idempotency_key] = publication.forecast_batch_id
+        self._idempotency_traces[idempotency_key] = trace_id
         return committed
+
+    def record_authorization_denial(
+        self,
+        *,
+        authorization: dict[str, object],
+        trace_id: str,
+    ) -> None:
+        del authorization, trace_id
 
     def get_batch(self, forecast_batch_id: str) -> ForecastPublication | None:
         return self._batches.get(forecast_batch_id)
 
     @staticmethod
     def _validate(publication: ForecastPublication) -> None:
+        if (
+            content_id("production_data_selection", publication.data_selection.to_payload())
+            != publication.data_selection_id
+        ):
+            raise ValueError("production_publication_artifact_invalid")
         feature_snapshot_payload = {
             "data_selection_id": publication.data_selection_id,
             "rows": [
@@ -317,12 +383,28 @@ class InMemoryProductionPublicationStore:
             }
             if horizons != {1, 5, 20}:
                 raise ValueError("production_result_or_reason_incomplete")
+        selection_by_listing = {
+            listing.listing_id: listing for listing in publication.data_selection.listings
+        }
         for item in publication.predictions:
+            selected = selection_by_listing.get(item.listing_id)
+            selected_targets = dict(selected.target_session_ids) if selected is not None else {}
             if (
-                item.execution_purpose != "production"
+                selected is None
+                or item.execution_purpose != "production"
                 or item.data_selection_id != publication.data_selection_id
                 or item.feature_snapshot_id != publication.feature_snapshot_id
                 or item.serving_assignment_id != publication.serving_assignment_id
+                or item.display_ticker != selected.display_ticker
+                or item.market != selected.market
+                or item.dataset_version_id != selected.dataset_version_id
+                or item.stock_pool_version_id != publication.data_selection.stock_pool_version_id
+                or item.calendar_version_id != selected.calendar_version_id
+                or item.anchor_session_id != selected.anchor_session_id
+                or item.target_session_id != selected_targets.get(item.horizon_sessions)
+                or item.source_policy_manifest_id
+                != publication.data_selection.source_policy_manifest_id
+                or (item.status != "unavailable" and item.status != selected.support_status)
             ):
                 raise ValueError("production_prediction_lineage_invalid")
             if item.status == "unavailable":
@@ -358,12 +440,20 @@ class SqlAlchemyProductionPublicationStore:
     def __init__(self, state_store: ProductionStateStore) -> None:
         self._state_store = state_store
 
+    def replay(self, *, idempotency_key: str, trace_id: str) -> ForecastPublication | None:
+        payload = self._state_store.get_production_publication_replay(
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+        )
+        return None if payload is None else self._publication_from_payload(payload)
+
     def publish(
         self,
         publication: ForecastPublication,
         *,
         trace_id: str,
         idempotency_key: str,
+        authorization: dict[str, object],
     ) -> ForecastPublication:
         InMemoryProductionPublicationStore._validate(publication)
         predictions = [self._prediction_payload(item) for item in publication.predictions]
@@ -412,35 +502,207 @@ class SqlAlchemyProductionPublicationStore:
                 for dataset_id in dataset_ids
             ],
         ]
+        publication_payload = self._publication_payload(publication)
         core_version = self._state_store.publish_production_trace(
-            publication={
-                "forecast_batch_id": publication.forecast_batch_id,
-                "information_cutoff": publication.information_cutoff.isoformat(),
-                "outbox_event_id": publication.outbox_event_id,
-                "market": first_prediction.market,
-                "serving_assignment_id": publication.serving_assignment_id,
-                "completed_at": publication.completed_at.isoformat(),
-                "slo_breached": publication.slo_breached,
-                "milestones": [
-                    {
-                        "event_kind": item.event_kind,
-                        "due_at": item.due_at.isoformat(),
-                        "observed_at": item.observed_at.isoformat(),
-                        "status": item.status,
-                    }
-                    for item in publication.milestones
-                ],
-            },
+            publication=publication_payload,
             research_record_payloads=records,
             artifacts=artifacts,
             predictions=predictions,
             trace_id=trace_id,
             idempotency_key=idempotency_key,
+            authorization=authorization,
         )
         return replace(
             publication,
             projection=ProjectionState(core_version, 0, True),
             outbox_delivery_status="pending",
+        )
+
+    @staticmethod
+    def _publication_payload(publication: ForecastPublication) -> dict[str, Any]:
+        first_prediction = publication.predictions[0]
+        return {
+            "forecast_batch_id": publication.forecast_batch_id,
+            "status": publication.status,
+            "execution_purpose": publication.execution_purpose,
+            "information_cutoff": publication.information_cutoff.isoformat(),
+            "data_selection": publication.data_selection.to_payload(),
+            "data_selection_id": publication.data_selection_id,
+            "feature_snapshot_id": publication.feature_snapshot_id,
+            "feature_snapshot_listing_ids": list(publication.feature_snapshot_listing_ids),
+            "feature_snapshot_rows": [
+                {"listing_id": listing_id, "values": list(values)}
+                for listing_id, values in publication.feature_snapshot_rows
+            ],
+            "serving_assignment_id": publication.serving_assignment_id,
+            "predictions": [
+                {
+                    "prediction_id": item.prediction_id,
+                    "listing_id": item.listing_id,
+                    "display_ticker": item.display_ticker,
+                    "market": item.market,
+                    "horizon_sessions": item.horizon_sessions,
+                    "anchor_session_id": item.anchor_session_id,
+                    "target_session_id": item.target_session_id,
+                    "status": item.status,
+                    "probabilities": item.probabilities,
+                    "confidence_score": item.confidence_score,
+                    "unavailable_reason": item.unavailable_reason,
+                    "data_selection_id": item.data_selection_id,
+                    "dataset_version_id": item.dataset_version_id,
+                    "stock_pool_version_id": item.stock_pool_version_id,
+                    "feature_snapshot_id": item.feature_snapshot_id,
+                    "model_artifact_id": item.model_artifact_id,
+                    "calibrator_ids": list(item.calibrator_ids),
+                    "serving_assignment_id": item.serving_assignment_id,
+                    "calendar_version_id": item.calendar_version_id,
+                    "source_policy_manifest_id": item.source_policy_manifest_id,
+                    "execution_purpose": item.execution_purpose,
+                }
+                for item in publication.predictions
+            ],
+            "projection": {
+                "core_projection_version": 1,
+                "evidence_projection_version": 0,
+                "stale": True,
+            },
+            "outbox_event_id": publication.outbox_event_id,
+            "outbox_delivery_status": "pending",
+            "market": first_prediction.market,
+            "source_policy_manifest_id": first_prediction.source_policy_manifest_id,
+            "completed_at": publication.completed_at.isoformat(),
+            "slo_breached": publication.slo_breached,
+            "milestones": [
+                {
+                    "event_kind": item.event_kind,
+                    "due_at": item.due_at.isoformat(),
+                    "observed_at": item.observed_at.isoformat(),
+                    "status": item.status,
+                }
+                for item in publication.milestones
+            ],
+        }
+
+    @staticmethod
+    def _publication_from_payload(payload: dict[str, Any]) -> ForecastPublication:
+        try:
+            selection_payload = cast(dict[str, Any], payload["data_selection"])
+            listings = tuple(
+                ProductionListingInput(
+                    listing_id=str(item["listing_id"]),
+                    display_ticker=str(item["display_ticker"]),
+                    market=cast(Market, item["market"]),
+                    dataset_version_id=str(item["dataset_version_id"]),
+                    calendar_version_id=str(item["calendar_version_id"]),
+                    anchor_session_id=str(item["anchor_session_id"]),
+                    target_session_ids=tuple(
+                        (cast(Horizon, int(horizon)), str(target))
+                        for horizon, target in item["target_session_ids"]
+                    ),
+                    evidence_level=str(item["evidence_level"]),
+                    first_observed_at=datetime.fromisoformat(str(item["first_observed_at"])),
+                    processed_at=datetime.fromisoformat(str(item["processed_at"])),
+                    feature_values=tuple(float(value) for value in item["feature_values"]),
+                    support_status=cast(
+                        Literal["full", "degraded", "unavailable"], item["support_status"]
+                    ),
+                    unavailable_reason=cast(str | None, item["unavailable_reason"]),
+                )
+                for item in cast(list[dict[str, Any]], selection_payload["listings"])
+            )
+            selection = ResolvedProductionDataSelection.create(
+                market=cast(Market, selection_payload["market"]),
+                information_cutoff=datetime.fromisoformat(
+                    str(selection_payload["information_cutoff"])
+                ),
+                stock_pool_version_id=str(selection_payload["stock_pool_version_id"]),
+                source_policy_manifest_id=str(selection_payload["source_policy_manifest_id"]),
+                source_policy_status=str(selection_payload["source_policy_status"]),
+                listings=listings,
+            )
+            predictions = tuple(
+                ProductionPrediction(
+                    prediction_id=str(item["prediction_id"]),
+                    listing_id=str(item["listing_id"]),
+                    display_ticker=str(item["display_ticker"]),
+                    market=cast(Market, item["market"]),
+                    horizon_sessions=cast(Horizon, int(item["horizon_sessions"])),
+                    anchor_session_id=str(item["anchor_session_id"]),
+                    target_session_id=str(item["target_session_id"]),
+                    status=cast(Literal["full", "degraded", "unavailable"], item["status"]),
+                    probabilities=cast(ProbabilityVector | None, item["probabilities"]),
+                    confidence_score=cast(float | None, item["confidence_score"]),
+                    unavailable_reason=cast(str | None, item["unavailable_reason"]),
+                    data_selection_id=str(item["data_selection_id"]),
+                    dataset_version_id=str(item["dataset_version_id"]),
+                    stock_pool_version_id=str(item["stock_pool_version_id"]),
+                    feature_snapshot_id=str(item["feature_snapshot_id"]),
+                    model_artifact_id=str(item["model_artifact_id"]),
+                    calibrator_ids=tuple(str(value) for value in item["calibrator_ids"]),
+                    serving_assignment_id=str(item["serving_assignment_id"]),
+                    calendar_version_id=str(item["calendar_version_id"]),
+                    source_policy_manifest_id=str(item["source_policy_manifest_id"]),
+                    execution_purpose="production",
+                )
+                for item in cast(list[dict[str, Any]], payload["predictions"])
+            )
+            projection_payload = cast(dict[str, Any], payload["projection"])
+            publication = ForecastPublication(
+                forecast_batch_id=str(payload["forecast_batch_id"]),
+                status="completed",
+                execution_purpose="production",
+                information_cutoff=datetime.fromisoformat(str(payload["information_cutoff"])),
+                data_selection=selection,
+                data_selection_id=str(payload["data_selection_id"]),
+                feature_snapshot_id=str(payload["feature_snapshot_id"]),
+                feature_snapshot_listing_ids=tuple(
+                    str(value) for value in payload["feature_snapshot_listing_ids"]
+                ),
+                feature_snapshot_rows=tuple(
+                    (
+                        str(item["listing_id"]),
+                        tuple(float(value) for value in item["values"]),
+                    )
+                    for item in cast(list[dict[str, Any]], payload["feature_snapshot_rows"])
+                ),
+                serving_assignment_id=str(payload["serving_assignment_id"]),
+                predictions=predictions,
+                projection=ProjectionState(
+                    core_projection_version=int(projection_payload["core_projection_version"]),
+                    evidence_projection_version=int(
+                        projection_payload["evidence_projection_version"]
+                    ),
+                    stale=bool(projection_payload["stale"]),
+                ),
+                outbox_event_id=str(payload["outbox_event_id"]),
+                outbox_delivery_status="pending",
+                completed_at=datetime.fromisoformat(str(payload["completed_at"])),
+                slo_breached=bool(payload["slo_breached"]),
+                milestones=tuple(
+                    WorkflowMilestone(
+                        event_kind=str(item["event_kind"]),
+                        due_at=datetime.fromisoformat(str(item["due_at"])),
+                        observed_at=datetime.fromisoformat(str(item["observed_at"])),
+                        status=cast(Literal["met", "missed"], item["status"]),
+                    )
+                    for item in cast(list[dict[str, Any]], payload["milestones"])
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("production_publication_replay_invalid") from error
+        InMemoryProductionPublicationStore._validate(publication)
+        return publication
+
+    def record_authorization_denial(
+        self,
+        *,
+        authorization: dict[str, object],
+        trace_id: str,
+    ) -> None:
+        self._state_store.record_authorization_decision(
+            authorization=authorization,
+            outcome="denied",
+            trace_id=trace_id,
         )
 
     @staticmethod
@@ -521,26 +783,37 @@ class ForecastExecution:
         data_selection_resolver: ProductionDataSelectionResolver,
         artifact_repository: ProductionArtifactRepository,
         publication_store: ProductionPublicationStore | None = None,
+        security_context: SecurityContext | None = None,
+        authorization_policy: AuthorizationPolicy | None = None,
         clock: Callable[[], datetime],
     ) -> None:
         self._assignment_resolver = assignment_resolver
         self._data_selection_resolver = data_selection_resolver
         self._artifact_repository = artifact_repository
         self._publication_store = publication_store or InMemoryProductionPublicationStore()
+        self._security_context = security_context
+        self._authorization_policy = authorization_policy
         self._clock = clock
 
-    def run(self, command: ForecastRunCommand) -> ForecastPublication:
+    def run(self, command: ForecastRunCommand) -> ForecastPublication | PolicyDeniedOutcome:
         if command.execution_purpose != "production":
             raise ValueError("production_execution_purpose_required")
-        started_at = self._observe_clock(not_before=command.information_cutoff)
         forecast_batch_id = _stable_id(
             "production-forecast-batch",
             (
                 f"{command.market}:{command.information_cutoff.isoformat()}:"
-                f"{command.stock_pool_version_id}:{command.model_family_id}:"
-                f"{command.idempotency_key}"
+                f"{command.stock_pool_version_id}:{command.model_family_id}"
             ),
         )
+        replay = self._publication_store.replay(
+            idempotency_key=command.idempotency_key,
+            trace_id=command.trace_id,
+        )
+        if replay is not None:
+            if replay.forecast_batch_id != forecast_batch_id:
+                raise ValueError("immutable_production_work_conflict")
+            return replay
+        started_at = self._observe_clock(not_before=command.information_cutoff)
         selection = self._data_selection_resolver.resolve(
             ProductionDataSelectionRequest(
                 market=command.market,
@@ -549,6 +822,28 @@ class ForecastExecution:
             )
         )
         self._validate_selection(command, selection)
+        if self._security_context is None or self._authorization_policy is None:
+            raise ValueError("production_authorization_unavailable")
+        authorization_decision = self._authorization_policy.evaluate(
+            self._security_context,
+            OperationIntent(
+                action="production_forecast.publish",
+                dataset_id=selection.source_policy_manifest_id,
+                purpose="price_research",
+                environment=self._security_context.environment,
+                resource_state="active",
+                evaluated_at=started_at,
+                trace_id=command.trace_id,
+                correlation_id=command.trace_id,
+            ),
+        )
+        authorization = authorization_audit_payload(authorization_decision)
+        if not authorization_decision.allowed:
+            self._publication_store.record_authorization_denial(
+                authorization=authorization,
+                trace_id=command.trace_id,
+            )
+            return PolicyDeniedOutcome.from_decision(authorization_decision)
         pin = self._assignment_resolver.pin(
             PinServingAssignment(
                 model_family_id=command.model_family_id,
@@ -676,6 +971,7 @@ class ForecastExecution:
             publication,
             trace_id=command.trace_id,
             idempotency_key=command.idempotency_key,
+            authorization=authorization,
         )
 
     def _observe_clock(self, *, not_before: datetime) -> datetime:
@@ -696,6 +992,8 @@ class ForecastExecution:
             or selection.stock_pool_version_id != command.stock_pool_version_id
             or len(selection.listings) != 10
             or len(listing_ids) != 10
+            or content_id("production_data_selection", selection.to_payload())
+            != selection.data_selection_id
             or any(item.market != command.market for item in selection.listings)
             or any(
                 [horizon for horizon, _target in item.target_session_ids] != [1, 5, 20]

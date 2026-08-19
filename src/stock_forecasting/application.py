@@ -307,6 +307,8 @@ class Application:
             ),
             artifact_repository=self.model_artifact_repository,
             publication_store=SqlAlchemyProductionPublicationStore(self.state_store),
+            security_context=self.security_context,
+            authorization_policy=self.authorization_policy,
             clock=lambda: self._fixed_security_time or datetime.now(UTC),
         )
 
@@ -342,7 +344,9 @@ class Application:
     ) -> FixtureEodOutcome | PolicyDeniedOutcome:
         return self._fixture_eod.execute(command)
 
-    def run_production_eod(self, command: ForecastRunCommand) -> ForecastPublication:
+    def run_production_eod(
+        self, command: ForecastRunCommand
+    ) -> ForecastPublication | PolicyDeniedOutcome:
         return self._production_eod.run(command)
 
     def build_alpaca_price_adapter(

@@ -64,9 +64,14 @@ class UnavailableFormalQualificationVerifier:
 class PromotionReadinessVerifier(Protocol):
     def verify(self, readiness: PromotionReadiness) -> bool: ...
 
+    def verify_current_source_policy(self, source_policy_manifest_id: str) -> bool: ...
+
 
 class UnavailablePromotionReadinessVerifier:
     def verify(self, readiness: PromotionReadiness) -> bool:
+        return False
+
+    def verify_current_source_policy(self, source_policy_manifest_id: str) -> bool:
         return False
 
 
@@ -3215,6 +3220,9 @@ class ModelLifecycle:
             return False
 
     def _promote(self, command: PromoteProductionAssignment) -> LifecycleResult:
+        replay = self._assignment_transition_replay(command)
+        if replay is not None:
+            return replay
         candidate = self._candidate(command.model_family_id, command.candidate_id)
         readiness = command.readiness
         try:
@@ -3351,6 +3359,9 @@ class ModelLifecycle:
         raise LifecycleConflict("candidate_not_approved")
 
     def _rollback(self, command: RollbackProductionAssignment) -> LifecycleResult:
+        replay = self._assignment_transition_replay(command)
+        if replay is not None:
+            return replay
         assignments: list[ServingAssignment] = []
         try:
             for event in self._store.events(command.model_family_id):
@@ -3385,6 +3396,16 @@ class ModelLifecycle:
                 or artifact.manifest_ids[1] != current_artifact.manifest_ids[1]
             ):
                 raise ValueError("rollback_artifact_incompatible")
+            try:
+                current_source_policy_verified = (
+                    self._promotion_readiness_verifier.verify_current_source_policy(
+                        artifact.manifest_ids[1]
+                    )
+                )
+            except Exception:
+                current_source_policy_verified = False
+            if not current_source_policy_verified:
+                raise ValueError("rollback_source_policy_inactive")
             if (
                 current.assignment_id != command.expected_assignment
                 or current.previous_assignment_id != target.assignment_id
@@ -3424,6 +3445,92 @@ class ModelLifecycle:
         )
         return LifecycleResult(
             status="rolled_back",
+            version=assignment_event.version,
+            serving_assignment=assignment,
+        )
+
+    def _assignment_transition_replay(
+        self,
+        command: PromoteProductionAssignment | RollbackProductionAssignment,
+    ) -> LifecycleResult | None:
+        events = self._store.events(command.model_family_id)
+        transition = next(
+            (event for event in events if event.command_id == command.command_id),
+            None,
+        )
+        assignment_event = next(
+            (event for event in events if event.command_id == f"{command.command_id}:assignment"),
+            None,
+        )
+        if transition is None and assignment_event is None:
+            return None
+        if transition is None or assignment_event is None:
+            raise LifecycleConflict("command_id_payload_conflict")
+        try:
+            transition_payload = cast(dict[str, object], json.loads(transition.payload_json))
+            assignment = ServingAssignment.from_payload(json.loads(assignment_event.payload_json))
+        except (KeyError, TypeError, ValueError) as error:
+            raise LifecycleConflict("command_id_payload_conflict") from error
+        effective_from_batch_id = (
+            command.readiness.effective_from_batch_id
+            if isinstance(command, PromoteProductionAssignment)
+            else command.effective_from_batch_id
+        )
+        common_valid = (
+            transition.version == command.expected_version + 1
+            and assignment_event.version == command.expected_version + 2
+            and transition.occurred_at == command.occurred_at
+            and assignment_event.occurred_at == command.occurred_at
+            and assignment.model_family_id == command.model_family_id
+            and assignment.assigned_at == command.occurred_at
+            and assignment.effective_from_batch_id == effective_from_batch_id
+            and assignment_event.event_kind == "ProductionAssignmentCreated"
+        )
+        if isinstance(command, PromoteProductionAssignment):
+            expected_previous = (
+                None if command.expected_assignment == "unassigned" else command.expected_assignment
+            )
+            valid = (
+                common_valid
+                and transition.event_kind == "PromotionEventRecorded"
+                and transition_payload.get("model_family_id") == command.model_family_id
+                and transition_payload.get("candidate_id") == command.candidate_id
+                and transition_payload.get("artifact_id") == command.readiness.artifact_id
+                and transition_payload.get("evaluation_report_id")
+                == command.readiness.evaluation_report_id
+                and transition_payload.get("readiness_evidence_id") == command.readiness.evidence_id
+                and transition_payload.get("previous_assignment_id") == expected_previous
+                and transition_payload.get("effective_from_batch_id")
+                == command.readiness.effective_from_batch_id
+                and transition_payload.get("promoted_at") == command.occurred_at.isoformat()
+                and assignment.candidate_id == command.candidate_id
+                and assignment.artifact_id == command.readiness.artifact_id
+                and assignment.previous_assignment_id == expected_previous
+                and assignment.readiness_evidence_id == command.readiness.evidence_id
+            )
+            status = "promoted"
+        else:
+            rollback_core: dict[str, object] = {
+                "model_family_id": command.model_family_id,
+                "from_assignment_id": command.expected_assignment,
+                "rollback_target_assignment_id": command.rollback_target_assignment_id,
+                "artifact_id": assignment.artifact_id,
+                "effective_from_batch_id": command.effective_from_batch_id,
+                "rolled_back_at": command.occurred_at.isoformat(),
+            }
+            rollback_event_id = _content_id("rollback_event", rollback_core)
+            valid = (
+                common_valid
+                and transition.event_kind == "RollbackEventRecorded"
+                and transition_payload == {"rollback_event_id": rollback_event_id, **rollback_core}
+                and assignment.previous_assignment_id == command.expected_assignment
+                and assignment.readiness_evidence_id == rollback_event_id
+            )
+            status = "rolled_back"
+        if not valid:
+            raise LifecycleConflict("command_id_payload_conflict")
+        return LifecycleResult(
+            status=status,
             version=assignment_event.version,
             serving_assignment=assignment,
         )

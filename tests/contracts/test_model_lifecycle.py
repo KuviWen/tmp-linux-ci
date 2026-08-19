@@ -105,8 +105,17 @@ class _VerifiedFormalQualification:
 
 
 class _VerifiedPromotionReadiness:
+    def __init__(self, *, source_policy_active: bool = True) -> None:
+        self.source_policy_active = source_policy_active
+        self.source_policy_check_fails = False
+
     def verify(self, readiness: PromotionReadiness) -> bool:
         return readiness.is_content_addressed()
+
+    def verify_current_source_policy(self, source_policy_manifest_id: str) -> bool:
+        if self.source_policy_check_fails:
+            raise RuntimeError("source_policy_provider_unavailable")
+        return self.source_policy_active and bool(source_policy_manifest_id)
 
 
 class _CorruptingReadStore:
@@ -1986,17 +1995,17 @@ def test_completed_shadow_lineage_promotes_the_next_unstarted_batch_atomically()
         effective_from_batch_id="next-unstarted-eod",
     )
 
-    promoted = lifecycle.execute(
-        PromoteProductionAssignment(
-            command_id="promote-first-production-assignment",
-            model_family_id="family-shadow",
-            candidate_id=_candidate_id("candidate-shadow"),
-            expected_assignment="unassigned",
-            readiness=readiness,
-            expected_version=8,
-            occurred_at=datetime(2026, 8, 24, 4, 0, tzinfo=UTC),
-        )
+    command = PromoteProductionAssignment(
+        command_id="promote-first-production-assignment",
+        model_family_id="family-shadow",
+        candidate_id=_candidate_id("candidate-shadow"),
+        expected_assignment="unassigned",
+        readiness=readiness,
+        expected_version=8,
+        occurred_at=datetime(2026, 8, 24, 4, 0, tzinfo=UTC),
     )
+    promoted = lifecycle.execute(command)
+    replayed = lifecycle.execute(command)
 
     assert promoted.status == "promoted"
     assert promoted.serving_assignment is not None
@@ -2009,6 +2018,8 @@ def test_completed_shadow_lineage_promotes_the_next_unstarted_batch_atomically()
     assert store.production_assignments("family-shadow") == (
         promoted.serving_assignment.assignment_id,
     )
+    assert replayed == promoted
+    assert len(store.events("family-shadow")) == 10
 
 
 def test_application_composition_promotes_through_injected_readiness_verifier() -> None:
@@ -2315,20 +2326,33 @@ def test_verified_rollback_creates_a_new_assignment_for_the_next_batch() -> None
         occurred_at=current.assigned_at,
     )
 
-    result = ModelLifecycle(
+    verifier = _VerifiedPromotionReadiness(source_policy_active=False)
+    lifecycle = ModelLifecycle(
         store,
         candidate_artifact_repository=artifacts,
-    ).execute(
-        RollbackProductionAssignment(
-            command_id="rollback-to-verified-target",
-            model_family_id="family-valid-rollback",
-            expected_assignment=current.assignment_id,
-            rollback_target_assignment_id=target.assignment_id,
-            effective_from_batch_id="next-unstarted-eod",
-            expected_version=4,
-            occurred_at=datetime(2026, 8, 24, 3, 0, tzinfo=UTC),
-        )
+        promotion_readiness_verifier=verifier,
     )
+    command = RollbackProductionAssignment(
+        command_id="rollback-to-verified-target",
+        model_family_id="family-valid-rollback",
+        expected_assignment=current.assignment_id,
+        rollback_target_assignment_id=target.assignment_id,
+        effective_from_batch_id="next-unstarted-eod",
+        expected_version=4,
+        occurred_at=datetime(2026, 8, 24, 3, 0, tzinfo=UTC),
+    )
+
+    verifier.source_policy_check_fails = True
+    with pytest.raises(LifecycleConflict, match="rollback_target_invalid"):
+        lifecycle.execute(command)
+    verifier.source_policy_check_fails = False
+    with pytest.raises(LifecycleConflict, match="rollback_target_invalid"):
+        lifecycle.execute(command)
+    assert len(store.events("family-valid-rollback")) == 4
+
+    verifier.source_policy_active = True
+    result = lifecycle.execute(command)
+    replayed = lifecycle.execute(command)
 
     assert result.status == "rolled_back"
     assert result.serving_assignment is not None
@@ -2338,6 +2362,8 @@ def test_verified_rollback_creates_a_new_assignment_for_the_next_batch() -> None
         "RollbackEventRecorded",
         "ProductionAssignmentCreated",
     ]
+    assert replayed == result
+    assert len(store.events("family-valid-rollback")) == 6
 
 
 def test_rollback_rejects_a_loadable_target_incompatible_with_current_runtime() -> None:

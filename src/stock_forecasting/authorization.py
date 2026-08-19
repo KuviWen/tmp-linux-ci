@@ -30,6 +30,8 @@ AuthorizationAction = Literal[
     "source_credential.manage",
     "model_governance.read",
     "model_governance.approve",
+    "production_forecast.publish",
+    "production_notification.deliver",
 ]
 AuthorizationPurpose = Literal[
     "fixture_research",

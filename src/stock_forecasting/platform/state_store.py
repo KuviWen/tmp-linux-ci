@@ -423,16 +423,13 @@ class StateStore:
         predictions: list[dict[str, Any]],
         trace_id: str,
         idempotency_key: str,
+        authorization: dict[str, object],
     ) -> int:
         forecast_batch_id = str(publication["forecast_batch_id"])
         outbox_event_id = str(publication["outbox_event_id"])
         work_id = content_id("production_work", {"forecast_batch_id": forecast_batch_id})[-36:]
         health_assessment_id = content_id(
             "production_health",
-            {"forecast_batch_id": forecast_batch_id},
-        )[-36:]
-        audit_event_id = content_id(
-            "production_audit",
             {"forecast_batch_id": forecast_batch_id},
         )[-36:]
         publication_digest = _content_digest(
@@ -472,6 +469,22 @@ class StateStore:
                     raise ImmutableStateConflict("immutable_production_work_conflict")
                 return 1
 
+            existing_batch_trace = connection.execute(
+                select(outbox_events.c.trace_id).where(
+                    outbox_events.c.aggregate_id == forecast_batch_id,
+                    outbox_events.c.event_type == "production_forecast_publication.completed",
+                )
+            ).scalar_one_or_none()
+            if existing_batch_trace is not None:
+                raise ImmutableStateConflict("immutable_production_batch_conflict")
+
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization,
+                outcome="allowed",
+                trace_id=trace_id,
+            )
+
             connection.execute(
                 outbox_events.insert().values(
                     event_id=outbox_event_id,
@@ -487,6 +500,7 @@ class StateStore:
                         "forecast_batch_id": forecast_batch_id,
                         "prediction_count": len(predictions),
                         "publication_digest": publication_digest,
+                        "publication": publication,
                     },
                 )
             )
@@ -587,16 +601,6 @@ class StateStore:
                     trace_id=trace_id,
                 )
             )
-            connection.execute(
-                security_audit_events.insert().values(
-                    event_id=audit_event_id,
-                    action="production_forecast.publish",
-                    outcome="allowed",
-                    reason_code="production_publication_complete",
-                    trace_id=trace_id,
-                    authorization=None,
-                )
-            )
             for milestone in cast(list[dict[str, Any]], publication["milestones"]):
                 event_kind = str(milestone["event_kind"])
                 connection.execute(
@@ -653,9 +657,42 @@ class StateStore:
                         "event_kind": "notification",
                         "delivery_status": "pending",
                         "reason_code": "production_t_plus_120_breached",
+                        "source_policy_manifest_id": publication["source_policy_manifest_id"],
                     },
                 )
         return 1
+
+    def get_production_publication_replay(
+        self,
+        *,
+        idempotency_key: str,
+        trace_id: str,
+    ) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            work = (
+                connection.execute(
+                    select(work_attempts.c.trace_id, work_attempts.c.status).where(
+                        work_attempts.c.idempotency_key == idempotency_key
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if work is None:
+                return None
+            if work["trace_id"] != trace_id or work["status"] != "succeeded":
+                raise ImmutableStateConflict("immutable_production_work_conflict")
+            outbox_payload = connection.execute(
+                select(outbox_events.c.payload).where(
+                    outbox_events.c.trace_id == trace_id,
+                    outbox_events.c.event_type == "production_forecast_publication.completed",
+                )
+            ).scalar_one_or_none()
+        if not isinstance(outbox_payload, dict) or not isinstance(
+            outbox_payload.get("publication"), dict
+        ):
+            raise ImmutableStateConflict("immutable_production_work_conflict")
+        return deepcopy(cast(dict[str, Any], outbox_payload["publication"]))
 
     @staticmethod
     def _insert_production_operation_event(
@@ -707,6 +744,23 @@ class StateStore:
             ),
             None,
         )
+        notification_request = next(
+            (
+                deepcopy(cast(dict[str, Any], row["payload"]))
+                for row in rows
+                if row["event_kind"] == "notification"
+            ),
+            None,
+        )
+        notification_delivery = next(
+            (
+                deepcopy(cast(dict[str, Any], row["payload"]))
+                for row in reversed(rows)
+                if row["event_kind"] == "notification_delivery"
+            ),
+            None,
+        )
+        notification = notification_delivery or notification_request
         return {
             "forecast_batch_id": forecast_batch_id,
             "milestones": milestones,
@@ -716,11 +770,7 @@ class StateStore:
                 for row in rows
                 if row["event_kind"] == "incident"
             ],
-            "notifications": [
-                deepcopy(cast(dict[str, Any], row["payload"]))
-                for row in rows
-                if str(row["event_kind"]).startswith("notification")
-            ],
+            "notifications": [notification] if notification is not None else [],
         }
 
     def record_production_notification_delivery(
@@ -729,15 +779,13 @@ class StateStore:
         forecast_batch_id: str,
         delivered_at: str,
         payload: dict[str, Any],
+        authorization: dict[str, object],
+        trace_id: str,
     ) -> None:
         event_kind = "notification_delivery"
         event_id = content_id(
             "production_operation_event",
             {"forecast_batch_id": forecast_batch_id, "event_kind": event_kind},
-        )[-36:]
-        audit_event_id = content_id(
-            "production_notification_audit",
-            {"forecast_batch_id": forecast_batch_id},
         )[-36:]
         with self.engine.begin() as connection:
             pending = connection.execute(
@@ -764,15 +812,11 @@ class StateStore:
                 occurred_at=delivered_at,
                 payload=payload,
             )
-            connection.execute(
-                security_audit_events.insert().values(
-                    event_id=audit_event_id,
-                    action="production_notification.deliver",
-                    outcome=("allowed" if payload["delivery_status"] == "delivered" else "denied"),
-                    reason_code=payload["reason_code"],
-                    trace_id=forecast_batch_id,
-                    authorization=None,
-                )
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization,
+                outcome="allowed",
+                trace_id=trace_id,
             )
 
     def record_fixture_use_denial(
