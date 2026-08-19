@@ -94,32 +94,24 @@ class _AdvancingProductionDataSelectionResolver:
         return selection
 
 
-class _DelayedPublicationStore:
-    def __init__(self, *, clock: _MutableClock, elapsed: timedelta) -> None:
-        self._delegate = InMemoryProductionPublicationStore()
+class _DelayedProductionStateStore:
+    def __init__(
+        self,
+        *,
+        clock: _MutableClock,
+        elapsed: timedelta,
+        before_publish: Callable[[], None] | None = None,
+    ) -> None:
+        self.delegate = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
         self._clock = clock
         self._elapsed = elapsed
+        self._before_publish = before_publish
 
-    def replay(self, *, idempotency_key: str, trace_id: str) -> ForecastPublication | None:
-        return self._delegate.replay(idempotency_key=idempotency_key, trace_id=trace_id)
-
-    def publish(
-        self,
-        publication: ForecastPublication,
-        *,
-        trace_id: str,
-        idempotency_key: str,
-        authorization: dict[str, object],
-        persistence_clock: Callable[[], datetime],
-    ) -> ForecastPublication:
+    def publish_production_trace(self, **kwargs: Any) -> int:
         self._clock.advance(self._elapsed)
-        return self._delegate.publish(
-            publication,
-            trace_id=trace_id,
-            idempotency_key=idempotency_key,
-            authorization=authorization,
-            persistence_clock=persistence_clock,
-        )
+        if self._before_publish is not None:
+            self._before_publish()
+        return self.delegate.publish_production_trace(**kwargs)
 
     def record_authorization_decision(
         self,
@@ -128,9 +120,20 @@ class _DelayedPublicationStore:
         outcome: Literal["allowed", "denied"],
         trace_id: str,
     ) -> None:
-        self._delegate.record_authorization_decision(
+        self.delegate.record_authorization_decision(
             authorization=authorization,
             outcome=outcome,
+            trace_id=trace_id,
+        )
+
+    def get_production_publication_replay(
+        self,
+        *,
+        idempotency_key: str,
+        trace_id: str,
+    ) -> dict[str, Any] | None:
+        return self.delegate.get_production_publication_replay(
+            idempotency_key=idempotency_key,
             trace_id=trace_id,
         )
 
@@ -196,6 +199,28 @@ class _AuthorizationFirstResearchStore:
         return []
 
 
+class _AuthorizationFirstPublicationStore:
+    def __init__(self) -> None:
+        self.authorization_recorded = False
+        self.protected_read_attempted = False
+
+    def record_authorization_decision(
+        self,
+        *,
+        authorization: dict[str, object],
+        outcome: Literal["allowed", "denied"],
+        trace_id: str,
+    ) -> None:
+        del authorization, trace_id
+        self.authorization_recorded = outcome == "denied"
+
+    def replay(self, *, idempotency_key: str, trace_id: str) -> ForecastPublication | None:
+        del idempotency_key, trace_id
+        self.protected_read_attempted = True
+        assert self.authorization_recorded
+        return None
+
+
 def _listing_id(index: int, market: str = "XTAI") -> str:
     return str(uuid5(NAMESPACE_URL, f"ticket-10/{market.lower()}/listing/{index}"))
 
@@ -221,9 +246,11 @@ def _production_identity_and_policy(
             "backup_restore",
         }
     ),
+    catalog_publish: bool = True,
 ) -> tuple[LocalApiKeyIdentity, AuthorizationPolicy]:
     source_actions = actions - {"production_operations.read"}
     catalog_actions = actions & {
+        *({"production_forecast.publish"} if catalog_publish else set()),
         "production_notification.deliver",
         "production_operations.read",
     }
@@ -304,7 +331,12 @@ def _production_identity_and_policy(
 
 def test_deployed_production_entrypoint_fails_closed_without_data_selection() -> None:
     cutoff = datetime(2026, 8, 18, 6, 0, tzinfo=UTC)
-    application = build_test_application(observed_at=cutoff)
+    identity, policy = _production_identity_and_policy("sha256:source-policy", cutoff)
+    application = build_test_application(
+        observed_at=cutoff,
+        local_identity=identity,
+        authorization_policy_override=policy,
+    )
 
     with pytest.raises(ValueError, match="production_data_selection_unavailable"):
         application.run_production_eod(
@@ -318,6 +350,40 @@ def test_deployed_production_entrypoint_fails_closed_without_data_selection() ->
                 trace_id="trace-production-provider-unavailable",
             )
         )
+
+
+def test_production_forecast_authorizes_catalog_before_protected_replay_lookup() -> None:
+    cutoff = datetime(2026, 8, 18, 6, 0, tzinfo=UTC)
+    identity, policy = _production_identity_and_policy(
+        "sha256:source-policy",
+        cutoff,
+        catalog_publish=False,
+    )
+    publication_store = _AuthorizationFirstPublicationStore()
+
+    result = ForecastExecution(
+        assignment_resolver=cast(Any, object()),
+        data_selection_resolver=cast(Any, object()),
+        artifact_repository=cast(Any, object()),
+        publication_store=cast(Any, publication_store),
+        security_context=identity.context,
+        authorization_policy=policy,
+        clock=lambda: cutoff,
+    ).run(
+        ForecastRunCommand(
+            market="XTAI",
+            information_cutoff=cutoff,
+            stock_pool_version_id="sha256:p2-taiwan-stock-pool-v1",
+            model_family_id="taiwan-us-price-trend-v1",
+            execution_purpose="production",
+            idempotency_key="unauthorized-production-replay",
+            trace_id="trace-unauthorized-production-replay",
+        )
+    )
+
+    assert isinstance(result, PolicyDeniedOutcome)
+    assert publication_store.authorization_recorded is True
+    assert publication_store.protected_read_attempted is False
 
 
 def test_production_collection_authorizes_before_protected_state_lookup() -> None:
@@ -544,6 +610,10 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
         assert late_readiness.milestones[0].observed_at == information_cutoff + timedelta(minutes=1)
 
         persistence_clock = _MutableClock(information_cutoff)
+        delayed_state_store = _DelayedProductionStateStore(
+            clock=persistence_clock,
+            elapsed=timedelta(minutes=31),
+        )
         late_persistence = ForecastExecution(
             assignment_resolver=ServingAssignmentResolver(
                 lifecycle_store,
@@ -551,10 +621,7 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
             ),
             data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
             artifact_repository=artifacts,
-            publication_store=_DelayedPublicationStore(
-                clock=persistence_clock,
-                elapsed=timedelta(minutes=31),
-            ),
+            publication_store=SqlAlchemyProductionPublicationStore(delayed_state_store),
             security_context=production_identity.context,
             authorization_policy=production_policy,
             clock=persistence_clock,
@@ -574,6 +641,104 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
         assert late_persistence.slo_breached is True
         assert late_persistence.milestones[-1].status == "missed"
         assert late_persistence.completed_at == information_cutoff + timedelta(minutes=31)
+        assert (
+            delayed_state_store.delegate.get_outbox_event(late_persistence.outbox_event_id)[
+                "occurred_at"
+            ]
+            == late_persistence.completed_at.isoformat()
+        )
+
+        expiry_clock = _MutableClock(information_cutoff)
+        expired_state_store = _DelayedProductionStateStore(
+            clock=expiry_clock,
+            elapsed=timedelta(minutes=121),
+        )
+        expired_at_commit = ForecastExecution(
+            assignment_resolver=ServingAssignmentResolver(
+                lifecycle_store,
+                InMemoryAssignmentPinStore(),
+            ),
+            data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
+            artifact_repository=artifacts,
+            publication_store=SqlAlchemyProductionPublicationStore(expired_state_store),
+            security_context=production_identity.context,
+            authorization_policy=production_policy,
+            clock=expiry_clock,
+        ).run(
+            ForecastRunCommand(
+                market=market,
+                information_cutoff=information_cutoff,
+                stock_pool_version_id=f"sha256:p2-{market.lower()}-stock-pool-v1",
+                model_family_id="taiwan-us-price-trend-v1",
+                execution_purpose="production",
+                idempotency_key="xtai-expired-at-commit",
+                trace_id="trace-xtai-expired-at-commit",
+            )
+        )
+
+        assert isinstance(expired_at_commit, PolicyDeniedOutcome)
+        assert (
+            expired_state_store.delegate.list_research_records(execution_purpose="production") == []
+        )
+        expired_audit = expired_state_store.delegate.list_audit_events(
+            trace_id="trace-xtai-expired-at-commit"
+        )
+        assert expired_audit[-1]["reason_code"] == "identity_expired"
+
+        current_policy = [production_policy]
+
+        def withdraw_manifest_policy() -> None:
+            current_policy[0] = replace(
+                production_policy,
+                source_policies=tuple(
+                    item
+                    for item in production_policy.source_policies
+                    if item.dataset_id != selection.source_policy_manifest_id
+                ),
+                source_entitlements=tuple(
+                    item
+                    for item in production_policy.source_entitlements
+                    if item.dataset_id != selection.source_policy_manifest_id
+                ),
+            )
+
+        withdrawn_state_store = _DelayedProductionStateStore(
+            clock=_MutableClock(information_cutoff),
+            elapsed=timedelta(),
+            before_publish=withdraw_manifest_policy,
+        )
+        withdrawn_at_commit = ForecastExecution(
+            assignment_resolver=ServingAssignmentResolver(
+                lifecycle_store,
+                InMemoryAssignmentPinStore(),
+            ),
+            data_selection_resolver=_FixedProductionDataSelectionResolver(selection),
+            artifact_repository=artifacts,
+            publication_store=SqlAlchemyProductionPublicationStore(withdrawn_state_store),
+            security_context=production_identity.context,
+            authorization_policy=lambda: current_policy[0],
+            clock=lambda: information_cutoff,
+        ).run(
+            ForecastRunCommand(
+                market=market,
+                information_cutoff=information_cutoff,
+                stock_pool_version_id=f"sha256:p2-{market.lower()}-stock-pool-v1",
+                model_family_id="taiwan-us-price-trend-v1",
+                execution_purpose="production",
+                idempotency_key="xtai-withdrawn-at-commit",
+                trace_id="trace-xtai-withdrawn-at-commit",
+            )
+        )
+
+        assert isinstance(withdrawn_at_commit, PolicyDeniedOutcome)
+        assert (
+            withdrawn_state_store.delegate.list_research_records(execution_purpose="production")
+            == []
+        )
+        withdrawn_audit = withdrawn_state_store.delegate.list_audit_events(
+            trace_id="trace-xtai-withdrawn-at-commit"
+        )
+        assert withdrawn_audit[-1]["reason_code"] == "source_policy_unknown"
 
     other_market: Literal["XTAI", "XNAS"] = "XNAS" if market == "XTAI" else "XTAI"
     mixed_market_selection = ResolvedProductionDataSelection.create(
@@ -608,6 +773,57 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
                 trace_id=f"trace-{market.lower()}-mixed-market",
             )
         )
+
+    blank_lineage_selection = ResolvedProductionDataSelection.create(
+        market=market,
+        information_cutoff=information_cutoff,
+        stock_pool_version_id=f"sha256:p2-{market.lower()}-stock-pool-v1",
+        source_policy_manifest_id=artifact.manifest_ids[1],
+        source_policy_status="active",
+        listings=(replace(listings[0], dataset_version_id=""), *listings[1:]),
+    )
+    unstable_reason_selection = ResolvedProductionDataSelection.create(
+        market=market,
+        information_cutoff=information_cutoff,
+        stock_pool_version_id=f"sha256:p2-{market.lower()}-stock-pool-v1",
+        source_policy_manifest_id=artifact.manifest_ids[1],
+        source_policy_status="active",
+        listings=(
+            replace(
+                listings[0],
+                support_status="unavailable",
+                unavailable_reason="provider says nope",
+            ),
+            *listings[1:],
+        ),
+    )
+    for invalid_selection, suffix in (
+        (blank_lineage_selection, "blank-selection-lineage"),
+        (unstable_reason_selection, "unstable-unavailable-reason"),
+    ):
+        with pytest.raises(ValueError, match="production_data_selection_invalid"):
+            ForecastExecution(
+                assignment_resolver=ServingAssignmentResolver(
+                    lifecycle_store,
+                    InMemoryAssignmentPinStore(),
+                ),
+                data_selection_resolver=_FixedProductionDataSelectionResolver(invalid_selection),
+                artifact_repository=artifacts,
+                publication_store=InMemoryProductionPublicationStore(),
+                security_context=production_identity.context,
+                authorization_policy=production_policy,
+                clock=lambda: information_cutoff,
+            ).run(
+                ForecastRunCommand(
+                    market=market,
+                    information_cutoff=information_cutoff,
+                    stock_pool_version_id=f"sha256:p2-{market.lower()}-stock-pool-v1",
+                    model_family_id="taiwan-us-price-trend-v1",
+                    execution_purpose="production",
+                    idempotency_key=f"{market.lower()}-{suffix}",
+                    trace_id=f"trace-{market.lower()}-{suffix}",
+                )
+            )
 
     stale_selection = replace(selection, data_selection_id="sha256:stale-selection-id")
     stale_selection_execution = ForecastExecution(
@@ -651,6 +867,7 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
             trace_id="trace-invalid-probability",
             idempotency_key="invalid-probability",
             persistence_clock=lambda: invalid_publication.completed_at,
+            authorize_at_persistence=lambda _at: {},
         )
 
     assert invalid_store.get_batch(publication.forecast_batch_id) is None
@@ -669,6 +886,7 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
             trace_id="trace-invalid-lineage",
             idempotency_key="invalid-lineage",
             persistence_clock=lambda: publication.completed_at,
+            authorize_at_persistence=lambda _at: {},
         )
 
     def assert_cross_artifact_lineage_rejected(corrupted: ForecastPublication, key: str) -> None:
@@ -681,6 +899,7 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
                 trace_id=f"trace-{key}",
                 idempotency_key=key,
                 persistence_clock=lambda: corrupted.completed_at,
+                authorize_at_persistence=lambda _at: {},
             )
 
     assert_cross_artifact_lineage_rejected(
@@ -894,6 +1113,7 @@ def test_late_and_non_observed_inputs_are_unavailable_without_losing_successes()
     state_store = StateStore("sqlite+pysqlite:///:memory:", create_schema=True)
     observed_times = iter(
         (
+            cutoff,
             cutoff,
             cutoff + timedelta(minutes=5),
             cutoff + timedelta(minutes=10),
@@ -1426,8 +1646,8 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
             conflicting_replay,
             trace_id="P2-TRACE-EOD-01",
             idempotency_key="xtai-2026-08-18-sql",
-            authorization={},
             persistence_clock=lambda: conflicting_replay.completed_at,
+            authorize_at_persistence=lambda _at: {},
         )
     assert len(state_store.list_prediction_records(trace_id="P2-TRACE-EOD-01")) == 30
 

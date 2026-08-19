@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, cast
 
@@ -423,7 +424,7 @@ class StateStore:
         predictions: list[dict[str, Any]],
         trace_id: str,
         idempotency_key: str,
-        authorization: dict[str, object],
+        finalize_publication: Callable[[], tuple[dict[str, Any], dict[str, object]]],
     ) -> int:
         forecast_batch_id = str(publication["forecast_batch_id"])
         outbox_event_id = str(publication["outbox_event_id"])
@@ -432,16 +433,7 @@ class StateStore:
             "production_health",
             {"forecast_batch_id": forecast_batch_id},
         )[-36:]
-        publication_digest = _content_digest(
-            {
-                "publication": publication,
-                "research_records": research_record_payloads,
-                "artifacts": artifacts,
-                "predictions": predictions,
-            }
-        )
         has_unavailable = any(item["prediction_status"] == "unavailable" for item in predictions)
-        slo_breached = bool(publication["slo_breached"])
         with self.engine.begin() as connection:
             existing_work = (
                 connection.execute(
@@ -456,6 +448,15 @@ class StateStore:
             if existing_work is not None:
                 if existing_work["trace_id"] != trace_id or existing_work["status"] != "succeeded":
                     raise ImmutableStateConflict("immutable_production_work_conflict")
+                publication, _authorization = finalize_publication()
+                publication_digest = _content_digest(
+                    {
+                        "publication": publication,
+                        "research_records": research_record_payloads,
+                        "artifacts": artifacts,
+                        "predictions": predictions,
+                    }
+                )
                 existing_payload = connection.execute(
                     select(outbox_events.c.payload).where(
                         outbox_events.c.trace_id == trace_id,
@@ -478,39 +479,6 @@ class StateStore:
             if existing_batch_trace is not None:
                 raise ImmutableStateConflict("immutable_production_batch_conflict")
 
-            self._insert_authorization_decision(
-                connection,
-                authorization=authorization,
-                outcome="allowed",
-                trace_id=trace_id,
-            )
-
-            connection.execute(
-                outbox_events.insert().values(
-                    event_id=outbox_event_id,
-                    event_type="production_forecast_publication.completed",
-                    schema_version="1.0.0",
-                    aggregate_id=forecast_batch_id,
-                    aggregate_version=1,
-                    occurred_at=str(publication["completed_at"]),
-                    producer="forecast_execution",
-                    trace_id=trace_id,
-                    payload={
-                        "record_ids": [item["record_id"] for item in research_record_payloads],
-                        "forecast_batch_id": forecast_batch_id,
-                        "prediction_count": len(predictions),
-                        "publication_digest": publication_digest,
-                        "publication": publication,
-                    },
-                )
-            )
-            connection.execute(
-                outbox_dispatch.insert().values(
-                    event_id=outbox_event_id,
-                    status="pending",
-                    fencing_token=0,
-                )
-            )
             for artifact in artifacts:
                 existing_artifact = (
                     connection.execute(
@@ -575,6 +543,48 @@ class StateStore:
                         stale=True,
                     )
                 )
+            publication, authorization = finalize_publication()
+            publication_digest = _content_digest(
+                {
+                    "publication": publication,
+                    "research_records": research_record_payloads,
+                    "artifacts": artifacts,
+                    "predictions": predictions,
+                }
+            )
+            slo_breached = bool(publication["slo_breached"])
+            self._insert_authorization_decision(
+                connection,
+                authorization=authorization,
+                outcome="allowed",
+                trace_id=trace_id,
+            )
+            connection.execute(
+                outbox_events.insert().values(
+                    event_id=outbox_event_id,
+                    event_type="production_forecast_publication.completed",
+                    schema_version="1.0.0",
+                    aggregate_id=forecast_batch_id,
+                    aggregate_version=1,
+                    occurred_at=str(publication["completed_at"]),
+                    producer="forecast_execution",
+                    trace_id=trace_id,
+                    payload={
+                        "record_ids": [item["record_id"] for item in research_record_payloads],
+                        "forecast_batch_id": forecast_batch_id,
+                        "prediction_count": len(predictions),
+                        "publication_digest": publication_digest,
+                        "publication": publication,
+                    },
+                )
+            )
+            connection.execute(
+                outbox_dispatch.insert().values(
+                    event_id=outbox_event_id,
+                    status="pending",
+                    fencing_token=0,
+                )
+            )
             connection.execute(
                 work_attempts.insert().values(
                     work_id=work_id,

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, get_args
 
 UnavailableCode = Literal[
     "missing_anchor_price",
@@ -7,7 +7,15 @@ UnavailableCode = Literal[
     "calendar_unresolved",
     "post_cutoff_evidence",
     "source_withdrawn",
+    "late_after_information_cutoff",
+    "late_after_feature_freeze",
+    "evidence_not_platform_observed",
+    "data_support_unavailable",
+    "source_policy_withdrawn",
+    "source_policy_assignment_mismatch",
+    "feature_schema_mismatch",
 ]
+UNAVAILABLE_REASON_CODES: frozenset[str] = frozenset(get_args(UnavailableCode))
 
 
 @dataclass(frozen=True)

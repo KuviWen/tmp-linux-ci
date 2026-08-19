@@ -1739,6 +1739,7 @@ def build_pending_rights_operator_authorization_policy(
             frozenset(
                 {
                     "research_prediction.read",
+                    "production_forecast.publish",
                     "production_notification.deliver",
                     "production_operations.read",
                 }
@@ -1786,7 +1787,7 @@ def build_pending_rights_operator_authorization_policy(
         if not resource_actions:
             continue
         resource_uses: frozenset[SourceUseRight] = (
-            frozenset({"internal_display"})
+            frozenset({"internal_display", "model"})
             if dataset_id == PRODUCTION_RESEARCH_CATALOG_DATASET_ID
             else frozenset()
         )
