@@ -15,6 +15,7 @@ class EventCompatibility:
         return cls(
             accepted_versions={
                 "forecast_publication.completed": frozenset({"1.0.0"}),
+                "production_forecast_publication.completed": frozenset({"1.0.0"}),
             }
         )
 

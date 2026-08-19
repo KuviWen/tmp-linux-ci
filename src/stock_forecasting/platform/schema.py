@@ -162,3 +162,35 @@ model_lifecycle_events = Table(
         name="uq_model_lifecycle_family_version",
     ),
 )
+
+production_serving_assignment_pins = Table(
+    "serving_production_assignment_pins",
+    metadata,
+    Column("pin_id", String(72), primary_key=True),
+    Column("model_family_id", String(128), nullable=False),
+    Column("forecast_batch_id", String(36), nullable=False),
+    Column("market", String(8), nullable=False),
+    Column("payload", JSON, nullable=False),
+    UniqueConstraint(
+        "model_family_id",
+        "forecast_batch_id",
+        "market",
+        name="uq_production_assignment_pin_batch_market",
+    ),
+)
+
+production_operations_events = Table(
+    "ops_production_forecast_events",
+    metadata,
+    Column("sequence", Integer, primary_key=True, autoincrement=True),
+    Column("event_id", String(36), nullable=False, unique=True),
+    Column("forecast_batch_id", String(36), nullable=False),
+    Column("event_kind", String(64), nullable=False),
+    Column("occurred_at", String(32), nullable=False),
+    Column("payload", JSON, nullable=False),
+    UniqueConstraint(
+        "forecast_batch_id",
+        "event_kind",
+        name="uq_production_forecast_event_kind",
+    ),
+)

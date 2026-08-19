@@ -62,6 +62,8 @@ from stock_forecasting.model_governance import (
     ObjectEvaluationReportRepository,
     ObjectGateEvidenceRepository,
     ObjectGatePolicyRepository,
+    ServingAssignmentResolver,
+    SqlAlchemyAssignmentPinStore,
     SqlAlchemyLifecycleStore,
 )
 from stock_forecasting.operations_control import OperationsControl
@@ -76,6 +78,14 @@ from stock_forecasting.outbox import (
 from stock_forecasting.platform.object_repository import FilesystemObjectRepository
 from stock_forecasting.platform.state_store import StateStore
 from stock_forecasting.price_eligibility_query import PriceEligibilityQuery
+from stock_forecasting.production_eod import (
+    ForecastExecution,
+    ForecastPublication,
+    ForecastRunCommand,
+    ProductionDataSelectionResolver,
+    SqlAlchemyProductionPublicationStore,
+    UnavailableProductionDataSelectionResolver,
+)
 from stock_forecasting.provider_http import (
     UrllibProviderHttpTransport as ProviderUrllibHttpTransport,
 )
@@ -116,6 +126,7 @@ class Application:
         secret_provider: SecretProvider | None = None,
         source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
         formal_qualification_verifier: FormalQualificationVerifier | None = None,
+        production_data_selection_resolver: ProductionDataSelectionResolver | None = None,
     ) -> None:
         self.state_store = StateStore(database_url, create_schema=create_schema)
         self.object_repository = FilesystemObjectRepository(object_root)
@@ -150,6 +161,9 @@ class Application:
             self.forecast_lab = ForecastLab(
                 historical_claim_verifier=historical_claim_verifier,
             )
+        self.model_artifact_repository = ObjectCandidateArtifactRepository(
+            lambda: self.governance_object_repository
+        )
         self.model_lifecycle = ModelLifecycle(
             self.model_lifecycle_store,
             policy_repository=ObjectGatePolicyRepository(lambda: self.governance_object_repository),
@@ -159,9 +173,7 @@ class Application:
             evaluation_report_repository=ObjectEvaluationReportRepository(
                 lambda: self.governance_object_repository
             ),
-            candidate_artifact_repository=ObjectCandidateArtifactRepository(
-                lambda: self.governance_object_repository
-            ),
+            candidate_artifact_repository=self.model_artifact_repository,
             approval_policy=self._model_approval_policy,
             formal_qualification_verifier=(
                 formal_qualification_verifier or self.forecast_lab.qualification_verifier
@@ -282,6 +294,18 @@ class Application:
         self._fixture_use = FixtureUseWorkflow(
             state_store=self.state_store,
         )
+        self._production_eod = ForecastExecution(
+            assignment_resolver=ServingAssignmentResolver(
+                self.model_lifecycle_store,
+                SqlAlchemyAssignmentPinStore(self.state_store.engine),
+            ),
+            data_selection_resolver=(
+                production_data_selection_resolver or UnavailableProductionDataSelectionResolver()
+            ),
+            artifact_repository=self.model_artifact_repository,
+            publication_store=SqlAlchemyProductionPublicationStore(self.state_store),
+            clock=lambda: self._fixed_security_time or datetime.now(UTC),
+        )
 
     @property
     def governance_object_repository(self) -> FilesystemObjectRepository:
@@ -314,6 +338,9 @@ class Application:
         self, command: FixtureEodCommand
     ) -> FixtureEodOutcome | PolicyDeniedOutcome:
         return self._fixture_eod.execute(command)
+
+    def run_production_eod(self, command: ForecastRunCommand) -> ForecastPublication:
+        return self._production_eod.run(command)
 
     def build_alpaca_price_adapter(
         self,
@@ -486,6 +513,7 @@ def build_test_application(
     secret_provider: SecretProvider | None = None,
     source_credential_validators: Mapping[str, SourceCredentialValidator] | None = None,
     formal_qualification_verifier: FormalQualificationVerifier | None = None,
+    production_data_selection_resolver: ProductionDataSelectionResolver | None = None,
 ) -> Application:
     root = object_root or Path(mkdtemp(prefix="stock-forecasting-objects-"))
     resolved_database_url = database_url or "sqlite+pysqlite:///:memory:"
@@ -525,6 +553,7 @@ def build_test_application(
         secret_provider=secret_provider,
         source_credential_validators=source_credential_validators,
         formal_qualification_verifier=formal_qualification_verifier,
+        production_data_selection_resolver=production_data_selection_resolver,
     )
 
 

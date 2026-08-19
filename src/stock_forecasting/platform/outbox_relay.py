@@ -702,11 +702,21 @@ class OutboxRelay:
                 raise OutOfOrderEvent("out_of_order_aggregate_version")
 
             if consumer_name == "research_projection":
-                connection.execute(
-                    research_projection_status.update()
-                    .where(research_projection_status.c.record_id == payload["record_id"])
-                    .values(evidence_projection_version=aggregate_version, stale=False)
-                )
+                record_ids = payload.get("record_ids")
+                if isinstance(record_ids, list) and all(
+                    isinstance(record_id, str) for record_id in record_ids
+                ):
+                    connection.execute(
+                        research_projection_status.update()
+                        .where(research_projection_status.c.record_id.in_(record_ids))
+                        .values(evidence_projection_version=aggregate_version, stale=False)
+                    )
+                else:
+                    connection.execute(
+                        research_projection_status.update()
+                        .where(research_projection_status.c.record_id == payload["record_id"])
+                        .values(evidence_projection_version=aggregate_version, stale=False)
+                    )
             else:
                 connection.execute(
                     operations_prediction_projections.insert().values(

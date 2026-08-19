@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from stock_forecasting.authorization import (
@@ -33,6 +33,7 @@ class ResearchQuery:
         self,
         dataset_id: str,
         *,
+        purpose: Literal["fixture_research", "price_research"],
         trace_id: str,
         security_context: SecurityContext,
     ) -> PolicyDeniedOutcome | None:
@@ -41,7 +42,7 @@ class ResearchQuery:
             OperationIntent(
                 action="research_prediction.read",
                 dataset_id=dataset_id,
-                purpose="fixture_research",
+                purpose=purpose,
                 environment=security_context.environment,
                 resource_state="active",
                 evaluated_at=self._authorization_time or datetime.now(UTC),
@@ -63,6 +64,7 @@ class ResearchQuery:
         *,
         listing_id: str,
         information_cutoff: datetime,
+        execution_purpose: str = "fixture",
         fixture_scenario: str = "normal",
         trace_id: str | None = None,
         security_context: SecurityContext | None = None,
@@ -73,6 +75,7 @@ class ResearchQuery:
         authorization_dataset_id = self._state_store.get_listing_authorization_dataset(
             listing_id=listing_id,
             information_cutoff=expected_cutoff,
+            execution_purpose=execution_purpose,
             fixture_scenario=fixture_scenario,
         )
         datasets = (
@@ -83,6 +86,9 @@ class ResearchQuery:
         for dataset_id in datasets:
             denial = self._authorize_dataset(
                 dataset_id,
+                purpose=(
+                    "price_research" if execution_purpose == "production" else "fixture_research"
+                ),
                 trace_id=resolved_trace_id,
                 security_context=resolved_security_context,
             )
@@ -91,6 +97,7 @@ class ResearchQuery:
         record = self._state_store.get_listing_research(
             listing_id=listing_id,
             information_cutoff=expected_cutoff,
+            execution_purpose=execution_purpose,
             fixture_scenario=fixture_scenario,
         )
         if record is None:
@@ -105,12 +112,54 @@ class ResearchQuery:
         security_context: SecurityContext | None = None,
     ) -> list[dict[str, Any]] | PolicyDeniedOutcome:
         resolved_trace_id = trace_id or f"trace-research-{uuid4()}"
-        for market in ("XTAI", "XNAS"):
+        records = self._state_store.list_research_records(execution_purpose=execution_purpose)
+        formal_records_present = execution_purpose == "production" and bool(records)
+        datasets = (
+            tuple(
+                sorted({str(record["lineage"]["source_policy_manifest_id"]) for record in records})
+            )
+            if formal_records_present
+            else tuple(fixture_dataset_id(market) for market in ("XTAI", "XNAS"))
+        )
+        for dataset_id in datasets:
             denial = self._authorize_dataset(
-                fixture_dataset_id(market),
+                dataset_id,
+                purpose=("price_research" if formal_records_present else "fixture_research"),
                 trace_id=resolved_trace_id,
                 security_context=security_context or self._security_context,
             )
             if denial is not None:
                 return denial
-        return self._state_store.list_research_records(execution_purpose=execution_purpose)
+        return records
+
+    def list_prediction_history(
+        self,
+        *,
+        listing_id: str,
+        execution_purpose: str,
+        trace_id: str | None = None,
+        security_context: SecurityContext | None = None,
+    ) -> list[dict[str, Any]] | PolicyDeniedOutcome:
+        resolved_trace_id = trace_id or f"trace-research-history-{uuid4()}"
+        records = self._state_store.list_listing_research_history(
+            listing_id=listing_id,
+            execution_purpose=execution_purpose,
+        )
+        formal_records_present = execution_purpose == "production" and bool(records)
+        datasets = (
+            tuple(
+                sorted({str(record["lineage"]["source_policy_manifest_id"]) for record in records})
+            )
+            if formal_records_present
+            else tuple(fixture_dataset_id(market) for market in ("XTAI", "XNAS"))
+        )
+        for dataset_id in datasets:
+            denial = self._authorize_dataset(
+                dataset_id,
+                purpose=("price_research" if formal_records_present else "fixture_research"),
+                trace_id=resolved_trace_id,
+                security_context=security_context or self._security_context,
+            )
+            if denial is not None:
+                return denial
+        return records

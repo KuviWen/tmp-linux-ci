@@ -37,6 +37,7 @@ from stock_forecasting.platform.schema import (
     health_assessments,
     metadata,
     price_research_eligibility,
+    production_operations_events,
     production_prediction_records,
     research_records,
     security_audit_events,
@@ -399,17 +400,381 @@ class StateStore:
         *,
         listing_id: str,
         information_cutoff: str,
-        fixture_scenario: str,
+        execution_purpose: str = "fixture",
+        fixture_scenario: str = "normal",
     ) -> str | None:
         with self.engine.connect() as connection:
             dataset_id = connection.execute(
                 select(research_records.c.authorization_dataset_id).where(
                     research_records.c.listing_id == listing_id,
                     research_records.c.information_cutoff == information_cutoff,
+                    research_records.c.execution_purpose == execution_purpose,
                     research_records.c.fixture_scenario == fixture_scenario,
                 )
             ).scalar_one_or_none()
         return cast(str | None, dataset_id)
+
+    def publish_production_trace(
+        self,
+        *,
+        publication: dict[str, Any],
+        research_record_payloads: list[dict[str, Any]],
+        artifacts: list[dict[str, Any]],
+        predictions: list[dict[str, Any]],
+        trace_id: str,
+        idempotency_key: str,
+    ) -> int:
+        forecast_batch_id = str(publication["forecast_batch_id"])
+        outbox_event_id = str(publication["outbox_event_id"])
+        information_cutoff = str(publication["information_cutoff"])
+        work_id = content_id("production_work", {"forecast_batch_id": forecast_batch_id})[-36:]
+        health_assessment_id = content_id(
+            "production_health",
+            {"forecast_batch_id": forecast_batch_id},
+        )[-36:]
+        audit_event_id = content_id(
+            "production_audit",
+            {"forecast_batch_id": forecast_batch_id},
+        )[-36:]
+        publication_digest = _content_digest(
+            {
+                "publication": publication,
+                "research_records": research_record_payloads,
+                "artifacts": artifacts,
+                "predictions": predictions,
+            }
+        )
+        has_unavailable = any(item["prediction_status"] == "unavailable" for item in predictions)
+        slo_breached = bool(publication["slo_breached"])
+        with self.engine.begin() as connection:
+            existing_work = (
+                connection.execute(
+                    select(
+                        work_attempts.c.trace_id,
+                        work_attempts.c.status,
+                    ).where(work_attempts.c.idempotency_key == idempotency_key)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if existing_work is not None:
+                if existing_work["trace_id"] != trace_id or existing_work["status"] != "succeeded":
+                    raise ImmutableStateConflict("immutable_production_work_conflict")
+                existing_payload = connection.execute(
+                    select(outbox_events.c.payload).where(
+                        outbox_events.c.trace_id == trace_id,
+                        outbox_events.c.event_type == "production_forecast_publication.completed",
+                    )
+                ).scalar_one_or_none()
+                if (
+                    not isinstance(existing_payload, dict)
+                    or existing_payload.get("publication_digest") != publication_digest
+                ):
+                    raise ImmutableStateConflict("immutable_production_work_conflict")
+                return 1
+
+            connection.execute(
+                outbox_events.insert().values(
+                    event_id=outbox_event_id,
+                    event_type="production_forecast_publication.completed",
+                    schema_version="1.0.0",
+                    aggregate_id=forecast_batch_id,
+                    aggregate_version=1,
+                    occurred_at=information_cutoff,
+                    producer="forecast_execution",
+                    trace_id=trace_id,
+                    payload={
+                        "record_ids": [item["record_id"] for item in research_record_payloads],
+                        "forecast_batch_id": forecast_batch_id,
+                        "prediction_count": len(predictions),
+                        "publication_digest": publication_digest,
+                    },
+                )
+            )
+            connection.execute(
+                outbox_dispatch.insert().values(
+                    event_id=outbox_event_id,
+                    status="pending",
+                    fencing_token=0,
+                )
+            )
+            for artifact in artifacts:
+                existing_artifact = (
+                    connection.execute(
+                        select(
+                            canonical_artifacts.c.artifact_kind,
+                            canonical_artifacts.c.execution_purpose,
+                            canonical_artifacts.c.payload,
+                        ).where(canonical_artifacts.c.artifact_id == artifact["artifact_id"])
+                    )
+                    .mappings()
+                    .one_or_none()
+                )
+                if existing_artifact is None:
+                    connection.execute(
+                        canonical_artifacts.insert().values(
+                            artifact_id=artifact["artifact_id"],
+                            artifact_kind=artifact["artifact_kind"],
+                            execution_purpose="production",
+                            payload=artifact["payload"],
+                        )
+                    )
+                elif (
+                    existing_artifact["artifact_kind"] != artifact["artifact_kind"]
+                    or existing_artifact["execution_purpose"] != "production"
+                    or existing_artifact["payload"] != artifact["payload"]
+                ):
+                    raise ImmutableStateConflict("immutable_artifact_conflict")
+                connection.execute(
+                    trace_artifact_refs.insert().values(
+                        trace_id=trace_id,
+                        artifact_id=artifact["artifact_id"],
+                    )
+                )
+            for prediction in predictions:
+                connection.execute(
+                    production_prediction_records.insert().values(
+                        prediction_id=prediction["prediction_id"],
+                        trace_id=trace_id,
+                        listing_id=prediction["listing_id"],
+                        horizon_sessions=prediction["horizon_sessions"],
+                        payload=prediction,
+                    )
+                )
+            for record in research_record_payloads:
+                payload = {key: value for key, value in record.items() if key != "record_id"}
+                connection.execute(
+                    research_records.insert().values(
+                        record_id=record["record_id"],
+                        listing_id=record["listing_id"],
+                        authorization_dataset_id=record["lineage"]["source_policy_manifest_id"],
+                        information_cutoff=record["information_cutoff"],
+                        execution_purpose="production",
+                        fixture_scenario="normal",
+                        payload=payload,
+                    )
+                )
+                connection.execute(
+                    research_projection_status.insert().values(
+                        record_id=record["record_id"],
+                        core_projection_version=1,
+                        evidence_projection_version=0,
+                        stale=True,
+                    )
+                )
+            connection.execute(
+                work_attempts.insert().values(
+                    work_id=work_id,
+                    operation="production_eod",
+                    status="succeeded",
+                    execution_purpose="production",
+                    trace_id=trace_id,
+                    idempotency_key=idempotency_key,
+                    attempt_count=1,
+                )
+            )
+            connection.execute(
+                health_assessments.insert().values(
+                    assessment_id=health_assessment_id,
+                    scope=f"production_eod:{publication['market']}",
+                    status="degraded" if has_unavailable or slo_breached else "healthy",
+                    reason_code=(
+                        "production_t_plus_120_breached"
+                        if slo_breached
+                        else "production_partial_unavailable"
+                        if has_unavailable
+                        else "production_publication_complete"
+                    ),
+                    trace_id=trace_id,
+                )
+            )
+            connection.execute(
+                security_audit_events.insert().values(
+                    event_id=audit_event_id,
+                    action="production_forecast.publish",
+                    outcome="allowed",
+                    reason_code="production_publication_complete",
+                    trace_id=trace_id,
+                    authorization=None,
+                )
+            )
+            for milestone in cast(list[dict[str, Any]], publication["milestones"]):
+                event_kind = str(milestone["event_kind"])
+                connection.execute(
+                    production_operations_events.insert().values(
+                        event_id=content_id(
+                            "production_operation_event",
+                            {
+                                "forecast_batch_id": forecast_batch_id,
+                                "event_kind": event_kind,
+                            },
+                        )[-36:],
+                        forecast_batch_id=forecast_batch_id,
+                        event_kind=event_kind,
+                        occurred_at=milestone["observed_at"],
+                        payload=milestone,
+                    )
+                )
+            source_health_payload = {
+                "event_kind": "source_health",
+                "status": "degraded" if has_unavailable else "healthy",
+                "reason_code": (
+                    "production_partial_unavailable"
+                    if has_unavailable
+                    else "production_source_inputs_healthy"
+                ),
+            }
+            self._insert_production_operation_event(
+                connection,
+                forecast_batch_id=forecast_batch_id,
+                event_kind="source_health",
+                occurred_at=str(publication["completed_at"]),
+                payload=source_health_payload,
+            )
+            if slo_breached:
+                incident_payload = {
+                    "event_kind": "incident",
+                    "status": "open",
+                    "severity": "SEV3",
+                    "reason_code": "production_t_plus_120_breached",
+                }
+                self._insert_production_operation_event(
+                    connection,
+                    forecast_batch_id=forecast_batch_id,
+                    event_kind="incident",
+                    occurred_at=str(publication["completed_at"]),
+                    payload=incident_payload,
+                )
+                self._insert_production_operation_event(
+                    connection,
+                    forecast_batch_id=forecast_batch_id,
+                    event_kind="notification",
+                    occurred_at=str(publication["completed_at"]),
+                    payload={
+                        "event_kind": "notification",
+                        "delivery_status": "pending",
+                        "reason_code": "production_t_plus_120_breached",
+                    },
+                )
+        return 1
+
+    @staticmethod
+    def _insert_production_operation_event(
+        connection: Connection,
+        *,
+        forecast_batch_id: str,
+        event_kind: str,
+        occurred_at: str,
+        payload: dict[str, Any],
+    ) -> None:
+        connection.execute(
+            production_operations_events.insert().values(
+                event_id=content_id(
+                    "production_operation_event",
+                    {
+                        "forecast_batch_id": forecast_batch_id,
+                        "event_kind": event_kind,
+                    },
+                )[-36:],
+                forecast_batch_id=forecast_batch_id,
+                event_kind=event_kind,
+                occurred_at=occurred_at,
+                payload=payload,
+            )
+        )
+
+    def list_production_operations(self, forecast_batch_id: str) -> dict[str, Any]:
+        with self.engine.connect() as connection:
+            rows = list(
+                connection.execute(
+                    select(
+                        production_operations_events.c.event_kind,
+                        production_operations_events.c.payload,
+                    )
+                    .where(production_operations_events.c.forecast_batch_id == forecast_batch_id)
+                    .order_by(production_operations_events.c.sequence)
+                ).mappings()
+            )
+        milestones = [
+            deepcopy(cast(dict[str, Any], row["payload"]))
+            for row in rows
+            if str(row["event_kind"]).startswith("t_plus_")
+        ]
+        source_health = next(
+            (
+                deepcopy(cast(dict[str, Any], row["payload"]))
+                for row in rows
+                if row["event_kind"] == "source_health"
+            ),
+            None,
+        )
+        return {
+            "forecast_batch_id": forecast_batch_id,
+            "milestones": milestones,
+            "source_health": source_health,
+            "incidents": [
+                deepcopy(cast(dict[str, Any], row["payload"]))
+                for row in rows
+                if row["event_kind"] == "incident"
+            ],
+            "notifications": [
+                deepcopy(cast(dict[str, Any], row["payload"]))
+                for row in rows
+                if str(row["event_kind"]).startswith("notification")
+            ],
+        }
+
+    def record_production_notification_delivery(
+        self,
+        *,
+        forecast_batch_id: str,
+        delivered_at: str,
+        payload: dict[str, Any],
+    ) -> None:
+        event_kind = "notification_delivery"
+        event_id = content_id(
+            "production_operation_event",
+            {"forecast_batch_id": forecast_batch_id, "event_kind": event_kind},
+        )[-36:]
+        audit_event_id = content_id(
+            "production_notification_audit",
+            {"forecast_batch_id": forecast_batch_id},
+        )[-36:]
+        with self.engine.begin() as connection:
+            pending = connection.execute(
+                select(production_operations_events.c.event_id).where(
+                    production_operations_events.c.forecast_batch_id == forecast_batch_id,
+                    production_operations_events.c.event_kind == "notification",
+                )
+            ).scalar_one_or_none()
+            if pending is None:
+                raise ImmutableStateConflict("production_notification_not_pending")
+            existing = connection.execute(
+                select(production_operations_events.c.payload).where(
+                    production_operations_events.c.event_id == event_id
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                if existing != payload:
+                    raise ImmutableStateConflict("immutable_notification_delivery_conflict")
+                return
+            self._insert_production_operation_event(
+                connection,
+                forecast_batch_id=forecast_batch_id,
+                event_kind=event_kind,
+                occurred_at=delivered_at,
+                payload=payload,
+            )
+            connection.execute(
+                security_audit_events.insert().values(
+                    event_id=audit_event_id,
+                    action="production_notification.deliver",
+                    outcome=("allowed" if payload["delivery_status"] == "delivered" else "denied"),
+                    reason_code=payload["reason_code"],
+                    trace_id=forecast_batch_id,
+                    authorization=None,
+                )
+            )
 
     def record_fixture_use_denial(
         self,
@@ -1602,6 +1967,7 @@ class StateStore:
         *,
         listing_id: str,
         information_cutoff: str,
+        execution_purpose: str = "fixture",
         fixture_scenario: str = "normal",
     ) -> dict[str, Any] | None:
         with self.engine.connect() as connection:
@@ -1622,6 +1988,7 @@ class StateStore:
                     .where(
                         research_records.c.listing_id == listing_id,
                         research_records.c.information_cutoff == information_cutoff,
+                        research_records.c.execution_purpose == execution_purpose,
                         research_records.c.fixture_scenario == fixture_scenario,
                     )
                 )
@@ -1668,17 +2035,66 @@ class StateStore:
                 records.append(record)
             return records
 
+    def list_listing_research_history(
+        self,
+        *,
+        listing_id: str,
+        execution_purpose: str,
+    ) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    research_records.c.payload,
+                    research_projection_status.c.core_projection_version,
+                    research_projection_status.c.evidence_projection_version,
+                    research_projection_status.c.stale,
+                )
+                .select_from(
+                    research_records.join(
+                        research_projection_status,
+                        research_records.c.record_id == research_projection_status.c.record_id,
+                    )
+                )
+                .where(
+                    research_records.c.listing_id == listing_id,
+                    research_records.c.execution_purpose == execution_purpose,
+                    research_records.c.fixture_scenario == "normal",
+                )
+                .order_by(research_records.c.information_cutoff.desc())
+            ).mappings()
+            history: list[dict[str, Any]] = []
+            for row in rows:
+                record = cast(dict[str, Any], deepcopy(row["payload"]))
+                record["projection"] = {
+                    "core_projection_version": row["core_projection_version"],
+                    "evidence_projection_version": row["evidence_projection_version"],
+                    "stale": row["stale"],
+                }
+                history.append(record)
+            return history
+
     def get_outbox_event(self, event_id: str) -> dict[str, Any]:
         return self._outbox.get_event(event_id)
 
     def list_prediction_records(self, *, trace_id: str) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:
-            payloads = connection.execute(
+            fixture_payloads = connection.execute(
                 select(fixture_prediction_results.c.payload)
                 .where(fixture_prediction_results.c.trace_id == trace_id)
                 .order_by(fixture_prediction_results.c.horizon_sessions)
             ).scalars()
-            return [deepcopy(payload) for payload in payloads]
+            production_payloads = connection.execute(
+                select(production_prediction_records.c.payload)
+                .where(production_prediction_records.c.trace_id == trace_id)
+                .order_by(
+                    production_prediction_records.c.listing_id,
+                    production_prediction_records.c.horizon_sessions,
+                )
+            ).scalars()
+            return [
+                deepcopy(payload)
+                for payload in (*tuple(fixture_payloads), *tuple(production_payloads))
+            ]
 
     def list_prediction_record_evidence(self, *, trace_id: str) -> list[dict[str, str]]:
         with self.engine.connect() as connection:
@@ -1830,6 +2246,35 @@ class StateStore:
                     .order_by(security_audit_events.c.sequence)
                 ).mappings()
             )
+            work = (
+                connection.execute(
+                    select(
+                        work_attempts.c.work_id,
+                        work_attempts.c.operation,
+                        work_attempts.c.status,
+                        work_attempts.c.execution_purpose,
+                    )
+                    .where(work_attempts.c.trace_id == trace_id)
+                    .order_by(work_attempts.c.work_id)
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
+            health = (
+                connection.execute(
+                    select(
+                        health_assessments.c.scope,
+                        health_assessments.c.status,
+                        health_assessments.c.reason_code,
+                    )
+                    .where(health_assessments.c.trace_id == trace_id)
+                    .order_by(health_assessments.c.sequence.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .one_or_none()
+            )
         if not artifacts:
             raise KeyError(trace_id)
         lineage_kinds = {
@@ -1855,4 +2300,6 @@ class StateStore:
             "fixture_prediction_result_count": len(fixture_count),
             "production_prediction_record_count": len(production_count),
             "audit_events": [dict(event) for event in audit_events],
+            "work": dict(work) if work is not None else None,
+            "health": dict(health) if health is not None else None,
         }

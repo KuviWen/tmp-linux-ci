@@ -12,6 +12,7 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert set(contract["paths"]) == {
         "/api/v1/research/predictions",
         "/api/v1/research/listings/{listing_id}",
+        "/api/v1/research/listings/{listing_id}/prediction-history",
         "/api/v1/research/listings/{listing_id}/price-eligibility",
         "/api/v1/operations/health",
         "/api/v1/operations/sources",
@@ -101,6 +102,24 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
         "source_withdrawn",
         "missing_company_action",
         "calendar_unresolved",
+        "late_after_information_cutoff",
+        "late_after_feature_freeze",
+        "evidence_not_platform_observed",
+        "data_support_unavailable",
+        "source_policy_withdrawn",
+        "source_policy_assignment_mismatch",
+        "feature_schema_mismatch",
+    ]
+    matrix_operation = contract["paths"]["/api/v1/research/predictions"]["get"]
+    assert matrix_operation["parameters"][1] == {"$ref": "#/components/parameters/ExecutionPurpose"}
+    detail_operation = contract["paths"]["/api/v1/research/listings/{listing_id}"]["get"]
+    assert detail_operation["parameters"][2] == {"$ref": "#/components/parameters/ExecutionPurpose"}
+    history_operation = contract["paths"][
+        "/api/v1/research/listings/{listing_id}/prediction-history"
+    ]["get"]
+    assert history_operation["parameters"] == [
+        {"$ref": "#/components/parameters/ListingId"},
+        {"$ref": "#/components/parameters/ProductionExecutionPurpose"},
     ]
     matrix_item = contract["components"]["schemas"]["MatrixItem"]
     assert matrix_item["properties"]["market"] == {
@@ -111,8 +130,23 @@ def test_openapi_contract_covers_research_health_and_unavailable_results() -> No
     assert matrix_item["properties"]["projection"] == {
         "$ref": "#/components/schemas/ProjectionStatus"
     }
+    assert "fixture_badge" not in matrix_item["required"]
+    assert {
+        "formal_cutoff",
+        "calibration",
+        "support",
+        "allowed_evidence",
+    }.issubset(matrix_item["properties"])
     listing_research = contract["components"]["schemas"]["ListingResearch"]
     assert "projection" in listing_research["required"]
+    assert "fixture_badge" not in listing_research["required"]
+    assert listing_research["properties"]["execution_purpose"] == {
+        "$ref": "#/components/schemas/ExecutionPurpose"
+    }
+    history = contract["components"]["schemas"]["PredictionHistory"]
+    assert history["properties"]["items"]["items"] == {
+        "$ref": "#/components/schemas/ListingResearch"
+    }
     projection = contract["components"]["schemas"]["ProjectionStatus"]
     assert projection == {
         "type": "object",

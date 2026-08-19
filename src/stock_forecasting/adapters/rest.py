@@ -554,12 +554,13 @@ def create_web_app(application: Application) -> FastAPI:
         request: Request,
         response: Response,
         information_cutoff: str = Query(...),
+        execution_purpose: Literal["fixture", "production"] = Query("fixture"),
         if_none_match: str | None = Header(default=None, alias="If-None-Match"),
         security_context: SecurityContext = research_authentication,
     ) -> dict[str, object] | Response:
         trace_id = request.headers.get("X-Trace-Id", f"trace-{uuid4()}")
         query_outcome = application.research_query.list_predictions(
-            execution_purpose="fixture",
+            execution_purpose=execution_purpose,
             trace_id=trace_id,
             security_context=security_context,
         )
@@ -568,21 +569,31 @@ def create_web_app(application: Application) -> FastAPI:
         records = [
             record for record in query_outcome if record["information_cutoff"] == information_cutoff
         ]
-        items = [
-            {
+        items: list[dict[str, object]] = []
+        for record in records:
+            item: dict[str, object] = {
                 "listing_id": record["identity"]["listing_id"],
                 "display_ticker": record["identity"]["display_ticker"],
                 "market": record["calendar"]["exchange"],
-                "fixture_badge": record["fixture_badge"],
                 "predictions": record["predictions"],
                 "lineage": record["lineage"],
                 "projection": record["projection"],
             }
-            for record in records
-        ]
+            if execution_purpose == "fixture":
+                item["fixture_badge"] = record["fixture_badge"]
+            else:
+                item.update(
+                    {
+                        "formal_cutoff": record["formal_cutoff"],
+                        "calibration": record["calibration"],
+                        "support": record["support"],
+                        "allowed_evidence": record["allowed_evidence"],
+                    }
+                )
+            items.append(item)
         payload: dict[str, object] = {
             "information_cutoff": information_cutoff,
-            "execution_purpose": "fixture",
+            "execution_purpose": execution_purpose,
             "phase_boundaries": P1_PHASE_BOUNDARIES,
             "items": items,
         }
@@ -597,12 +608,14 @@ def create_web_app(application: Application) -> FastAPI:
         request: Request,
         listing_id: str,
         information_cutoff: str = Query(...),
+        execution_purpose: Literal["fixture", "production"] = Query("fixture"),
         security_context: SecurityContext = research_authentication,
     ) -> dict[str, object] | Response:
         try:
             query_outcome = application.research_query.get_listing_research(
                 listing_id=listing_id,
                 information_cutoff=_parse_instant(information_cutoff),
+                execution_purpose=execution_purpose,
                 trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
                 security_context=security_context,
             )
@@ -611,6 +624,30 @@ def create_web_app(application: Application) -> FastAPI:
         if isinstance(query_outcome, PolicyDeniedOutcome):
             return authorization_denied(request, query_outcome)
         return query_outcome
+
+    @app.get(
+        "/api/v1/research/listings/{listing_id}/prediction-history",
+        response_model=None,
+    )
+    def list_listing_prediction_history(
+        request: Request,
+        listing_id: str,
+        execution_purpose: Literal["fixture", "production"] = Query("production"),
+        security_context: SecurityContext = research_authentication,
+    ) -> dict[str, object] | Response:
+        outcome = application.research_query.list_prediction_history(
+            listing_id=listing_id,
+            execution_purpose=execution_purpose,
+            trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+            security_context=security_context,
+        )
+        if isinstance(outcome, PolicyDeniedOutcome):
+            return authorization_denied(request, outcome)
+        return {
+            "listing_id": listing_id,
+            "execution_purpose": execution_purpose,
+            "items": outcome,
+        }
 
     @app.get(
         "/api/v1/research/listings/{listing_id}/price-eligibility",
@@ -891,6 +928,7 @@ for (const button of document.querySelectorAll('[data-operation]')) {
     def research_matrix(
         request: Request,
         information_cutoff: str = Query(...),
+        execution_purpose: Literal["fixture", "production"] = Query("fixture"),
         horizon: int = Query(5),
         market: str = Query("all"),
         support: str = Query("full"),
@@ -899,7 +937,7 @@ for (const button of document.querySelectorAll('[data-operation]')) {
     ) -> str | Response:
         trace_id = request.headers.get("X-Trace-Id", f"trace-{uuid4()}")
         query_outcome = application.research_query.list_predictions(
-            execution_purpose="fixture",
+            execution_purpose=execution_purpose,
             trace_id=trace_id,
             security_context=security_context,
         )
@@ -944,23 +982,36 @@ for (const button of document.querySelectorAll('[data-operation]')) {
                     "support": support,
                     "sort": sort,
                     "tab": "forecast",
+                    "execution_purpose": execution_purpose,
                 }
             )
+            badge = (
+                f'<p class="badge">{escape(str(record["fixture_badge"]))}</p>'
+                if execution_purpose == "fixture"
+                else '<p class="status">正式預測</p>'
+            )
+            cutoff_label = "資訊截止點" if execution_purpose == "fixture" else "正式資訊截止點"
             rows.append(
                 '<article class="panel">'
-                f'<p class="badge">{escape(str(record["fixture_badge"]))}</p>'
+                f"{badge}"
                 f"<h2>{escape(str(record['identity']['display_ticker']))} · "
                 f"{escape(str(record['calendar']['exchange']))}</h2>"
-                f"<p>資訊截止點 {escape(information_cutoff)}</p>"
+                f"<p>{cutoff_label} {escape(information_cutoff)}</p>"
                 f"{_projection_status(record['projection'])}"
                 f'<div class="horizons">'
                 f"{_horizon_cards(record['predictions'], focused_horizon=horizon)}</div>"
                 f'<p><a href="/research/listings/{escape(listing_id)}?{detail_query}">'
                 "開啟標的研究頁</a></p></article>"
             )
-        body = (
-            "<main><header><p>研究決策支援系統</p><h1>比較矩陣</h1>"
+        title = "比較矩陣" if execution_purpose == "fixture" else "正式預測比較矩陣"
+        notice = (
             "<p>所有結果均為 fixture 工程證據，不是正式預測。</p>"
+            if execution_purpose == "fixture"
+            else "<p>本頁只顯示 production 發布紀錄。</p>"
+        )
+        body = (
+            f"<main><header><p>研究決策支援系統</p><h1>{title}</h1>"
+            f"{notice}"
             '<p class="status">文件、基本面、總體模態：P1 尚未提供</p></header>'
             f'<section aria-label="目前檢視條件"><p>期間焦點 {horizon}</p>'
             f"<p>市場 {escape(market)}</p><p>資料支援 {escape(support)}</p>"
@@ -979,6 +1030,7 @@ for (const button of document.querySelectorAll('[data-operation]')) {
         request: Request,
         listing_id: str,
         information_cutoff: str = Query(...),
+        execution_purpose: Literal["fixture", "production"] = Query("fixture"),
         horizon: int = Query(5),
         market: str = Query("XTAI"),
         support: str = Query("full"),
@@ -990,6 +1042,7 @@ for (const button of document.querySelectorAll('[data-operation]')) {
             query_outcome = application.research_query.get_listing_research(
                 listing_id=listing_id,
                 information_cutoff=_parse_instant(information_cutoff),
+                execution_purpose=execution_purpose,
                 trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
                 security_context=security_context,
             )
@@ -1010,6 +1063,7 @@ for (const button of document.querySelectorAll('[data-operation]')) {
                     "support": support,
                     "sort": sort,
                     "tab": tab_id,
+                    "execution_purpose": execution_purpose,
                 }
             )
             current = ' aria-current="page"' if tab_id == tab else ""
@@ -1017,15 +1071,62 @@ for (const button of document.querySelectorAll('[data-operation]')) {
                 f'<a href="/research/listings/{escape(listing_id)}?{query}"{current}>{label}</a>'
             )
         lineage = record["lineage"]
+        lineage_labels = {
+            "feature_snapshot_id": "FeatureSnapshot",
+            "model_artifact_id": "ModelArtifact",
+            "serving_assignment_id": "服務指派",
+            "dataset_version_id": "資料集版本",
+            "data_selection_id": "DataSelection",
+            "stock_pool_version_id": "股票池版本",
+            "calendar_version_id": "交易日曆版本",
+            "source_policy_manifest_id": "來源政策",
+            "raw_artifact_id": "原始資料物件",
+        }
         lineage_html = (
             "<dl>"
-            f"<dt>FeatureSnapshot</dt><dd>{escape(str(lineage['feature_snapshot_id']))}</dd>"
-            f"<dt>ModelArtifact</dt><dd>{escape(str(lineage['model_artifact_id']))}</dd>"
-            f"<dt>服務指派</dt><dd>{escape(str(lineage['serving_assignment_id']))}</dd>"
-            f"<dt>資料集版本</dt><dd>{escape(str(lineage['dataset_version_id']))}</dd>"
-            f"<dt>原始資料物件</dt><dd>{escape(str(lineage['raw_artifact_id']))}</dd>"
-            "</dl>"
+            + "".join(
+                f"<dt>{label}</dt><dd>{escape(str(lineage[key]))}</dd>"
+                for key, label in lineage_labels.items()
+                if key in lineage
+            )
+            + "</dl>"
         )
+        formal_detail_html = ""
+        if execution_purpose == "production":
+            history_outcome = application.research_query.list_prediction_history(
+                listing_id=listing_id,
+                execution_purpose="production",
+                trace_id=request.headers.get("X-Trace-Id", f"trace-{uuid4()}"),
+                security_context=security_context,
+            )
+            if isinstance(history_outcome, PolicyDeniedOutcome):
+                return authorization_denied(request, history_outcome)
+            calibration = cast(dict[str, object], record["calibration"])
+            calibrator_ids = cast(list[str], calibration["calibrator_ids"])
+            support_detail = cast(dict[str, object], record["support"])
+            allowed_evidence = cast(list[dict[str, object]], record["allowed_evidence"])
+            evidence_html = (
+                "".join(f"<li>{escape(str(item))}</li>" for item in allowed_evidence)
+                if allowed_evidence
+                else "<li>無</li>"
+            )
+            history_html = "".join(
+                "<li>"
+                f"{escape(str(item['formal_cutoff']))} · "
+                f"ModelArtifact {escape(str(item['lineage']['model_artifact_id']))} · "
+                f"服務指派 {escape(str(item['lineage']['serving_assignment_id']))}"
+                "</li>"
+                for item in history_outcome
+            )
+            formal_detail_html = (
+                '<section class="panel"><h2>校準與支援</h2><dl>'
+                f"<dt>校準版本</dt><dd>{escape(', '.join(calibrator_ids))}</dd>"
+                f"<dt>資料支援</dt><dd>{escape(str(support_detail['price_volume']))}</dd>"
+                "</dl><h3>政策允許證據</h3>"
+                f"<ul>{evidence_html}</ul></section>"
+                '<section class="panel"><h2>預測歷史</h2>'
+                f"<ul>{history_html}</ul></section>"
+            )
         horizon_cards = _horizon_cards(record["predictions"], focused_horizon=horizon)
         body = (
             '<main><p><a href="/research?'
@@ -1036,18 +1137,29 @@ for (const button of document.querySelectorAll('[data-operation]')) {
                     "market": market,
                     "support": support,
                     "sort": sort,
+                    "execution_purpose": execution_purpose,
                 }
             )
             + '">返回比較矩陣</a></p><header>'
-            f'<p class="badge">{escape(str(record["fixture_badge"]))}</p>'
-            "<h1>標的研究頁</h1>"
-            f"<p>{escape(str(record['identity']['display_ticker']))} · "
+            + (
+                f'<p class="badge">{escape(str(record["fixture_badge"]))}</p>'
+                if execution_purpose == "fixture"
+                else '<p class="status">正式預測</p>'
+            )
+            + (
+                "<h1>標的研究頁</h1>"
+                if execution_purpose == "fixture"
+                else "<h1>正式標的研究頁</h1>"
+            )
+            + f"<p>{escape(str(record['identity']['display_ticker']))} · "
             f"{escape(str(record['calendar']['exchange']))}</p>"
-            f"<p>資訊截止點 {escape(information_cutoff)}</p></header>"
+            f"<p>{'資訊截止點' if execution_purpose == 'fixture' else '正式資訊截止點'} "
+            f"{escape(information_cutoff)}</p></header>"
             f"{_projection_status(record['projection'])}"
             f'<nav aria-label="研究細節">{"".join(tab_links)}</nav>'
             f'<section class="panel"><div class="horizons">{horizon_cards}</div></section>'
-            f'<section class="panel"><h2>版本追溯</h2>{lineage_html}</section></main>'
+            f'<section class="panel"><h2>版本追溯</h2>{lineage_html}</section>'
+            f"{formal_detail_html}</main>"
         )
         return _page("標的研究頁", body)
 

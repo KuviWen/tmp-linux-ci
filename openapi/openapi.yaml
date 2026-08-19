@@ -13,6 +13,7 @@ paths:
         - LocalApiKey: []
       parameters:
         - $ref: '#/components/parameters/InformationCutoff'
+        - $ref: '#/components/parameters/ExecutionPurpose'
         - name: If-None-Match
           in: header
           required: false
@@ -43,6 +44,7 @@ paths:
       parameters:
         - $ref: '#/components/parameters/ListingId'
         - $ref: '#/components/parameters/InformationCutoff'
+        - $ref: '#/components/parameters/ExecutionPurpose'
       responses:
         '200':
           description: Research projection for one immutable listing.
@@ -58,6 +60,24 @@ paths:
           $ref: '#/components/responses/ProblemResponse'
         '503':
           $ref: '#/components/responses/ProblemResponse'
+  /api/v1/research/listings/{listing_id}/prediction-history:
+    get:
+      operationId: listListingPredictionHistory
+      security:
+        - LocalApiKey: []
+      parameters:
+        - $ref: '#/components/parameters/ListingId'
+        - $ref: '#/components/parameters/ProductionExecutionPurpose'
+      responses:
+        '200':
+          description: Newest-first immutable formal forecast history for one listing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PredictionHistory'
+        '401': {$ref: '#/components/responses/ProblemResponse'}
+        '403': {$ref: '#/components/responses/ProblemResponse'}
+        '503': {$ref: '#/components/responses/ProblemResponse'}
   /api/v1/research/listings/{listing_id}/price-eligibility:
     get:
       operationId: getListingPriceResearchEligibility
@@ -291,6 +311,20 @@ components:
       schema:
         type: string
         format: uuid
+    ExecutionPurpose:
+      name: execution_purpose
+      in: query
+      required: false
+      schema:
+        $ref: '#/components/schemas/ExecutionPurpose'
+    ProductionExecutionPurpose:
+      name: execution_purpose
+      in: query
+      required: false
+      schema:
+        type: string
+        const: production
+        default: production
     ProviderId:
       name: provider_id
       in: path
@@ -306,6 +340,10 @@ components:
           schema:
             $ref: '#/components/schemas/ProblemDetails'
   schemas:
+    ExecutionPurpose:
+      type: string
+      enum: [fixture, production]
+      default: fixture
     NamedProbabilities:
       type: object
       additionalProperties: false
@@ -353,6 +391,13 @@ components:
                 - source_withdrawn
                 - missing_company_action
                 - calendar_unresolved
+                - late_after_information_cutoff
+                - late_after_feature_freeze
+                - evidence_not_platform_observed
+                - data_support_unavailable
+                - source_policy_withdrawn
+                - source_policy_assignment_mismatch
+                - feature_schema_mismatch
         data_support: {$ref: '#/components/schemas/DataSupport'}
     PredictionResult:
       oneOf:
@@ -367,12 +412,18 @@ components:
     MatrixItem:
       type: object
       required:
-        [listing_id, display_ticker, market, fixture_badge, predictions, lineage, projection]
+        [listing_id, display_ticker, market, predictions, lineage, projection]
       properties:
         listing_id: {type: string, format: uuid}
         display_ticker: {type: string}
         market: {type: string, enum: [XTAI, XNAS]}
         fixture_badge: {type: string, const: Fixture／非正式預測}
+        formal_cutoff: {type: string, format: date-time}
+        calibration: {type: object}
+        support: {$ref: '#/components/schemas/DataSupport'}
+        allowed_evidence:
+          type: array
+          items: {type: object}
         predictions:
           type: array
           minItems: 3
@@ -385,7 +436,7 @@ components:
       required: [information_cutoff, execution_purpose, phase_boundaries, items]
       properties:
         information_cutoff: {type: string, format: date-time}
-        execution_purpose: {type: string, const: fixture}
+        execution_purpose: {$ref: '#/components/schemas/ExecutionPurpose'}
         phase_boundaries:
           type: object
           additionalProperties: false
@@ -411,23 +462,37 @@ components:
         - calendar
         - information_cutoff
         - execution_purpose
-        - fixture_badge
         - predictions
         - lineage
-        - source_evidence
         - projection
       properties:
         identity: {type: object}
         calendar: {type: object}
         information_cutoff: {type: string, format: date-time}
-        execution_purpose: {type: string, const: fixture}
+        execution_purpose: {$ref: '#/components/schemas/ExecutionPurpose'}
         fixture_badge: {type: string, const: Fixture／非正式預測}
+        formal_cutoff: {type: string, format: date-time}
         predictions:
           type: array
           items: {$ref: '#/components/schemas/PredictionResult'}
         lineage: {$ref: '#/components/schemas/Lineage'}
         source_evidence: {type: object}
+        calibration: {type: object}
+        support: {$ref: '#/components/schemas/DataSupport'}
+        allowed_evidence:
+          type: array
+          items: {type: object}
         projection: {$ref: '#/components/schemas/ProjectionStatus'}
+    PredictionHistory:
+      type: object
+      additionalProperties: false
+      required: [listing_id, execution_purpose, items]
+      properties:
+        listing_id: {type: string, format: uuid}
+        execution_purpose: {type: string, const: production}
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/ListingResearch'}
     ProjectionStatus:
       type: object
       additionalProperties: false
@@ -790,14 +855,16 @@ components:
         - feature_snapshot_id
         - model_artifact_id
         - serving_assignment_id
-        - raw_artifact_id
       properties:
-        data_selection_id: {type: string, format: uuid}
-        dataset_version_id: {type: string, format: uuid}
-        feature_snapshot_id: {type: string, format: uuid}
-        model_artifact_id: {type: string, format: uuid}
-        serving_assignment_id: {type: string, format: uuid}
-        raw_artifact_id: {type: string, format: uuid}
+        data_selection_id: {type: string, minLength: 1}
+        dataset_version_id: {type: string, minLength: 1}
+        stock_pool_version_id: {type: string, minLength: 1}
+        feature_snapshot_id: {type: string, minLength: 1}
+        model_artifact_id: {type: string, minLength: 1}
+        serving_assignment_id: {type: string, minLength: 1}
+        calendar_version_id: {type: string, minLength: 1}
+        source_policy_manifest_id: {type: string, minLength: 1}
+        raw_artifact_id: {type: string, minLength: 1}
     HealthAssessment:
       type: object
       required: [scope, status, reason_code, affected_attempts]

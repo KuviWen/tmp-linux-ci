@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from stock_forecasting.authorization import (
     AuthorizationAction,
@@ -37,6 +37,10 @@ from stock_forecasting.source_provider_registry import (
 )
 
 
+class ProductionNotificationTransport(Protocol):
+    def deliver(self, notification: dict[str, Any]) -> bool: ...
+
+
 class OperationsControl:
     def __init__(
         self,
@@ -58,6 +62,41 @@ class OperationsControl:
         self._clock = clock
         self._source_adapter_security_context = source_adapter_security_context
         self._source_adapter_authorization_policy = source_adapter_authorization_policy
+
+    def get_production_forecast(self, forecast_batch_id: str) -> dict[str, Any]:
+        return self._state_store.list_production_operations(forecast_batch_id)
+
+    def deliver_production_notification(
+        self,
+        forecast_batch_id: str,
+        *,
+        transport: ProductionNotificationTransport,
+    ) -> dict[str, Any]:
+        operations = self.get_production_forecast(forecast_batch_id)
+        pending = [
+            item for item in operations["notifications"] if item["delivery_status"] == "pending"
+        ]
+        if len(pending) != 1:
+            raise ValueError("production_notification_not_pending")
+        try:
+            delivered = transport.deliver(pending[0])
+        except Exception:
+            delivered = False
+        outcome = {
+            "event_kind": "notification_delivery",
+            "delivery_status": "delivered" if delivered else "dead_letter",
+            "reason_code": (
+                "production_notification_delivered"
+                if delivered
+                else "production_notification_delivery_failed"
+            ),
+        }
+        self._state_store.record_production_notification_delivery(
+            forecast_batch_id=forecast_batch_id,
+            delivered_at=self._instant(self._clock()),
+            payload=outcome,
+        )
+        return outcome
 
     def list_historical_qualifications(
         self,

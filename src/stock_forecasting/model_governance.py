@@ -24,7 +24,10 @@ from stock_forecasting.forecasting import (
     training_selection_id_for,
 )
 from stock_forecasting.platform.outbox_relay import outbox_dispatch, outbox_events
-from stock_forecasting.platform.schema import model_lifecycle_events
+from stock_forecasting.platform.schema import (
+    model_lifecycle_events,
+    production_serving_assignment_pins,
+)
 
 if TYPE_CHECKING:
     from stock_forecasting.forecast_lab import (
@@ -55,6 +58,15 @@ class UnavailableFormalQualificationVerifier:
         intent: TrainingIntentRef,
         fold_manifest: FoldManifest,
     ) -> bool:
+        return False
+
+
+class PromotionReadinessVerifier(Protocol):
+    def verify(self, readiness: PromotionReadiness) -> bool: ...
+
+
+class UnavailablePromotionReadinessVerifier:
+    def verify(self, readiness: PromotionReadiness) -> bool:
         return False
 
 
@@ -989,6 +1001,103 @@ class RecordShadowEod:
 
 
 @dataclass(frozen=True)
+class PromotionReadiness:
+    evidence_id: str
+    candidate_id: str
+    artifact_id: str
+    evaluation_report_id: str
+    feature_schema_id: str
+    runtime_id: str
+    source_policy_manifest_id: str
+    rollback_assignment_id: str | None
+    effective_from_batch_id: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        candidate_id: str,
+        artifact_id: str,
+        evaluation_report_id: str,
+        feature_schema_id: str,
+        runtime_id: str,
+        source_policy_manifest_id: str,
+        rollback_assignment_id: str | None,
+        effective_from_batch_id: str,
+    ) -> PromotionReadiness:
+        required = (
+            candidate_id,
+            artifact_id,
+            evaluation_report_id,
+            feature_schema_id,
+            runtime_id,
+            source_policy_manifest_id,
+            effective_from_batch_id,
+        )
+        if any(not isinstance(value, str) or not value for value in required) or (
+            rollback_assignment_id is not None
+            and (not isinstance(rollback_assignment_id, str) or not rollback_assignment_id)
+        ):
+            raise ValueError("promotion_readiness_schema_invalid")
+        payload = {
+            "candidate_id": candidate_id,
+            "artifact_id": artifact_id,
+            "evaluation_report_id": evaluation_report_id,
+            "feature_schema_id": feature_schema_id,
+            "runtime_id": runtime_id,
+            "source_policy_manifest_id": source_policy_manifest_id,
+            "rollback_assignment_id": rollback_assignment_id,
+            "effective_from_batch_id": effective_from_batch_id,
+        }
+        return cls(
+            evidence_id=_content_id("promotion_readiness", payload),
+            candidate_id=candidate_id,
+            artifact_id=artifact_id,
+            evaluation_report_id=evaluation_report_id,
+            feature_schema_id=feature_schema_id,
+            runtime_id=runtime_id,
+            source_policy_manifest_id=source_policy_manifest_id,
+            rollback_assignment_id=rollback_assignment_id,
+            effective_from_batch_id=effective_from_batch_id,
+        )
+
+    def is_content_addressed(self) -> bool:
+        rebuilt = type(self).create(
+            candidate_id=self.candidate_id,
+            artifact_id=self.artifact_id,
+            evaluation_report_id=self.evaluation_report_id,
+            feature_schema_id=self.feature_schema_id,
+            runtime_id=self.runtime_id,
+            source_policy_manifest_id=self.source_policy_manifest_id,
+            rollback_assignment_id=self.rollback_assignment_id,
+            effective_from_batch_id=self.effective_from_batch_id,
+        )
+        return rebuilt.evidence_id == self.evidence_id
+
+
+@dataclass(frozen=True)
+class PromoteProductionAssignment:
+    command_id: str
+    model_family_id: str
+    candidate_id: str
+    expected_assignment: str
+    readiness: PromotionReadiness
+    expected_version: int
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
+class RollbackProductionAssignment:
+    command_id: str
+    model_family_id: str
+    expected_assignment: str
+    rollback_target_assignment_id: str
+    effective_from_batch_id: str
+    expected_version: int
+    occurred_at: datetime
+
+
+@dataclass(frozen=True)
 class RecordDevelopmentGateFailure:
     command_id: str
     model_family_id: str
@@ -1004,6 +1113,8 @@ LifecycleCommand = (
     | EvaluateBootstrapCandidate
     | DecideApproval
     | RecordShadowEod
+    | PromoteProductionAssignment
+    | RollbackProductionAssignment
     | RecordDevelopmentGateFailure
 )
 
@@ -1625,12 +1736,314 @@ def _verified_shadow_lineage(
 
 
 @dataclass(frozen=True)
+class ServingAssignment:
+    assignment_id: str
+    model_family_id: str
+    candidate_id: str
+    artifact_id: str
+    previous_assignment_id: str | None
+    readiness_evidence_id: str
+    effective_from_batch_id: str
+    assigned_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        model_family_id: str,
+        candidate_id: str,
+        artifact_id: str,
+        previous_assignment_id: str | None,
+        readiness_evidence_id: str,
+        effective_from_batch_id: str,
+        assigned_at: datetime,
+    ) -> ServingAssignment:
+        payload = {
+            "model_family_id": model_family_id,
+            "candidate_id": candidate_id,
+            "artifact_id": artifact_id,
+            "previous_assignment_id": previous_assignment_id,
+            "readiness_evidence_id": readiness_evidence_id,
+            "effective_from_batch_id": effective_from_batch_id,
+            "assigned_at": assigned_at.isoformat(),
+        }
+        if any(
+            not isinstance(value, str) or not value
+            for value in (
+                model_family_id,
+                candidate_id,
+                artifact_id,
+                readiness_evidence_id,
+                effective_from_batch_id,
+            )
+        ) or (
+            previous_assignment_id is not None
+            and (not isinstance(previous_assignment_id, str) or not previous_assignment_id)
+        ):
+            raise ValueError("serving_assignment_schema_invalid")
+        return cls(
+            assignment_id=_content_id("serving_assignment", payload),
+            model_family_id=model_family_id,
+            candidate_id=candidate_id,
+            artifact_id=artifact_id,
+            previous_assignment_id=previous_assignment_id,
+            readiness_evidence_id=readiness_evidence_id,
+            effective_from_batch_id=effective_from_batch_id,
+            assigned_at=assigned_at,
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "assignment_id": self.assignment_id,
+            "model_family_id": self.model_family_id,
+            "candidate_id": self.candidate_id,
+            "artifact_id": self.artifact_id,
+            "previous_assignment_id": self.previous_assignment_id,
+            "readiness_evidence_id": self.readiness_evidence_id,
+            "effective_from_batch_id": self.effective_from_batch_id,
+            "assigned_at": self.assigned_at.isoformat(),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> ServingAssignment:
+        if not isinstance(payload, dict):
+            raise ValueError("serving_assignment_schema_invalid")
+        required = {
+            "assignment_id",
+            "model_family_id",
+            "candidate_id",
+            "artifact_id",
+            "previous_assignment_id",
+            "readiness_evidence_id",
+            "effective_from_batch_id",
+            "assigned_at",
+        }
+        if set(payload) != required:
+            raise ValueError("serving_assignment_schema_invalid")
+        try:
+            rebuilt = cls.create(
+                model_family_id=cast(str, payload["model_family_id"]),
+                candidate_id=cast(str, payload["candidate_id"]),
+                artifact_id=cast(str, payload["artifact_id"]),
+                previous_assignment_id=cast(str | None, payload["previous_assignment_id"]),
+                readiness_evidence_id=cast(str, payload["readiness_evidence_id"]),
+                effective_from_batch_id=cast(str, payload["effective_from_batch_id"]),
+                assigned_at=datetime.fromisoformat(cast(str, payload["assigned_at"])),
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError("serving_assignment_schema_invalid") from error
+        if payload["assignment_id"] != rebuilt.assignment_id:
+            raise ValueError("serving_assignment_schema_invalid")
+        return rebuilt
+
+
+@dataclass(frozen=True)
+class PinServingAssignment:
+    model_family_id: str
+    forecast_batch_id: str
+    market: Literal["XTAI", "XNAS"]
+    information_cutoff: datetime
+    started_at: datetime
+
+
+@dataclass(frozen=True)
+class PinnedServingAssignment:
+    pin_id: str
+    model_family_id: str
+    forecast_batch_id: str
+    market: Literal["XTAI", "XNAS"]
+    information_cutoff: datetime
+    started_at: datetime
+    assignment: ServingAssignment
+
+    @classmethod
+    def create(
+        cls,
+        request: PinServingAssignment,
+        assignment: ServingAssignment,
+    ) -> PinnedServingAssignment:
+        if (
+            not request.model_family_id
+            or not request.forecast_batch_id
+            or request.market not in {"XTAI", "XNAS"}
+            or request.information_cutoff.tzinfo is None
+            or request.started_at.tzinfo is None
+            or assignment.model_family_id != request.model_family_id
+            or assignment.assigned_at > request.started_at
+        ):
+            raise ValueError("serving_assignment_pin_invalid")
+        payload = {
+            "model_family_id": request.model_family_id,
+            "forecast_batch_id": request.forecast_batch_id,
+            "market": request.market,
+            "information_cutoff": request.information_cutoff.isoformat(),
+            "started_at": request.started_at.isoformat(),
+            "assignment_id": assignment.assignment_id,
+        }
+        return cls(
+            pin_id=_content_id("serving_assignment_pin", payload),
+            model_family_id=request.model_family_id,
+            forecast_batch_id=request.forecast_batch_id,
+            market=request.market,
+            information_cutoff=request.information_cutoff,
+            started_at=request.started_at,
+            assignment=assignment,
+        )
+
+
+class AssignmentPinStore(Protocol):
+    def get(
+        self,
+        *,
+        model_family_id: str,
+        forecast_batch_id: str,
+        market: str,
+    ) -> PinnedServingAssignment | None: ...
+
+    def put(self, pin: PinnedServingAssignment) -> PinnedServingAssignment: ...
+
+
+class InMemoryAssignmentPinStore:
+    def __init__(self) -> None:
+        self._pins: dict[tuple[str, str, str], PinnedServingAssignment] = {}
+
+    def get(
+        self,
+        *,
+        model_family_id: str,
+        forecast_batch_id: str,
+        market: str,
+    ) -> PinnedServingAssignment | None:
+        return self._pins.get((model_family_id, forecast_batch_id, market))
+
+    def put(self, pin: PinnedServingAssignment) -> PinnedServingAssignment:
+        key = (pin.model_family_id, pin.forecast_batch_id, pin.market)
+        existing = self._pins.get(key)
+        if existing is not None and existing != pin:
+            raise LifecycleConflict("serving_assignment_pin_conflict")
+        self._pins[key] = pin
+        return pin
+
+
+class SqlAlchemyAssignmentPinStore:
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def get(
+        self,
+        *,
+        model_family_id: str,
+        forecast_batch_id: str,
+        market: str,
+    ) -> PinnedServingAssignment | None:
+        with self._engine.connect() as connection:
+            payload = connection.execute(
+                select(production_serving_assignment_pins.c.payload).where(
+                    production_serving_assignment_pins.c.model_family_id == model_family_id,
+                    production_serving_assignment_pins.c.forecast_batch_id == forecast_batch_id,
+                    production_serving_assignment_pins.c.market == market,
+                )
+            ).scalar_one_or_none()
+        if payload is None:
+            return None
+        return self._from_payload(payload)
+
+    def put(self, pin: PinnedServingAssignment) -> PinnedServingAssignment:
+        payload = self._to_payload(pin)
+        try:
+            with self._engine.begin() as connection:
+                connection.execute(
+                    production_serving_assignment_pins.insert().values(
+                        pin_id=pin.pin_id,
+                        model_family_id=pin.model_family_id,
+                        forecast_batch_id=pin.forecast_batch_id,
+                        market=pin.market,
+                        payload=payload,
+                    )
+                )
+        except IntegrityError:
+            existing = self.get(
+                model_family_id=pin.model_family_id,
+                forecast_batch_id=pin.forecast_batch_id,
+                market=pin.market,
+            )
+            if existing != pin:
+                raise LifecycleConflict("serving_assignment_pin_conflict") from None
+            return existing
+        return pin
+
+    @staticmethod
+    def _to_payload(pin: PinnedServingAssignment) -> dict[str, object]:
+        return {
+            "pin_id": pin.pin_id,
+            "model_family_id": pin.model_family_id,
+            "forecast_batch_id": pin.forecast_batch_id,
+            "market": pin.market,
+            "information_cutoff": pin.information_cutoff.isoformat(),
+            "started_at": pin.started_at.isoformat(),
+            "assignment": pin.assignment.to_payload(),
+        }
+
+    @staticmethod
+    def _from_payload(payload: object) -> PinnedServingAssignment:
+        if not isinstance(payload, dict):
+            raise LifecycleConflict("serving_assignment_pin_evidence_invalid")
+        try:
+            request = PinServingAssignment(
+                model_family_id=cast(str, payload["model_family_id"]),
+                forecast_batch_id=cast(str, payload["forecast_batch_id"]),
+                market=cast(Literal["XTAI", "XNAS"], payload["market"]),
+                information_cutoff=datetime.fromisoformat(cast(str, payload["information_cutoff"])),
+                started_at=datetime.fromisoformat(cast(str, payload["started_at"])),
+            )
+            pin = PinnedServingAssignment.create(
+                request,
+                ServingAssignment.from_payload(payload["assignment"]),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise LifecycleConflict("serving_assignment_pin_evidence_invalid") from error
+        if payload.get("pin_id") != pin.pin_id:
+            raise LifecycleConflict("serving_assignment_pin_evidence_invalid")
+        return pin
+
+
+class ServingAssignmentResolver:
+    def __init__(self, lifecycle_store: LifecycleStore, pin_store: AssignmentPinStore) -> None:
+        self._lifecycle_store = lifecycle_store
+        self._pin_store = pin_store
+
+    def pin(self, request: PinServingAssignment) -> PinnedServingAssignment:
+        existing = self._pin_store.get(
+            model_family_id=request.model_family_id,
+            forecast_batch_id=request.forecast_batch_id,
+            market=request.market,
+        )
+        if existing is not None:
+            return existing
+        eligible: list[ServingAssignment] = []
+        for event in self._lifecycle_store.events(request.model_family_id):
+            if event.event_kind != "ProductionAssignmentCreated":
+                continue
+            try:
+                assignment = ServingAssignment.from_payload(json.loads(event.payload_json))
+            except (KeyError, TypeError, ValueError) as error:
+                raise LifecycleConflict("serving_assignment_evidence_invalid") from error
+            if assignment.assigned_at <= request.started_at:
+                eligible.append(assignment)
+        if not eligible:
+            raise LifecycleConflict("production_assignment_unavailable")
+        pin = PinnedServingAssignment.create(request, eligible[-1])
+        return self._pin_store.put(pin)
+
+
+@dataclass(frozen=True)
 class LifecycleResult:
     status: str
     version: int
     gate_decision: GateDecision | None = None
     approval_decision: ApprovalDecision | None = None
     shadow_evidence: ShadowEvidence | None = None
+    serving_assignment: ServingAssignment | None = None
 
 
 class LifecycleStore(Protocol):
@@ -1644,6 +2057,18 @@ class LifecycleStore(Protocol):
         payload: dict[str, object],
         occurred_at: datetime,
     ) -> LifecycleEvent: ...
+
+    def promote(
+        self,
+        *,
+        command_id: str,
+        model_family_id: str,
+        expected_version: int,
+        promotion_payload: dict[str, object],
+        assignment_payload: dict[str, object],
+        occurred_at: datetime,
+        transition_event_kind: str = "PromotionEventRecorded",
+    ) -> tuple[LifecycleEvent, LifecycleEvent]: ...
 
     def events(self, model_family_id: str) -> tuple[LifecycleEvent, ...]: ...
 
@@ -1717,9 +2142,43 @@ class InMemoryLifecycleStore:
     def events(self, model_family_id: str) -> tuple[LifecycleEvent, ...]:
         return tuple(self._events.get(model_family_id, ()))
 
+    def promote(
+        self,
+        *,
+        command_id: str,
+        model_family_id: str,
+        expected_version: int,
+        promotion_payload: dict[str, object],
+        assignment_payload: dict[str, object],
+        occurred_at: datetime,
+        transition_event_kind: str = "PromotionEventRecorded",
+    ) -> tuple[LifecycleEvent, LifecycleEvent]:
+        before = list(self._events.get(model_family_id, ()))
+        try:
+            promotion = self.append(
+                command_id=command_id,
+                model_family_id=model_family_id,
+                expected_version=expected_version,
+                event_kind=transition_event_kind,
+                payload=promotion_payload,
+                occurred_at=occurred_at,
+            )
+            assignment = self.append(
+                command_id=f"{command_id}:assignment",
+                model_family_id=model_family_id,
+                expected_version=expected_version + 1,
+                event_kind="ProductionAssignmentCreated",
+                payload=assignment_payload,
+                occurred_at=occurred_at,
+            )
+        except Exception:
+            self._events[model_family_id] = before
+            raise
+        return promotion, assignment
+
     def production_assignments(self, model_family_id: str) -> tuple[str, ...]:
         lifecycle_assignments = tuple(
-            event.event_id
+            ServingAssignment.from_payload(json.loads(event.payload_json)).assignment_id
             for event in self.events(model_family_id)
             if event.event_kind == "ProductionAssignmentCreated"
         )
@@ -1837,6 +2296,128 @@ class SqlAlchemyLifecycleStore:
         except IntegrityError as error:
             raise LifecycleConflict("concurrent_lifecycle_append") from error
 
+    def promote(
+        self,
+        *,
+        command_id: str,
+        model_family_id: str,
+        expected_version: int,
+        promotion_payload: dict[str, object],
+        assignment_payload: dict[str, object],
+        occurred_at: datetime,
+        transition_event_kind: str = "PromotionEventRecorded",
+    ) -> tuple[LifecycleEvent, LifecycleEvent]:
+        command_ids = (command_id, f"{command_id}:assignment")
+        event_specs = (
+            (command_ids[0], transition_event_kind, promotion_payload),
+            (command_ids[1], "ProductionAssignmentCreated", assignment_payload),
+        )
+        try:
+            with self._engine.begin() as connection:
+                existing_rows = (
+                    connection.execute(
+                        select(model_lifecycle_events).where(
+                            model_lifecycle_events.c.command_id.in_(command_ids)
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                if existing_rows:
+                    existing = {str(row["command_id"]): dict(row) for row in existing_rows}
+                    if set(existing) != set(command_ids):
+                        raise LifecycleConflict("command_id_payload_conflict")
+                    replayed: list[LifecycleEvent] = []
+                    for event_command_id, event_kind, payload in event_specs:
+                        row = existing[event_command_id]
+                        if (
+                            row["model_family_id"] != model_family_id
+                            or row["event_kind"] != event_kind
+                            or canonical_json(row["payload"]) != canonical_json(payload)
+                        ):
+                            raise LifecycleConflict("command_id_payload_conflict")
+                        replayed.append(self._event_from_row(row))
+                    return replayed[0], replayed[1]
+                current_version = int(
+                    connection.execute(
+                        select(
+                            func.coalesce(func.max(model_lifecycle_events.c.aggregate_version), 0)
+                        ).where(model_lifecycle_events.c.model_family_id == model_family_id)
+                    ).scalar_one()
+                )
+                if expected_version != current_version:
+                    raise LifecycleConflict("stale_lifecycle_version")
+                recorded: list[LifecycleEvent] = []
+                aggregate_id = str(
+                    uuid5(NAMESPACE_URL, f"stock-forecasting/model-family/{model_family_id}")
+                )
+                for offset, (event_command_id, event_kind, payload) in enumerate(event_specs, 1):
+                    version = current_version + offset
+                    event_payload = {
+                        "command_id": event_command_id,
+                        "model_family_id": model_family_id,
+                        "version": version,
+                        "event_kind": event_kind,
+                        "payload": payload,
+                        "occurred_at": occurred_at.isoformat(),
+                    }
+                    event_id = _content_id("lifecycle_event", event_payload)
+                    connection.execute(
+                        model_lifecycle_events.insert().values(
+                            event_id=event_id,
+                            command_id=event_command_id,
+                            model_family_id=model_family_id,
+                            aggregate_version=version,
+                            event_kind=event_kind,
+                            payload=payload,
+                            occurred_at=occurred_at.isoformat(),
+                        )
+                    )
+                    outbox_event_id = str(
+                        uuid5(
+                            NAMESPACE_URL,
+                            f"stock-forecasting/model-lifecycle-outbox/{event_id}",
+                        )
+                    )
+                    connection.execute(
+                        outbox_events.insert().values(
+                            event_id=outbox_event_id,
+                            event_type="model_lifecycle.event_recorded",
+                            schema_version="1.0.0",
+                            aggregate_id=aggregate_id,
+                            aggregate_version=version,
+                            occurred_at=occurred_at.isoformat(),
+                            producer="model_governance",
+                            trace_id=command_id,
+                            payload={
+                                "lifecycle_event_id": event_id,
+                                "event_kind": event_kind,
+                                "model_family_id": model_family_id,
+                            },
+                        )
+                    )
+                    connection.execute(
+                        outbox_dispatch.insert().values(
+                            event_id=outbox_event_id,
+                            status="pending",
+                            fencing_token=0,
+                        )
+                    )
+                    recorded.append(
+                        LifecycleEvent(
+                            event_id=event_id,
+                            command_id=event_command_id,
+                            model_family_id=model_family_id,
+                            version=version,
+                            event_kind=event_kind,
+                            payload_json=canonical_json(payload),
+                            occurred_at=occurred_at,
+                        )
+                    )
+                return recorded[0], recorded[1]
+        except IntegrityError as error:
+            raise LifecycleConflict("concurrent_lifecycle_append") from error
+
     def events(self, model_family_id: str) -> tuple[LifecycleEvent, ...]:
         with self._engine.connect() as connection:
             rows = (
@@ -1852,7 +2433,7 @@ class SqlAlchemyLifecycleStore:
 
     def production_assignments(self, model_family_id: str) -> tuple[str, ...]:
         return tuple(
-            event.event_id
+            ServingAssignment.from_payload(json.loads(event.payload_json)).assignment_id
             for event in self.events(model_family_id)
             if event.event_kind == "ProductionAssignmentCreated"
         )
@@ -1886,6 +2467,7 @@ class ModelLifecycle:
         formal_qualification_verifier: FormalQualificationVerifier | None = None,
         shadow_eligibility_verifier: ShadowEligibilityVerifier | None = None,
         shadow_run_verifier: ShadowRunVerifier | None = None,
+        promotion_readiness_verifier: PromotionReadinessVerifier | None = None,
     ) -> None:
         self._store = store
         self._policy_repository = policy_repository or InMemoryGatePolicyRepository(
@@ -1913,6 +2495,9 @@ class ModelLifecycle:
             shadow_eligibility_verifier or UnavailableShadowEligibilityVerifier()
         )
         self._shadow_run_verifier = shadow_run_verifier or UnavailableShadowRunVerifier()
+        self._promotion_readiness_verifier = (
+            promotion_readiness_verifier or UnavailablePromotionReadinessVerifier()
+        )
 
     def execute(self, command: LifecycleCommand) -> LifecycleResult:
         if isinstance(command, RecordCandidate):
@@ -1923,6 +2508,10 @@ class ModelLifecycle:
             return self._decide_approval(command)
         if isinstance(command, RecordShadowEod):
             return self._record_shadow(command)
+        if isinstance(command, PromoteProductionAssignment):
+            return self._promote(command)
+        if isinstance(command, RollbackProductionAssignment):
+            return self._rollback(command)
         return self._record_development_failure(command)
 
     def _record_candidate(self, command: RecordCandidate) -> LifecycleResult:
@@ -2602,6 +3191,97 @@ class ModelLifecycle:
         except Exception:
             return False
 
+    def _promote(self, command: PromoteProductionAssignment) -> LifecycleResult:
+        candidate = self._candidate(command.model_family_id, command.candidate_id)
+        readiness = command.readiness
+        try:
+            _, gate = self._passed_gate(command.model_family_id, command.candidate_id)
+            approval = ApprovalDecision.from_payload(
+                self._current_approval(command.model_family_id, command.candidate_id)
+            )
+            serialized = self._candidate_artifact_repository.resolve(str(candidate["artifact_id"]))
+            if serialized is None:
+                raise ValueError("candidate_artifact_unavailable")
+            artifact = ModelArtifact.from_serialized(str(candidate["artifact_id"]), serialized)
+            if _cold_load_model_artifact(artifact) != artifact:
+                raise ValueError("candidate_artifact_cold_load_failed")
+            shadows = _verified_shadow_lineage(
+                self._store.events(command.model_family_id),
+                candidate_id=command.candidate_id,
+                artifact_id=artifact.artifact_id,
+                evaluation_report_id=str(candidate["evaluation_report_id"]),
+                gate_decision_id=gate.gate_decision_id,
+                approval_decision_id=approval.approval_decision_id,
+                approval_policy_version_id=approval.approval_policy_version_id,
+                expected_assignment=approval.expected_assignment,
+                not_before=approval.decided_at,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise LifecycleConflict("promotion_evidence_invalid") from error
+        current_assignment = self._current_assignment(command.model_family_id)
+        expected_rollback = None if current_assignment == "unassigned" else current_assignment
+        bindings_valid = (
+            readiness.is_content_addressed()
+            and readiness.candidate_id == command.candidate_id
+            and readiness.artifact_id == artifact.artifact_id
+            and readiness.evaluation_report_id == candidate["evaluation_report_id"]
+            and readiness.feature_schema_id == artifact.provenance.feature_schema_id
+            and readiness.runtime_id == artifact.provenance.runtime_id
+            and readiness.source_policy_manifest_id == artifact.manifest_ids[1]
+            and readiness.rollback_assignment_id == expected_rollback
+            and command.expected_assignment == current_assignment
+            and approval.expected_assignment == current_assignment
+            and approval.decision == "approved"
+            and approval.invalidated_reason is None
+            and command.occurred_at < approval.expires_at
+            and len(shadows) == 5
+        )
+        try:
+            externally_verified = self._promotion_readiness_verifier.verify(readiness)
+        except Exception:
+            externally_verified = False
+        if not bindings_valid or not externally_verified:
+            raise LifecycleConflict("promotion_readiness_invalid")
+        assignment = ServingAssignment.create(
+            model_family_id=command.model_family_id,
+            candidate_id=command.candidate_id,
+            artifact_id=artifact.artifact_id,
+            previous_assignment_id=expected_rollback,
+            readiness_evidence_id=readiness.evidence_id,
+            effective_from_batch_id=readiness.effective_from_batch_id,
+            assigned_at=command.occurred_at,
+        )
+        promotion_core: dict[str, object] = {
+            "model_family_id": command.model_family_id,
+            "candidate_id": command.candidate_id,
+            "artifact_id": artifact.artifact_id,
+            "evaluation_report_id": str(candidate["evaluation_report_id"]),
+            "gate_decision_id": gate.gate_decision_id,
+            "approval_decision_id": approval.approval_decision_id,
+            "readiness_evidence_id": readiness.evidence_id,
+            "previous_assignment_id": expected_rollback,
+            "assignment_id": assignment.assignment_id,
+            "effective_from_batch_id": readiness.effective_from_batch_id,
+            "promoted_at": command.occurred_at.isoformat(),
+        }
+        promotion_payload = {
+            "promotion_event_id": _content_id("promotion_event", promotion_core),
+            **promotion_core,
+        }
+        _, assignment_event = self._store.promote(
+            command_id=command.command_id,
+            model_family_id=command.model_family_id,
+            expected_version=command.expected_version,
+            promotion_payload=promotion_payload,
+            assignment_payload=assignment.to_payload(),
+            occurred_at=command.occurred_at,
+        )
+        return LifecycleResult(
+            status="promoted",
+            version=assignment_event.version,
+            serving_assignment=assignment,
+        )
+
     def _current_approval(self, model_family_id: str, candidate_id: str) -> dict[str, object]:
         for event in reversed(self._store.events(model_family_id)):
             if event.event_kind != "ApprovalDecisionRecorded":
@@ -2618,6 +3298,69 @@ class ModelLifecycle:
             if payload["candidate_id"] == candidate_id:
                 return dict(payload)
         raise LifecycleConflict("candidate_not_approved")
+
+    def _rollback(self, command: RollbackProductionAssignment) -> LifecycleResult:
+        assignments: list[ServingAssignment] = []
+        try:
+            for event in self._store.events(command.model_family_id):
+                if event.event_kind == "ProductionAssignmentCreated":
+                    assignments.append(
+                        ServingAssignment.from_payload(json.loads(event.payload_json))
+                    )
+            current = assignments[-1]
+            target = next(
+                item
+                for item in assignments
+                if item.assignment_id == command.rollback_target_assignment_id
+            )
+            serialized = self._candidate_artifact_repository.resolve(target.artifact_id)
+            if serialized is None:
+                raise ValueError("rollback_artifact_unavailable")
+            artifact = ModelArtifact.from_serialized(target.artifact_id, serialized)
+            if _cold_load_model_artifact(artifact) != artifact:
+                raise ValueError("rollback_artifact_cold_load_failed")
+            if (
+                current.assignment_id != command.expected_assignment
+                or current.previous_assignment_id != target.assignment_id
+                or target.assigned_at >= current.assigned_at
+                or not command.effective_from_batch_id
+                or command.occurred_at.tzinfo is None
+            ):
+                raise ValueError("rollback_lineage_invalid")
+        except (IndexError, KeyError, StopIteration, TypeError, ValueError) as error:
+            raise LifecycleConflict("rollback_target_invalid") from error
+        rollback_core: dict[str, object] = {
+            "model_family_id": command.model_family_id,
+            "from_assignment_id": current.assignment_id,
+            "rollback_target_assignment_id": target.assignment_id,
+            "artifact_id": target.artifact_id,
+            "effective_from_batch_id": command.effective_from_batch_id,
+            "rolled_back_at": command.occurred_at.isoformat(),
+        }
+        rollback_event_id = _content_id("rollback_event", rollback_core)
+        assignment = ServingAssignment.create(
+            model_family_id=command.model_family_id,
+            candidate_id=target.candidate_id,
+            artifact_id=target.artifact_id,
+            previous_assignment_id=current.assignment_id,
+            readiness_evidence_id=rollback_event_id,
+            effective_from_batch_id=command.effective_from_batch_id,
+            assigned_at=command.occurred_at,
+        )
+        _, assignment_event = self._store.promote(
+            command_id=command.command_id,
+            model_family_id=command.model_family_id,
+            expected_version=command.expected_version,
+            promotion_payload={"rollback_event_id": rollback_event_id, **rollback_core},
+            assignment_payload=assignment.to_payload(),
+            occurred_at=command.occurred_at,
+            transition_event_kind="RollbackEventRecorded",
+        )
+        return LifecycleResult(
+            status="rolled_back",
+            version=assignment_event.version,
+            serving_assignment=assignment,
+        )
 
     def _record_development_failure(self, command: RecordDevelopmentGateFailure) -> LifecycleResult:
         decision = GateDecision.create(
