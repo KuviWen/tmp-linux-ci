@@ -10,7 +10,7 @@ Accepted
 
 ## Decision
 
-Implementation ticket 以「工程驗收」判斷程式交付：可使用明確標記 `engineering_acceptance`／`engineering_example` 的決定性證據，經公共 seam 證明政策的通過與否決、owner-operated 核准規則、五個不同且遞增 EOD cycle 的狀態轉移、部署整合及 fail-closed 行為。這些 cycles 可在同一次測試執行中使用固定歷史日期，不要求等待五個真實交易日。
+Implementation ticket 以「工程驗收」判斷程式交付。隔離的 contract scenario 可以在 ephemeral test store 中建立 deterministic、形式上完整的正向與反向 evidence，經公共 seam 證明政策的通過與否決、owner-operated 核准規則，以及五個不同且遞增 EOD cycle 的狀態轉移；test suite／case 本身界定其 engineering scope，事件在測試後丟棄且不能匯出為營運證據。部署型 evidence 則必須明確標記 `engineering_acceptance`／`engineering_example`，證明整合及 fail-closed 行為，並保持 `formal_model_qualification=not_claimed`。固定歷史日期可在同一次測試執行中完成，不要求等待五個真實交易日。
 
 「模型營運資格」仍是另一個 runtime 判定。工程驗收不能宣稱特定真實模型通過 hard gates、不能代表 owner 已核准真實 artifact、不能冒充 production shadow 或預測價值，也不能建立 production 服務指派。真實候選日後仍須以實際合格資料、內容定址評估、全部 hard gates、owner 決定及五個實際 eligible EOD shadow cycles 通過既有 runtime 契約。
 

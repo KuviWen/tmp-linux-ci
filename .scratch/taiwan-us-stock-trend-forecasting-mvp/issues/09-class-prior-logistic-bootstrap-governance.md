@@ -2,7 +2,7 @@
 
 **Zero-cost boundary:** 遵循主 spec `COST-0-01` 與 ADR 0018；允許用途資格合格的零付費 authenticated provider 及程式管理的來源憑證，禁止付費／採購／sales approval／協商契約；憑證未就緒是可觀察狀態，不是 ticket 交付 blocker。
 
-**What to build:** 建立 class-prior 與 regularized multinomial logistic 兩個 TrendForecaster adapter，完整實作不可變訓練意圖、防洩漏 walk-forward、校準、評估、BootstrapGatePolicy、人工核准及五次 shadow 的公共契約，並在研究治理介面呈現候選證據。依 ADR 0020，本 ticket 以明確標示的 deterministic engineering evidence 驗收這些契約；特定真實模型的營運資格與 production 服務指派另由 runtime evidence 決定。
+**What to build:** 建立 class-prior 與 regularized multinomial logistic 兩個 TrendForecaster adapter，完整實作不可變訓練意圖、防洩漏 walk-forward、校準、評估、BootstrapGatePolicy、人工核准及五次 shadow 的公共契約，並在研究治理介面呈現候選證據。依 ADR 0020，本 ticket 以隔離、執行後丟棄的 deterministic contract scenarios 及明確標示的 deployed engineering evidence 驗收；特定真實模型的營運資格與 production 服務指派另由 runtime evidence 決定。
 
 **Blocked by:** 08 — 雙市場歷史證據與回填資格路徑
 
@@ -16,7 +16,7 @@ Status: ready-for-agent
 - [x] 每個候選使用三個預先登錄 seeds、六個 market × horizon calibrators、版本化交易成本情境及 immutable ModelArtifact／EvaluationReport，artifact 可離線載入且無 latest lookup。
 - [x] 透過 `ModelLifecycle.execute` 的 deterministic engineering evidence 證明 BootstrapGatePolicy 只接受 logistic 相對 class-prior 至少一個 macro-F1 percentage point 改善，並要求所有絕對校準、經濟、穩定、涵蓋、重現、安全及營運 hard gates 通過；這項工程驗收不宣稱特定真實模型已通過。
 - [x] 透過公共 lifecycle／REST／UI seams 證明 ApprovalDecision 依不可變 `ModelApprovalPolicyVersion` 執行：`separated_duties` 要求 approver 與 TrainingIntent 發起／執行者分離；`owner_operated` 只允許政策指定 owner principal 自行核准並明記 `independent_review=false`。兩者皆綁定 exact artifact、evaluation、gate policy、approval policy、非空白理由及 expected assignment，且依期限／失效規則處理，不能覆寫 hard gate；不要求為 ticket 建立一筆真實模型核准事件。
-- [x] 透過公共 shadow seam 在單次 deterministic engineering run 使用五個不同且遞增的 eligible EOD 日期，證明兩市場 cold-load、schema、latency、probability、lineage、replay、停機 checkpoint 與 fail-closed 狀態轉移；工程 cycles 不進 production history，也不冒充五次實際 production shadow，研究治理介面可比較候選、baseline、calibration、support、approval-review mode 與 gate evidence。
+- [x] 透過公共 shadow seam 在隔離的單次 deterministic contract run 使用五個不同且遞增的 eligible EOD 日期，證明兩市場 cold-load、schema、latency、probability、lineage、replay 與 fail-closed 狀態轉移；工程 events 執行後丟棄、不進 production history，也不冒充五次實際 production shadow，研究治理介面可比較候選、baseline、calibration、support、approval-review mode 與 gate evidence。
 - [x] Logistic 未達改善、calibrator 樣本不足、任何 hard gate 或核准失敗時，正式 serving 保持 blocked 並保存不可變 GateDecision，不以 class-prior 自動冒充 production。
 - [x] 首個 production assignment 建立後，BootstrapGatePolicy 永久停用，後續候選不能以 bootstrap 規則繞過 incumbent comparison。
 
@@ -54,4 +54,4 @@ Status: ready-for-agent
 - Bootstrap v1 的 content-addressed hard-gate policy 另要求 `economics.turnover_post_cost_condition_passed >= 1`；該量測表示「換手增加超過 25% 時仍有更高成本後報酬」的條件式結果，缺漏、額外或失敗量測都不能通過 exact policy。Approval API、OpenAPI 與 immutable `ApprovalDecision` 對核准及拒絕一律要求至少一個非空白理由字元。
 - 驗證：Final12 review 的六個新增 public-seam cases 先為 `6 failed` 後 green，受影響 lifecycle／REST／OpenAPI tests `81 passed`；完整非 PostgreSQL suite `518 passed, 1 deselected`，PostgreSQL opt-in `1 passed, 518 deselected`；`mypy src tests`（107 source files）、`ruff check .`、`ruff format --check .`（223 files）、PEP 517 wheel build、Compose config、migration、DB role check 與 Ticket 09 deployed Compose acceptance 均通過。Wheel 255,252 bytes，SHA-256 為 `65A5BD798A6879ED4C3DA4BC073E9DF56D571AC3AB3BD8569A6AA16FC00E912C`。
 - 部署驗收：`docker compose -p stock-forecasting-ticket-09-review-final12 -f compose.yaml --profile ticket-09-acceptance run --build --rm ticket-09-acceptance` 輸出 `status=passed`，九個 deployed fail-closed checks 全為 `true`，包括使用實際 `stock` role 的 `lifecycle_ledger_append_only=true`；專用 containers／network／test volumes 與 PostgreSQL integration-test resources 已在驗收後移除。持久化 `stock-forecasting-ticket-09-operator` 以 qualified policy 保留原 volumes，未在此輪 review fix 中重建或刪除。
-- 需求裁切：ADR 0020 將 ticket 工程驗收與模型營運資格分離。AC 5 由完整 BootstrapGatePolicy pass／fail contracts、AC 6 由 owner-operated／separated-duties lifecycle＋REST＋UI contracts、AC 7 由五個固定遞增日期、replay、lineage、corruption 及 operator restart contracts 驗證；既有 deployed acceptance 明記 engineering-only 且正式 serving 仍 blocked。
+- 需求裁切：ADR 0020 將 ticket 工程驗收與模型營運資格分離。AC 5 由完整 BootstrapGatePolicy pass／fail contracts、AC 6 由 owner-operated／separated-duties lifecycle＋REST＋UI contracts、AC 7 由隔離 store 中五個固定遞增日期、replay、lineage 及 corruption contracts 驗證；這些正向 events 不匯出，既有 deployed acceptance 則明記 engineering-only 且正式 serving 仍 blocked。

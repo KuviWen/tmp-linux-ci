@@ -237,15 +237,15 @@ Gate 全通過後，用政策指定的同一 stable owner principal 建立 `owne
 
 其後在五個不同且遞增的 eligible EOD 日期完成兩市場 shadow。每日可以有排定停機；停機不算 cycle。重啟後從 committed checkpoint 補抓，但晚到資料的 `first_observed_at` 不得回填到停機前。任何同日 replay 都不能增加 cycle。
 
-### 10. 對帳並更新 AC
+### 10. 模型營運資格對帳（不修改 Ticket AC）
 
-逐項核對 immutable IDs、checksums、REST／UI projection 與 Ticket 09：
+若要讓特定真實模型取得營運資格，逐項核對 immutable IDs、checksums 與 REST／UI projection：
 
-- AC 5 只有真實 logistic improvement 及全部 formal hard gates 通過才可勾選。
-- AC 6 只有實際 owner decision 綁定 exact evidence 且 query/UI 顯示 `owner_operated`、`independent_review=false` 才可勾選。
-- AC 7 只有五個真實、不同、遞增 eligible EOD shadow cycles，且停機／checkpoint 行為有證據才可勾選。
+- Gate milestone：真實 logistic improvement 及全部 formal hard gates 通過。
+- Approval milestone：實際 owner decision 綁定 exact evidence，且 query/UI 顯示 `owner_operated`、`independent_review=false`。
+- Shadow milestone：五個真實、不同、遞增 eligible EOD shadow cycles，且停機／checkpoint 行為有證據。
 
-`SHA256SUMS` 只證明檔案未變；它不會把未核准的內容變成正式證據。所有條件通過前維持 serving blocked，且不要建立 production assignment。
+`SHA256SUMS` 只證明檔案未變；它不會把未核准的內容變成正式證據。這些 milestones 不回頭修改已完成的 Ticket 09 AC checkboxes；所有營運條件通過前維持 serving blocked，且不要建立 production assignment。
 
 ## Wizard
 
