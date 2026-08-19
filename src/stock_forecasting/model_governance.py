@@ -3492,6 +3492,7 @@ class ModelLifecycle:
             )
             valid = (
                 common_valid
+                and command.readiness.is_content_addressed()
                 and transition.event_kind == "PromotionEventRecorded"
                 and transition_payload.get("model_family_id") == command.model_family_id
                 and transition_payload.get("candidate_id") == command.candidate_id

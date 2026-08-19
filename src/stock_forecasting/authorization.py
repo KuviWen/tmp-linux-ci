@@ -33,6 +33,20 @@ AuthorizationAction = Literal[
     "production_forecast.publish",
     "production_notification.deliver",
 ]
+LOCAL_API_KEY_SCOPES: tuple[AuthorizationAction, ...] = (
+    "fixture_pipeline.execute",
+    "research_prediction.read",
+    "market_data.collect",
+    "price_research_eligibility.read",
+    "price_qualification.govern",
+    "source_credential.read",
+    "source_credential.manage",
+    "model_governance.read",
+    "model_governance.approve",
+    "production_forecast.publish",
+    "production_notification.deliver",
+)
+PRODUCTION_RESEARCH_CATALOG_DATASET_ID = "production-research-catalog"
 AuthorizationPurpose = Literal[
     "fixture_research",
     "price_research",
@@ -358,21 +372,7 @@ class LocalApiKeyIdentity:
                 or environment not in _LOCAL_KEY_ENVIRONMENTS
                 or not isinstance(scopes, list)
                 or not scopes
-                or not all(
-                    scope
-                    in {
-                        "fixture_pipeline.execute",
-                        "research_prediction.read",
-                        "market_data.collect",
-                        "price_research_eligibility.read",
-                        "price_qualification.govern",
-                        "source_credential.read",
-                        "source_credential.manage",
-                        "model_governance.read",
-                        "model_governance.approve",
-                    }
-                    for scope in scopes
-                )
+                or not all(scope in LOCAL_API_KEY_SCOPES for scope in scopes)
                 or not isinstance(data_protection_classes, list)
                 or not data_protection_classes
                 or not all(
@@ -1688,6 +1688,9 @@ def build_pending_rights_operator_authorization_policy(
             "source_credential.manage",
             "model_governance.read",
             "model_governance.approve",
+            "research_prediction.read",
+            "production_forecast.publish",
+            "production_notification.deliver",
         }
     )
     actions = supported_actions & context.scopes
@@ -1727,6 +1730,13 @@ def build_pending_rights_operator_authorization_policy(
         )
         & actions
     )
+    production_research_actions: frozenset[AuthorizationAction] = (
+        cast(
+            frozenset[AuthorizationAction],
+            frozenset({"research_prediction.read"}),
+        )
+        & actions
+    )
     resource_contracts: tuple[
         tuple[
             str,
@@ -1752,6 +1762,12 @@ def build_pending_rights_operator_authorization_policy(
             "model-governance-ledger",
             governance_actions,
             frozenset({"model_governance"}),
+            "internal",
+        ),
+        (
+            PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+            production_research_actions,
+            frozenset({"price_research"}),
             "internal",
         ),
     )

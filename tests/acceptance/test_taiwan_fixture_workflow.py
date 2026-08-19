@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 
 from stock_forecasting.application import build_test_application
+from stock_forecasting.authorization import PolicyDeniedOutcome
 from stock_forecasting.fixture_scenarios import FixtureScenario
 from stock_forecasting.identity import ListingIdentity
 from stock_forecasting.workflows.fixture_eod import FixtureEodCommand
@@ -433,9 +434,15 @@ def test_fixture_cannot_enter_formal_routes_and_denials_are_observable() -> None
             "target": target,
         }
 
+    production_query_trace_id = "trace-ticket-10-fixture-production-query-denied"
+    production_query = application.research_query.list_predictions(
+        execution_purpose="production",
+        trace_id=production_query_trace_id,
+    )
+    assert isinstance(production_query, PolicyDeniedOutcome)
     assert (
-        assert_success(application).research_query.list_predictions(execution_purpose="production")
-        == []
+        application.security_audit.list_events(trace_id=production_query_trace_id)[0]["reason_code"]
+        == "source_policy_unknown"
     )
     assert application.security_audit.list_events(trace_id=trace_id) == [
         {

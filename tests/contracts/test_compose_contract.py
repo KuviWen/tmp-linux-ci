@@ -566,6 +566,9 @@ def test_compose_declares_the_persistent_owner_operator_runtime() -> None:
         "source_credential.manage",
         "model_governance.read",
         "model_governance.approve",
+        "research_prediction.read",
+        "production_forecast.publish",
+        "production_notification.deliver",
     } <= set(owner_key["command"])
     assert "market_data.collect" not in owner_key["command"]
     assert owner_key["command"][owner_key["command"].index("--lifetime-hours") + 1] == "720"

@@ -171,6 +171,10 @@ def test_local_key_cli_initializes_ephemeral_secret_file_without_printing_creden
         "fixture_pipeline.execute",
         "--scope",
         "research_prediction.read",
+        "--scope",
+        "production_forecast.publish",
+        "--scope",
+        "production_notification.deliver",
         "--principal-classification",
         "individual_non_commercial",
         "--issued-at",
@@ -192,6 +196,11 @@ def test_local_key_cli_initializes_ephemeral_secret_file_without_printing_creden
     ]
     assert identity.credential.authorization_header() not in output
     assert identity.context.principal_classification == "individual_non_commercial"
+    assert {
+        "research_prediction.read",
+        "production_forecast.publish",
+        "production_notification.deliver",
+    }.issubset(identity.context.scopes)
 
 
 def test_local_key_cli_defaults_to_a_fresh_short_lived_key(

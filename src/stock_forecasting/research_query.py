@@ -5,6 +5,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from stock_forecasting.authorization import (
+    PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
     AuthorizationPolicy,
     OperationIntent,
     PolicyDeniedOutcome,
@@ -66,10 +67,11 @@ class ResearchQuery:
     ) -> tuple[tuple[str, ...], Literal["fixture_research", "price_research"]]:
         if execution_purpose == "production":
             return (
-                tuple(
-                    sorted(
+                (
+                    PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+                    *sorted(
                         {str(record["lineage"]["source_policy_manifest_id"]) for record in records}
-                    )
+                    ),
                 ),
                 "price_research",
             )
@@ -91,6 +93,15 @@ class ResearchQuery:
         expected_cutoff = information_cutoff.isoformat().replace("+00:00", "Z")
         resolved_trace_id = trace_id or f"trace-research-{uuid4()}"
         resolved_security_context = security_context or self._security_context
+        if execution_purpose == "production":
+            denial = self._authorize_dataset(
+                PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+                purpose="price_research",
+                trace_id=resolved_trace_id,
+                security_context=resolved_security_context,
+            )
+            if denial is not None:
+                return denial
         authorization_dataset_id = self._state_store.get_listing_authorization_dataset(
             listing_id=listing_id,
             information_cutoff=expected_cutoff,

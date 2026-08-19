@@ -1131,6 +1131,12 @@ services:
       - model_governance.read
       - --scope
       - model_governance.approve
+      - --scope
+      - research_prediction.read
+      - --scope
+      - production_forecast.publish
+      - --scope
+      - production_notification.deliver
       - --data-protection-class
       - internal
       - --data-protection-class

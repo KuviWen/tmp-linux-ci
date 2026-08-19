@@ -22,6 +22,7 @@ from stock_forecasting.acceptance import (
 )
 from stock_forecasting.acceptance_bundle import is_sha256_reference
 from stock_forecasting.authorization import (
+    LOCAL_API_KEY_SCOPES,
     LocalApiKeyIdentity,
     build_fixture_authorization_policy,
     build_historical_reconstruction_engineering_authorization_policy,
@@ -220,16 +221,7 @@ def _parser() -> argparse.ArgumentParser:
     local_key_init.add_argument(
         "--scope",
         action="append",
-        choices=[
-            "fixture_pipeline.execute",
-            "research_prediction.read",
-            "market_data.collect",
-            "price_research_eligibility.read",
-            "source_credential.read",
-            "source_credential.manage",
-            "model_governance.read",
-            "model_governance.approve",
-        ],
+        choices=LOCAL_API_KEY_SCOPES,
         required=True,
     )
     local_key_init.add_argument(

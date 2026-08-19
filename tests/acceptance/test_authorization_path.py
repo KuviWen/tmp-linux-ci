@@ -309,7 +309,7 @@ def test_empty_prediction_collection_is_denied_before_protected_state_lookup() -
     )
 
 
-def test_empty_production_collection_does_not_borrow_fixture_authorization() -> None:
+def test_empty_production_collection_is_authorized_before_returning_state() -> None:
     cutoff = datetime(2026, 8, 12, 22, 0, tzinfo=UTC)
     application = build_test_application(
         observed_at=cutoff,
@@ -322,8 +322,24 @@ def test_empty_production_collection_does_not_borrow_fixture_authorization() -> 
         trace_id=trace_id,
     )
 
-    assert outcome == []
-    assert application.security_audit.list_events(trace_id=trace_id) == []
+    assert isinstance(outcome, PolicyDeniedOutcome)
+    audit = application.security_audit.list_events(trace_id=trace_id)
+    assert len(audit) == 1
+    assert audit[0]["action"] == "research_prediction.read"
+    assert audit[0]["reason_code"] == "source_policy_unknown"
+
+    history_trace_id = "trace-ticket-10-empty-production-history"
+    history = application.research_query.list_prediction_history(
+        listing_id="missing-production-listing",
+        execution_purpose="production",
+        trace_id=history_trace_id,
+    )
+
+    assert isinstance(history, PolicyDeniedOutcome)
+    history_audit = application.security_audit.list_events(trace_id=history_trace_id)
+    assert len(history_audit) == 1
+    assert history_audit[0]["action"] == "research_prediction.read"
+    assert history_audit[0]["reason_code"] == "source_policy_unknown"
 
 
 def test_rest_and_ui_return_only_stable_denial_problem_while_audit_keeps_reason(

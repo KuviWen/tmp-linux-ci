@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from stock_forecasting.authorization import (
+    PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
     LocalApiKeyIdentity,
+    OperationIntent,
     build_fixture_authorization_policy,
 )
 from stock_forecasting.authorization_repository import (
@@ -385,6 +387,9 @@ def test_qualified_operator_authorization_is_bound_to_reviewed_rights_evidence(
             "source_credential.manage",
             "model_governance.read",
             "model_governance.approve",
+            "research_prediction.read",
+            "production_forecast.publish",
+            "production_notification.deliver",
         },
         issued_at=now,
         expires_at=now.replace(day=20),
@@ -539,6 +544,42 @@ def test_qualified_operator_authorization_is_bound_to_reviewed_rights_evidence(
         "finmind-free-api": ("Free", "api_token", False),
         "alpaca-market-data-basic": ("Basic", "api_key_pair", False),
     }
+    owner_policy = AuthorizationPolicyRepository(StateStore(database_url, create_schema=False)).get(
+        output["policy_set_id"], principal_id=owner.context.principal_id
+    )
+    for action in (
+        "research_prediction.read",
+        "production_forecast.publish",
+        "production_notification.deliver",
+    ):
+        decision = owner_policy.evaluate(
+            owner.context,
+            OperationIntent(
+                action=action,
+                dataset_id=f"sha256:{manifest_sha256}",
+                purpose="price_research",
+                environment="local",
+                resource_state="active",
+                evaluated_at=now,
+                trace_id=f"trace-qualified-{action}",
+                correlation_id=f"trace-qualified-{action}",
+            ),
+        )
+        assert decision.allowed is True
+    catalog_decision = owner_policy.evaluate(
+        owner.context,
+        OperationIntent(
+            action="research_prediction.read",
+            dataset_id=PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+            purpose="price_research",
+            environment="local",
+            resource_state="active",
+            evaluated_at=now,
+            trace_id="trace-qualified-production-catalog",
+            correlation_id="trace-qualified-production-catalog",
+        ),
+    )
+    assert catalog_decision.allowed is True
 
 
 def test_qualified_operator_authorization_rejects_changed_response_evidence(

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from stock_forecasting.adapters.rest import create_web_app
 from stock_forecasting.application import build_test_application
 from stock_forecasting.authorization import (
+    PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
     ActionGrant,
     AuthorizationAction,
     AuthorizationPolicy,
@@ -19,6 +20,7 @@ from stock_forecasting.authorization import (
     SourceEntitlement,
     SourcePolicyVersion,
 )
+from stock_forecasting.content_address import content_id
 from stock_forecasting.model_governance import (
     InMemoryAssignmentPinStore,
     InMemoryCandidateArtifactRepository,
@@ -31,6 +33,7 @@ from stock_forecasting.outbox import EventCompatibility, NoRelayFault, SystemRel
 from stock_forecasting.platform.state_store import ImmutableStateConflict, StateStore
 from stock_forecasting.production_eod import (
     ForecastExecution,
+    ForecastPublication,
     ForecastRunCommand,
     InMemoryProductionPublicationStore,
     ProductionDataSelectionRequest,
@@ -399,6 +402,76 @@ def test_production_eod_pins_one_selection_and_assignment_for_ten_listings(
             trace_id="trace-invalid-lineage",
             idempotency_key="invalid-lineage",
         )
+
+    def assert_cross_artifact_lineage_rejected(corrupted: ForecastPublication, key: str) -> None:
+        with pytest.raises(
+            ValueError,
+            match="production_(publication|prediction)_lineage_invalid",
+        ):
+            InMemoryProductionPublicationStore().publish(
+                corrupted,
+                trace_id=f"trace-{key}",
+                idempotency_key=key,
+            )
+
+    assert_cross_artifact_lineage_rejected(
+        replace(publication, information_cutoff=information_cutoff + timedelta(minutes=1)),
+        "cutoff-lineage",
+    )
+    changed_snapshot_rows = (
+        (publication.feature_snapshot_rows[0][0], (99.0, 99.0)),
+        *publication.feature_snapshot_rows[1:],
+    )
+    changed_snapshot_id = content_id(
+        "production_feature_snapshot",
+        {
+            "data_selection_id": publication.data_selection_id,
+            "rows": [
+                {"listing_id": listing_id, "values": values}
+                for listing_id, values in changed_snapshot_rows
+            ],
+        },
+    )
+    assert_cross_artifact_lineage_rejected(
+        replace(
+            publication,
+            feature_snapshot_id=changed_snapshot_id,
+            feature_snapshot_rows=changed_snapshot_rows,
+            predictions=tuple(
+                replace(item, feature_snapshot_id=changed_snapshot_id)
+                for item in publication.predictions
+            ),
+        ),
+        "snapshot-lineage",
+    )
+    assert_cross_artifact_lineage_rejected(
+        replace(
+            publication,
+            predictions=(
+                replace(
+                    publication.predictions[0],
+                    model_artifact_id="sha256:other-artifact",
+                    calibrator_ids=("sha256:other-calibrator",),
+                ),
+                *publication.predictions[1:],
+            ),
+        ),
+        "model-lineage",
+    )
+    assert_cross_artifact_lineage_rejected(
+        replace(publication, forecast_batch_id="not-the-business-batch-id"),
+        "batch-identity",
+    )
+    assert_cross_artifact_lineage_rejected(
+        replace(
+            publication,
+            predictions=(
+                replace(publication.predictions[0], prediction_id="not-the-prediction-id"),
+                *publication.predictions[1:],
+            ),
+        ),
+        "prediction-identity",
+    )
 
     with pytest.raises(ValueError, match="immutable_production_batch_conflict"):
         execution.run(
@@ -1046,29 +1119,43 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
                 valid_to=cutoff + timedelta(hours=1),
             ),
         ),
-        source_policies=(
+        source_policies=tuple(
             SourcePolicyVersion(
-                version_id="formal-research-source-policy-v1",
-                dataset_id=artifact.manifest_ids[1],
+                version_id=f"formal-research-source-policy-{index}",
+                dataset_id=dataset_id,
                 allowed_actions=action,
                 purposes=purposes,
                 environments=environments,
                 data_protection_class="internal",
                 resource_states=frozenset({"active"}),
-            ),
+            )
+            for index, dataset_id in enumerate(
+                (
+                    PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+                    artifact.manifest_ids[1],
+                ),
+                start=1,
+            )
         ),
-        source_entitlements=(
+        source_entitlements=tuple(
             SourceEntitlement(
-                version_id="formal-research-entitlement-v1",
+                version_id=f"formal-research-entitlement-{index}",
                 principal_id=identity.context.principal_id,
-                dataset_id=artifact.manifest_ids[1],
+                dataset_id=dataset_id,
                 status="active",
                 allowed_actions=action,
                 purposes=purposes,
                 environments=environments,
                 valid_from=cutoff - timedelta(minutes=1),
                 valid_to=cutoff + timedelta(hours=1),
-            ),
+            )
+            for index, dataset_id in enumerate(
+                (
+                    PRODUCTION_RESEARCH_CATALOG_DATASET_ID,
+                    artifact.manifest_ids[1],
+                ),
+                start=1,
+            )
         ),
     )
     query = ResearchQuery(
@@ -1136,7 +1223,13 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
     assert detail.json()["calibration"]["model_artifact_id"] == artifact.artifact_id
     assert detail.json()["calibration"]["calibrator_ids"] == list(artifact.calibrator_ids)
     assert detail.json()["support"]["price_volume"] == "full"
-    assert detail.json()["allowed_evidence"] == []
+    assert detail.json()["allowed_evidence"] == [
+        {
+            "dataset_version_id": listings[0].dataset_version_id,
+            "evidence_level": "platform_observed",
+            "source_policy_manifest_id": selection.source_policy_manifest_id,
+        }
+    ]
     assert page.status_code == 200
     assert "正式預測比較矩陣" in page.text
     assert "正式資訊截止點" in page.text
@@ -1150,6 +1243,8 @@ def test_sql_publication_atomically_exposes_core_research_and_operations_state()
     assert artifact.calibrator_ids[0] in detail_page.text
     assert "資料支援" in detail_page.text
     assert "政策允許證據" in detail_page.text
+    assert listings[0].dataset_version_id in detail_page.text
+    assert "platform_observed" in detail_page.text
     assert "預測歷史" in detail_page.text
     assert assignment.assignment_id in detail_page.text
     assert "fixture" not in detail_page.text.lower()

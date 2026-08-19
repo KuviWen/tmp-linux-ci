@@ -223,6 +223,54 @@ def build_qualified_operator_authorization_policy(
                         allowed_uses=REQUIRED_SOURCE_USES,
                     )
                 )
+    production_actions: frozenset[AuthorizationAction] = frozenset(
+        action
+        for action in (
+            "research_prediction.read",
+            "production_forecast.publish",
+            "production_notification.deliver",
+        )
+        if action in context.scopes
+    )
+    if production_actions:
+        production_payload: dict[str, object] = {
+            "principal_id": context.principal_id,
+            "dataset_id": source_basis_id,
+            "allowed_actions": sorted(production_actions),
+            "allowed_uses": sorted(REQUIRED_SOURCE_USES),
+            "valid_from": context.issued_at.isoformat(),
+            "valid_to": context.expires_at.isoformat(),
+        }
+        policies.append(
+            SourcePolicyVersion(
+                version_id=content_id("formal-production-source-policy/v1", production_payload),
+                dataset_id=source_basis_id,
+                allowed_actions=production_actions,
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({context.environment}),
+                data_protection_class="licensed",
+                resource_states=frozenset({"active"}),
+                valid_from=context.issued_at,
+                valid_to=context.expires_at,
+                allowed_uses=REQUIRED_SOURCE_USES,
+            )
+        )
+        entitlements.append(
+            SourceEntitlement(
+                version_id=content_id(
+                    "formal-production-source-entitlement/v1", production_payload
+                ),
+                principal_id=context.principal_id,
+                dataset_id=source_basis_id,
+                status="active",
+                allowed_actions=production_actions,
+                purposes=frozenset({"price_research"}),
+                environments=frozenset({context.environment}),
+                valid_from=context.issued_at,
+                valid_to=context.expires_at,
+                allowed_uses=REQUIRED_SOURCE_USES,
+            )
+        )
     return AuthorizationPolicy(
         action_grants=pending.action_grants,
         source_policies=(*pending.source_policies, *policies),

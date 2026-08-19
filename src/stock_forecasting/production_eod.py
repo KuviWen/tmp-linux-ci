@@ -224,6 +224,7 @@ class ForecastPublication:
     forecast_batch_id: str
     status: Literal["completed"]
     execution_purpose: Literal["production"]
+    model_family_id: str
     information_cutoff: datetime
     data_selection: ResolvedProductionDataSelection
     data_selection_id: str
@@ -352,6 +353,22 @@ class InMemoryProductionPublicationStore:
 
     @staticmethod
     def _validate(publication: ForecastPublication) -> None:
+        expected_batch_id = _stable_id(
+            "production-forecast-batch",
+            (
+                f"{publication.data_selection.market}:"
+                f"{publication.data_selection.information_cutoff.isoformat()}:"
+                f"{publication.data_selection.stock_pool_version_id}:"
+                f"{publication.model_family_id}"
+            ),
+        )
+        if (
+            publication.information_cutoff != publication.data_selection.information_cutoff
+            or publication.forecast_batch_id != expected_batch_id
+            or publication.outbox_event_id
+            != _stable_id("production-outbox", publication.forecast_batch_id)
+        ):
+            raise ValueError("production_publication_lineage_invalid")
         if (
             content_id("production_data_selection", publication.data_selection.to_payload())
             != publication.data_selection_id
@@ -386,6 +403,20 @@ class InMemoryProductionPublicationStore:
         selection_by_listing = {
             listing.listing_id: listing for listing in publication.data_selection.listings
         }
+        included_listing_ids = {
+            item.listing_id for item in publication.predictions if item.status != "unavailable"
+        }
+        expected_snapshot_rows = tuple(
+            (listing.listing_id, listing.feature_values)
+            for listing in publication.data_selection.listings
+            if listing.listing_id in included_listing_ids
+        )
+        if (
+            publication.feature_snapshot_rows != expected_snapshot_rows
+            or len({item.model_artifact_id for item in publication.predictions}) != 1
+            or len({item.calibrator_ids for item in publication.predictions}) != 1
+        ):
+            raise ValueError("production_publication_lineage_invalid")
         for item in publication.predictions:
             selected = selection_by_listing.get(item.listing_id)
             selected_targets = dict(selected.target_session_ids) if selected is not None else {}
@@ -404,6 +435,11 @@ class InMemoryProductionPublicationStore:
                 or item.target_session_id != selected_targets.get(item.horizon_sessions)
                 or item.source_policy_manifest_id
                 != publication.data_selection.source_policy_manifest_id
+                or item.prediction_id
+                != _stable_id(
+                    "production-prediction",
+                    f"{publication.forecast_batch_id}:{item.listing_id}:{item.horizon_sessions}",
+                )
                 or (item.status != "unavailable" and item.status != selected.support_status)
             ):
                 raise ValueError("production_prediction_lineage_invalid")
@@ -525,6 +561,7 @@ class SqlAlchemyProductionPublicationStore:
             "forecast_batch_id": publication.forecast_batch_id,
             "status": publication.status,
             "execution_purpose": publication.execution_purpose,
+            "model_family_id": publication.model_family_id,
             "information_cutoff": publication.information_cutoff.isoformat(),
             "data_selection": publication.data_selection.to_payload(),
             "data_selection_id": publication.data_selection_id,
@@ -651,6 +688,7 @@ class SqlAlchemyProductionPublicationStore:
                 forecast_batch_id=str(payload["forecast_batch_id"]),
                 status="completed",
                 execution_purpose="production",
+                model_family_id=str(payload["model_family_id"]),
                 information_cutoff=datetime.fromisoformat(str(payload["information_cutoff"])),
                 data_selection=selection,
                 data_selection_id=str(payload["data_selection_id"]),
@@ -748,6 +786,9 @@ class SqlAlchemyProductionPublicationStore:
         listing_predictions = [item for item in predictions if item["listing_id"] == listing_id]
         first = listing_predictions[0]
         lineage = cast(dict[str, Any], first["lineage"])
+        selected = next(
+            item for item in publication.data_selection.listings if item.listing_id == listing_id
+        )
         formal_cutoff = publication.information_cutoff.isoformat().replace("+00:00", "Z")
         return {
             "record_id": _stable_id(
@@ -771,7 +812,15 @@ class SqlAlchemyProductionPublicationStore:
             "lineage": lineage,
             "calibration": first["calibration"],
             "support": {"price_volume": first["data_support"]["price_volume"]},
-            "allowed_evidence": [],
+            "allowed_evidence": [
+                {
+                    "dataset_version_id": selected.dataset_version_id,
+                    "evidence_level": selected.evidence_level,
+                    "source_policy_manifest_id": (
+                        publication.data_selection.source_policy_manifest_id
+                    ),
+                }
+            ],
         }
 
 
@@ -950,6 +999,7 @@ class ForecastExecution:
             forecast_batch_id=forecast_batch_id,
             status="completed",
             execution_purpose="production",
+            model_family_id=command.model_family_id,
             information_cutoff=command.information_cutoff,
             data_selection=selection,
             data_selection_id=selection.data_selection_id,

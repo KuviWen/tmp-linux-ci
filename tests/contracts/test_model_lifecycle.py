@@ -2006,6 +2006,10 @@ def test_completed_shadow_lineage_promotes_the_next_unstarted_batch_atomically()
     )
     promoted = lifecycle.execute(command)
     replayed = lifecycle.execute(command)
+    changed_readiness = replace(
+        command,
+        readiness=replace(command.readiness, runtime_id="runtime-changed-after-commit"),
+    )
 
     assert promoted.status == "promoted"
     assert promoted.serving_assignment is not None
@@ -2019,6 +2023,9 @@ def test_completed_shadow_lineage_promotes_the_next_unstarted_batch_atomically()
         promoted.serving_assignment.assignment_id,
     )
     assert replayed == promoted
+    assert len(store.events("family-shadow")) == 10
+    with pytest.raises(LifecycleConflict, match="command_id_payload_conflict"):
+        lifecycle.execute(changed_readiness)
     assert len(store.events("family-shadow")) == 10
 
 
